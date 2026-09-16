@@ -734,6 +734,15 @@ function handleServerEvent(data) {
         window.open(data.url, "_blank");
       }
       break;
+
+    case "PROACTIVE_INTERJECTION":
+      scene.triggerBurst();
+      showToast(`⚠️ [WATCHDOG ${data.category ? data.category.toUpperCase() : 'ALERT'}]: ${data.phrase || ''}`, 5000);
+      addTerminalLine("jarvis", `[DIAGNOSTIC] ${data.phrase || ''}`, true);
+      if (terminalStatusEl) {
+        terminalStatusEl.textContent = `WATCHDOG // ${data.category ? data.category.toUpperCase() : 'ALERT'}`;
+      }
+      break;
   }
 }
 

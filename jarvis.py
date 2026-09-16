@@ -77,6 +77,11 @@ except (ImportError, OSError, Exception):
     SoundEffectsEngine = None
 
 try:
+    from watchdog import ProactiveWatchdogDaemon
+except (ImportError, OSError, Exception):
+    ProactiveWatchdogDaemon = None
+
+try:
     import sounddevice as sd
 except (ImportError, OSError):
     sd = None
@@ -2795,6 +2800,9 @@ class VoiceEngine:
         if not t:
             t = transcript.lower().strip()
 
+        if _watchdog_daemon:
+            _watchdog_daemon.notify_voice_activity()
+
         # Quit phrases
         if any(q in t for q in ["goodbye jarvis", "end voice mode", "stop listening"]):
             log.info("Voice: shutdown requested")
@@ -2842,6 +2850,43 @@ class VoiceEngine:
                 _sound_engine.play("wake")
             broadcast_ui_event({"type": "SFX_MUTE", "muted": False})
             self.speak("Sound effects online, sir.")
+            self.bus.set_state("idle")
+            return
+
+        # ── Watchdog & Proactive Telemetry Controls ──
+        if any(q in t for q in [
+            "watchdog status", "system diagnostic", "system diagnostics", "run diagnostic",
+            "run diagnostics", "system health", "hardware status", "hardware diagnostic"
+        ]):
+            if _watchdog_daemon:
+                diag = _watchdog_daemon.get_diagnostics_report()
+                if _sound_engine:
+                    _sound_engine.play("thinking")
+                self.speak(diag)
+            else:
+                self.speak("Watchdog diagnostic daemon is offline, sir.")
+            self.bus.set_state("idle")
+            return
+
+        if any(q in t for q in [
+            "mute watchdog", "silence watchdog", "silence proactive alerts",
+            "disable proactive alerts", "mute proactive alerts", "disable watchdog"
+        ]):
+            if _watchdog_daemon:
+                _watchdog_daemon.mute()
+            self.speak("Proactive watchdog alerts silenced, sir. Telemetry will remain visual on the HUD.")
+            self.bus.set_state("idle")
+            return
+
+        if any(q in t for q in [
+            "unmute watchdog", "enable watchdog", "enable proactive alerts",
+            "unmute proactive alerts", "watchdog online"
+        ]):
+            if _watchdog_daemon:
+                _watchdog_daemon.unmute()
+                if _sound_engine:
+                    _sound_engine.play("wake")
+            self.speak("Proactive watchdog alerts enabled, sir.")
             self.bus.set_state("idle")
             return
 
@@ -3246,6 +3291,7 @@ _memory_manager: MemoryManager | None = None
 _signal_bus: SignalBus | None = None
 _voice_engine: VoiceEngine | None = None
 _sound_engine: SoundEffectsEngine | None = None
+_watchdog_daemon: ProactiveWatchdogDaemon | None = None
 _tts_playing = threading.Event()  # set while TTS audio is playing — suppresses clap detection
 
 
@@ -4316,6 +4362,19 @@ def main() -> int:
     )
     _biometric_sentinel.start()
 
+    # 9. Start Proactive Watchdog Daemon
+    global _watchdog_daemon
+    if ProactiveWatchdogDaemon is not None:
+        _watchdog_daemon = ProactiveWatchdogDaemon(
+            signal_bus=_signal_bus,
+            voice_engine=_voice_engine,
+            sound_engine=_sound_engine,
+            telegram_bridge=_telegram_bridge,
+            broadcast_fn=broadcast_ui_event,
+            tts_checker=lambda: _tts_playing.is_set(),
+        )
+        _watchdog_daemon.start()
+
     # Log boot status
     log.info("━━━ All subsystems online ━━━")
     log.info("  Orb HUD:       http://localhost:%d", ORB_HTTP_PORT)
@@ -4325,6 +4384,7 @@ def main() -> int:
     log.info("  Signal Bus:    %s", state_dir)
     log.info("  Voice PTT Key: %s", JARVIS_CFG.get("ptt_key", "F4"))
     log.info("  Biometrics:    Active (Admin: %s)", _biometric_sentinel.admin_name)
+    log.info("  Watchdog:      Active (Proactive Diagnostics)")
     _memory_manager.log_event("All subsystems online")
 
     log.info(
