@@ -70,7 +70,31 @@ if _venv_py.exists() and sys.executable != str(_venv_py) and not os.environ.get(
 
 from dotenv import load_dotenv
 import numpy as np
-import sounddevice as sd
+
+try:
+    import sounddevice as sd
+except (ImportError, OSError):
+    sd = None
+
+class _DummyPortAudioError(Exception):
+    pass
+
+class _DummySD:
+    PortAudioError = _DummyPortAudioError
+    @staticmethod
+    def query_devices(*args, **kwargs):
+        return []
+    @staticmethod
+    def play(*args, **kwargs):
+        pass
+    @staticmethod
+    def wait(*args, **kwargs):
+        pass
+    class default:
+        device = [-1, -1]
+
+if sd is None or not hasattr(sd, "PortAudioError"):
+    sd = _DummySD()
 
 try:
     from pynput import keyboard as pynput_keyboard
@@ -2090,7 +2114,12 @@ def _probe_input_max_rms(device: int, blocksize: int) -> float | None:
 
 
 def _choose_input_device(blocksize: int) -> int:
-    log.info("Audio devices:\n%s", sd.query_devices())
+    if isinstance(sd, _DummySD):
+        return -1
+    try:
+        log.info("Audio devices:\n%s", sd.query_devices())
+    except Exception:
+        return -1
 
     override = (os.environ.get("JARVIS_INPUT_DEVICE") or "").strip()
     if override:
@@ -3121,6 +3150,25 @@ def main() -> int:
         log.info("Keyboard trigger enabled: fast double-tap SPACE or ENTER to activate.")
         _start_global_keyboard_listener()
         _start_terminal_key_listener()
+
+    has_mic = False
+    if not isinstance(sd, _DummySD):
+        try:
+            devs = sd.query_devices()
+            if any(d.get("max_input_channels", 0) > 0 for d in devs):
+                has_mic = True
+        except Exception:
+            has_mic = False
+
+    if not has_mic:
+        log.info("🌐 Headless Cloud / Server mode active (no local mic/audio hardware detected).")
+        log.info("⚡ JARVIS Online Engine 24/7 active! Telegram Bot, WebRTC Call Portal, MCP, and Autonomous Engine running.")
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            log.info("Shutting down headless JARVIS gracefully...")
+            return 0
 
     input_idx = _choose_input_device(blocksize)
     audio_broadcast_count = 0
