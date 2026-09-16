@@ -592,6 +592,15 @@ function handleVoiceCommand(rawTranscript) {
   scene.triggerBurst();
   addTerminalLine("user", transcript);
 
+  // Wake Up Jarvis voice trigger check (instant local HUD feedback)
+  if (transcript.includes("wake up") || transcript.includes("wakeup")) {
+    soundscape.play("wake");
+    scene.triggerBurst();
+    sendWsMessage({ type: "VOICE_COMMAND", transcript: "wake up jarvis" });
+    showToast("J.A.R.V.I.S. Online", 2500);
+    return;
+  }
+
   // Local commands (handled in browser)
   if (transcript.includes("reset view") || transcript.includes("reset")) {
     scene.resetView();

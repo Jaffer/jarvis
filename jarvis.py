@@ -2704,16 +2704,18 @@ class VoiceEngine:
         self.brain = brain
         self.learning_engine = learning_engine
         self._ptt_key = JARVIS_CFG.get("ptt_key", "f4")
-        self._mic_mode = JARVIS_CFG.get("mic_mode", "ptt")
+        self._mic_mode = JARVIS_CFG.get("mic_mode", "handsfree")
         self._stt_model = None
         self._stt_model_name = JARVIS_CFG.get("voice", {}).get("stt_model", "base.en")
         self._tts_queue: queue.Queue = queue.Queue()
         self._stop_speaking = threading.Event()
         self._active = False
+        self._input_device = None
 
-    def start(self):
+    def start(self, input_device: int | None = None):
         """Start voice engine threads."""
         self._active = True
+        self._input_device = input_device
         # Start TTS playback thread
         threading.Thread(target=self._tts_loop, daemon=True, name="voice-tts").start()
         # Start PTT listener thread
@@ -2721,7 +2723,7 @@ class VoiceEngine:
         # Start Hands-Free loop if enabled
         if self._mic_mode in ("handsfree", "always"):
             threading.Thread(target=self._handsfree_loop, daemon=True, name="voice-handsfree").start()
-        log.info("Voice Engine active (PTT key: %s, mode: %s)", self._ptt_key, self._mic_mode)
+        log.info("Voice Engine active (PTT key: %s, mode: %s, device: %s)", self._ptt_key, self._mic_mode, input_device)
 
     def _load_stt(self):
         """Lazy-load faster-whisper model."""
@@ -2799,7 +2801,7 @@ class VoiceEngine:
             log.warning("PTT listener failed: %s", e)
 
     def _handsfree_loop(self):
-        """Continuous full-duplex hands-free voice loop with adaptive acoustic barge-in detection."""
+        """Continuous full-duplex hands-free voice loop with adaptive acoustic calibration and barge-in detection."""
         log.info("Voice Engine: Full-duplex hands-free listening loop active.")
         self._load_stt()
         if self._stt_model is None:
@@ -2808,70 +2810,109 @@ class VoiceEngine:
 
         sample_rate = 16000
         block_len = 512
-        silence_limit_s = 1.35
-        baseline_speech_threshold = 0.045
+        silence_limit_s = 1.1
+        input_dev = getattr(self, "_input_device", None)
+        log.info("Voice Engine: Audio capture initialized on device %s (sample_rate=%d, block_len=%d)", input_dev, sample_rate, block_len)
 
-        # Adaptive speaker energy floor tracking variables
+        # Adaptive acoustic tracking variables
         speaker_energy_floor = 0.02
-        alpha_speaker = 0.08  # EMA update rate during active playback
+        alpha_speaker = 0.08  # EMA update rate during active TTS playback
+        alpha_ambient = 0.03  # EMA update rate for background room drift
         consecutive_speech_blocks = 0
-        min_consecutive_to_trigger = 2  # 2 blocks (~64ms) confirmation prevents false acoustic clicks
+        min_consecutive_to_trigger = 2  # 2 blocks (~64ms) prevents false acoustic clicks
+        max_utterance_s = 4.5  # Max duration before force-dispatching buffer (prevents infinite lock)
+        audio_broadcast_count = 0
 
         while self._active:
             try:
-                audio_buffer = []
-                in_speech = False
-                silence_start = None
-                recent_pre_speech_blocks = []  # Ring buffer of recent frames to preserve the first phoneme
+                with sd.InputStream(
+                    device=input_dev,
+                    samplerate=sample_rate,
+                    channels=1,
+                    dtype="float32",
+                    blocksize=block_len,
+                ) as stream:
+                    # Dynamic acoustic noise floor calibration over first 30 frames (~0.96s)
+                    cal_samples = []
+                    for _ in range(30):
+                        if not self._active:
+                            return
+                        try:
+                            d, _ = stream.read(block_len)
+                            cal_samples.append(float(np.sqrt(np.mean(d ** 2))))
+                        except Exception:
+                            pass
+                    ambient_floor = max(0.03, float(np.median(cal_samples))) if cal_samples else 0.05
+                    log.info("🎙️ Acoustic calibration complete: ambient floor = %.4f (threshold = %.4f)", ambient_floor, max(0.07, ambient_floor * 1.70))
 
-                with sd.InputStream(samplerate=sample_rate, channels=1, dtype="float32", blocksize=block_len) as stream:
                     while self._active:
-                        data, _ = stream.read(block_len)
-                        rms = float(np.sqrt(np.mean(data ** 2)))
-                        now = time.monotonic()
-                        tts_active = _tts_playing.is_set()
+                        audio_buffer = []
+                        in_speech = False
+                        silence_start = None
+                        speech_start_time = None
+                        recent_pre_speech_blocks = []  # Ring buffer to preserve initial phoneme
 
-                        # Adaptive Playback Energy Floor Tracker
-                        if tts_active:
-                            speaker_energy_floor = (1.0 - alpha_speaker) * speaker_energy_floor + alpha_speaker * rms
-                            current_threshold = max(0.12, speaker_energy_floor * 1.85)
-                        else:
-                            speaker_energy_floor = max(0.02, speaker_energy_floor * 0.95)
-                            current_threshold = baseline_speech_threshold
+                        while self._active:
+                            data, _ = stream.read(block_len)
+                            rms = float(np.sqrt(np.mean(data ** 2)))
+                            now = time.monotonic()
+                            tts_active = _tts_playing.is_set()
 
-                        if rms > current_threshold:
-                            consecutive_speech_blocks += 1
-                            if not in_speech:
-                                if consecutive_speech_blocks >= min_consecutive_to_trigger:
-                                    in_speech = True
-                                    if tts_active:
-                                        self.interrupt("user_barge_in")
-                                    else:
-                                        self._stop_speaking.clear()
-                                    self.bus.set_state("listening")
-                                    # Include recent pre-speech frames to avoid clipping first syllable
-                                    audio_buffer = list(recent_pre_speech_blocks)
+                            # Stream HUD audio level directly from this single active stream
+                            audio_broadcast_count += 1
+                            if audio_broadcast_count % 3 == 0:
+                                broadcast_ui_event({"type": "AUDIO_LEVEL", "rms": float(rms)})
+
+                            # Dynamic acoustic threshold calculation
+                            if tts_active:
+                                speaker_energy_floor = (1.0 - alpha_speaker) * speaker_energy_floor + alpha_speaker * rms
+                                current_threshold = max(0.14, speaker_energy_floor * 1.85)
+                            else:
+                                if not in_speech and rms < ambient_floor * 1.4:
+                                    ambient_floor = (1.0 - alpha_ambient) * ambient_floor + alpha_ambient * rms
+                                speaker_energy_floor = max(0.02, speaker_energy_floor * 0.95)
+                                current_threshold = max(0.07, ambient_floor * 1.70)
+
+                            if rms > current_threshold:
+                                consecutive_speech_blocks += 1
+                                if not in_speech:
+                                    if consecutive_speech_blocks >= min_consecutive_to_trigger:
+                                        in_speech = True
+                                        speech_start_time = now
+                                        if tts_active:
+                                            self.interrupt("user_barge_in")
+                                        else:
+                                            self._stop_speaking.clear()
+                                        self.bus.set_state("listening")
+                                        audio_buffer = list(recent_pre_speech_blocks)
+                                        audio_buffer.append((data * 32767.0).astype(np.int16))
+                                else:
+                                    silence_start = None
                                     audio_buffer.append((data * 32767.0).astype(np.int16))
+                                    if speech_start_time and (now - speech_start_time >= max_utterance_s):
+                                        log.debug("Utterance reached max length (%.1fs); dispatching buffer.", max_utterance_s)
+                                        in_speech = False
+                                        break
                             else:
-                                silence_start = None
-                                audio_buffer.append((data * 32767.0).astype(np.int16))
-                        else:
-                            consecutive_speech_blocks = 0
-                            if in_speech:
-                                audio_buffer.append((data * 32767.0).astype(np.int16))
-                                if silence_start is None:
-                                    silence_start = now
-                                elif now - silence_start >= silence_limit_s:
-                                    in_speech = False
-                                    break
-                            else:
-                                # Maintain 3-frame (~96ms) rolling buffer
-                                recent_pre_speech_blocks.append((data * 32767.0).astype(np.int16))
-                                if len(recent_pre_speech_blocks) > 3:
-                                    recent_pre_speech_blocks.pop(0)
+                                consecutive_speech_blocks = 0
+                                if in_speech:
+                                    audio_buffer.append((data * 32767.0).astype(np.int16))
+                                    if silence_start is None:
+                                        silence_start = now
+                                    elif now - silence_start >= silence_limit_s:
+                                        in_speech = False
+                                        break
+                                    elif speech_start_time and (now - speech_start_time >= max_utterance_s):
+                                        in_speech = False
+                                        break
+                                else:
+                                    recent_pre_speech_blocks.append((data * 32767.0).astype(np.int16))
+                                    if len(recent_pre_speech_blocks) > 4:
+                                        recent_pre_speech_blocks.pop(0)
 
-                if audio_buffer and self._active:
-                    self._process_recording(audio_buffer)
+                        if audio_buffer and self._active:
+                            self._process_recording(audio_buffer)
+
             except Exception as e:
                 log.debug("Handsfree loop stream notice: %s", e)
                 time.sleep(1.0)
@@ -2919,7 +2960,11 @@ class VoiceEngine:
             transcript = " ".join(seg.text for seg in segments).strip()
 
             # ── 0. Wake Phrase Check (before hallucination filter) ──
-            wake_match = re.search(r"\b(wake\s*up|wakeup)[,\s]+jarvis\b", transcript, re.IGNORECASE)
+            wake_pattern = re.compile(
+                r"\b(?:(wake\s*up|wakeup)(?:[,\s]+(?:please\s+)?jarvis)?|jarvis[,\s]+(?:please\s+)?(wake\s*up|wakeup))\b",
+                re.IGNORECASE,
+            )
+            wake_match = wake_pattern.search(transcript)
             if wake_match:
                 log.info("🎙️ Voice wake phrase detected in recording: %r", transcript)
                 if not trigger_welcome_sequence("Voice: Wake up Jarvis"):
@@ -2974,7 +3019,11 @@ class VoiceEngine:
             return
 
         # Wake phrase check from WebSocket or direct route
-        wake_match = re.search(r"\b(wake\s*up|wakeup)[,\s]+jarvis\b", transcript, re.IGNORECASE)
+        wake_pattern = re.compile(
+            r"\b(?:(wake\s*up|wakeup)(?:[,\s]+(?:please\s+)?jarvis)?|jarvis[,\s]+(?:please\s+)?(wake\s*up|wakeup))\b",
+            re.IGNORECASE,
+        )
+        wake_match = wake_pattern.search(transcript)
         if wake_match:
             log.info("🎙️ Voice wake phrase detected (router): %r", transcript)
             if not trigger_welcome_sequence("Voice: Wake up Jarvis"):
@@ -4664,9 +4713,21 @@ def main() -> int:
     # 6. Start System Telemetry broadcaster
     _start_telemetry_broadcaster(2.5)
 
-    # 7. Start Voice Engine with Neural Brain & Learning Engine
+    # Detect audio capture hardware upfront
+    has_mic = False
+    input_idx = None
+    if not isinstance(sd, _DummySD):
+        try:
+            devs = sd.query_devices()
+            if any(d.get("max_input_channels", 0) > 0 for d in devs):
+                has_mic = True
+                input_idx = _choose_input_device(blocksize)
+        except Exception:
+            has_mic = False
+
+    # 7. Start Voice Engine with Neural Brain & Learning Engine (binding validated input mic)
     _voice_engine = VoiceEngine(_signal_bus, _memory_manager, _neural_brain, _learning_engine)
-    _voice_engine.start()
+    _voice_engine.start(input_device=input_idx)
 
     # 8. Start Biometric Sentinel & Anti-Spoofing Daemon
     global _biometric_sentinel
@@ -4740,51 +4801,13 @@ def main() -> int:
         _start_global_keyboard_listener()
         _start_terminal_key_listener()
 
-    has_mic = False
-    if not isinstance(sd, _DummySD):
-        try:
-            devs = sd.query_devices()
-            if any(d.get("max_input_channels", 0) > 0 for d in devs):
-                has_mic = True
-        except Exception:
-            has_mic = False
-
     if not has_mic:
         log.info("🌐 Headless Cloud / Server mode active (no local mic/audio hardware detected).")
         log.info("⚡ JARVIS Online Engine 24/7 active! Telegram Bot, WebRTC Call Portal, MCP, and Autonomous Engine running.")
-        try:
-            while True:
-                time.sleep(3600)
-        except KeyboardInterrupt:
-            log.info("Shutting down headless JARVIS gracefully...")
-            if _memory_manager:
-                _memory_manager.log_event("JARVIS shutdown (Ctrl+C)")
-                _memory_manager.flush(timeout=10.0)
-            return 0
-
-    input_idx = _choose_input_device(blocksize)
-    audio_broadcast_count = 0
 
     try:
-        with sd.InputStream(
-            device=input_idx,
-            samplerate=SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="float32",
-            blocksize=blocksize,
-        ) as stream:
-            while True:
-                data, overflowed = stream.read(blocksize)
-                if overflowed:
-                    log.debug("Input overflow")
-
-                level = rms_mono(data)
-
-                # Stream audio levels to 3D Orb HUD
-                audio_broadcast_count += 1
-                if audio_broadcast_count % 3 == 0:
-                    broadcast_ui_event({"type": "AUDIO_LEVEL", "rms": float(level)})
-
+        while True:
+            time.sleep(1.0)
     except KeyboardInterrupt:
         log.info("Shutting down gracefully...")
         if _signal_bus:
@@ -4794,12 +4817,6 @@ def main() -> int:
             _memory_manager.flush(timeout=10.0)
         log.info("Goodbye.")
         return 0
-    except sd.PortAudioError as e:
-        log.error("Audio error: %s", e)
-        log.error("If PortAudio fails, install/repair drivers or try another SAMPLE_RATE.")
-        return 1
-
-    return 0
 
 
 if __name__ == "__main__":
