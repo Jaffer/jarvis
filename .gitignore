@@ -1,3 +1,8 @@
 .env
 .cache/
 .venv/
+__pycache__/
+*.pyc
+scratch/
+memory/00 - Biometrics/
+biometrics/models/*.task

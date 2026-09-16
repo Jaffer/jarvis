@@ -101,6 +101,11 @@ try:
 except ImportError:
     pynput_keyboard = None
 
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
 # Load .env early so all constants can read overrides
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -657,6 +662,36 @@ class TelegramBridge:
             log.warning("Telegram send_message notice: %s", e)
             return False
 
+    def send_photo(self, photo_bytes: bytes, caption: str = "", chat_id: str | None = None) -> bool:
+        """Send an image (such as an intruder snapshot) via Telegram Bot API multipart/form-data."""
+        cid = chat_id or self.allowed_chat_id
+        if not self.token or not cid or not photo_bytes:
+            return False
+        try:
+            boundary = f"----JarvisBoundary{int(time.time() * 1000)}"
+            body = bytearray()
+            # chat_id field
+            body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{cid}\r\n".encode())
+            # caption field
+            if caption:
+                body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\n{caption}\r\n".encode())
+            # photo field
+            body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"security_alert.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n".encode())
+            body.extend(photo_bytes)
+            body.extend(f"\r\n--{boundary}--\r\n".encode())
+
+            url = f"https://api.telegram.org/bot{self.token}/sendPhoto"
+            req = urllib.request.Request(
+                url,
+                data=bytes(body),
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+            )
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.status == 200
+        except Exception as e:
+            log.warning("Telegram send_photo notice: %s", e)
+            return False
+
     def _poll_loop(self):
         while self.active:
             try:
@@ -749,6 +784,261 @@ class MobileCallEngine:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# BIOMETRIC SENTINEL & MULTI-TIER ANTI-SPOOFING DAEMON
+# ═══════════════════════════════════════════════════════════════════════════
+class BiometricSentinelDaemon:
+    """Continuous background biometric sentinel with multi-tier anti-spoofing.
+    - Low-power optical sensor polling (1-2 FPS idle, responsive on face detection)
+    - MediaPipe 468-point 3D topological face mesh verification
+    - 4-Tier anti-spoofing: 3D depth planarity, EAR blink dynamics, 2D FFT Moiré, rPPG pulse
+    - Acoustic speaker verification and loudspeaker replay defense
+    - Telegram intruder snapshot dispatch on presentation attacks
+    - UI telemetry and security event broadcasting
+    """
+    def __init__(self, telegram_bridge: TelegramBridge | None = None, voice_engine=None, memory=None):
+        self.telegram = telegram_bridge
+        self.voice_engine = voice_engine
+        self.memory = memory
+        self.active = False
+        self.authenticated = False
+        self.admin_name = "Admin (Vasim)"
+        self.last_status = "STANDBY"
+        self.last_auth_time = 0.0
+        self.last_intruder_alert_ts = 0.0
+        self.intruder_alert_cooldown = 60.0
+        self.camera_index = 0
+        self._thread = None
+        self._lock = threading.Lock()
+        self.face_sentinel = None
+        self.voice_sentinel = None
+
+        try:
+            from biometrics.face_sentinel import FaceSentinel
+            from biometrics.voice_sentinel import VoiceSentinel
+            self.face_sentinel = FaceSentinel()
+            self.voice_sentinel = VoiceSentinel()
+            if self.face_sentinel.admin_name:
+                self.admin_name = self.face_sentinel.admin_name
+            log.info("Biometric Sentinel loaded (Admin profile: %s)", self.admin_name)
+        except Exception as e:
+            log.warning("Biometrics module load notice: %s", e)
+
+    def start(self):
+        """Start the background optical surveillance thread."""
+        if self.active:
+            return
+        self.active = True
+        self._thread = threading.Thread(target=self._sentinel_loop, daemon=True, name="biometric-sentinel")
+        self._thread.start()
+        log.info("Biometric Sentinel Daemon started.")
+
+    def stop(self):
+        self.active = False
+
+    def is_admin_authenticated(self) -> bool:
+        """Returns True if the Admin has been verified recently (within 5 minutes) without revocation."""
+        with self._lock:
+            if not self.authenticated:
+                return False
+            if time.time() - self.last_auth_time > 300.0:  # 5-minute timeout
+                self.authenticated = False
+                return False
+            return True
+
+    def evaluate_voice_command_audio(self, audio_data: np.ndarray, sample_rate: int = 16000) -> dict:
+        """Evaluate voice command audio for speaker identity & anti-replay spoofing."""
+        if self.voice_sentinel is None:
+            return {"status": "NO_SENTINEL", "authenticated": True, "details": "Voice sentinel offline."}
+        try:
+            res = self.voice_sentinel.evaluate_voice(audio_data, sample_rate)
+            if res.status == "ADMIN_VERIFIED":
+                with self._lock:
+                    self.authenticated = True
+                    self.last_auth_time = time.time()
+                broadcast_ui_event({
+                    "type": "SECURITY_STATUS",
+                    "authenticated": True,
+                    "user": self.admin_name,
+                    "threat_level": "NOMINAL",
+                    "voice_confidence": res.confidence,
+                    "replay_score": res.replay_score
+                })
+                return {"status": "ADMIN_VERIFIED", "authenticated": True, "details": res.details}
+            elif res.status == "REPLAY_SPOOF_DETECTED":
+                now = time.time()
+                if now - self.last_intruder_alert_ts > self.intruder_alert_cooldown:
+                    self.last_intruder_alert_ts = now
+                    msg = (
+                        f"🚨 *JARVIS SECURITY ALERT: AUDIO REPLAY ATTACK*\n"
+                        f"Target Profile: {self.admin_name}\n"
+                        f"Replay Analysis: {res.details}\n"
+                        f"Action: Blocked audio injection."
+                    )
+                    if self.telegram:
+                        self.telegram.send_message(msg)
+                broadcast_ui_event({
+                    "type": "SECURITY_STATUS",
+                    "authenticated": False,
+                    "threat_level": "REPLAY_SPOOF_DETECTED",
+                    "reasons": [res.details]
+                })
+                return {"status": "REPLAY_SPOOF_DETECTED", "authenticated": False, "details": res.details}
+            else:
+                return {"status": res.status, "authenticated": False, "details": res.details}
+        except Exception as e:
+            log.warning("Voice evaluation error: %s", e)
+            return {"status": "ERROR", "authenticated": False, "details": str(e)}
+
+    def get_security_status_summary(self) -> str:
+        """Returns readable security and identity clearance summary."""
+        with self._lock:
+            auth_str = "AUTHENTICATED" if self.authenticated else "UNVERIFIED / GUEST"
+            enrolled = "ENROLLED" if (self.face_sentinel and self.face_sentinel.admin_embedding is not None) else "NOT ENROLLED"
+            return (
+                f"Identity Status: {auth_str}. Enrolled Admin Profile: {self.admin_name} ({enrolled}). "
+                f"Last optical sensor status: {self.last_status}."
+            )
+
+    def _sentinel_loop(self):
+        """Low-power background loop checking optical feed."""
+        if cv2 is None or self.face_sentinel is None:
+            log.info("Biometric Sentinel: OpenCV or FaceSentinel unavailable; optical loop standby.")
+            return
+
+        cap = None
+        for dev_idx in (0, 1):
+            try:
+                test_cap = cv2.VideoCapture(dev_idx)
+                if test_cap.isOpened():
+                    cap = test_cap
+                    self.camera_index = dev_idx
+                    log.info("Biometric Sentinel acquired camera device /dev/video%d", dev_idx)
+                    break
+                test_cap.release()
+            except Exception:
+                continue
+
+        if cap is None:
+            log.info("Biometric Sentinel: Optical sensor not accessible. Running in passive standby mode.")
+            while self.active:
+                time.sleep(10)
+            return
+
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+        consecutive_admin_frames = 0
+        consecutive_spoof_frames = 0
+
+        while self.active:
+            try:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    time.sleep(1.0)
+                    continue
+
+                res = self.face_sentinel.evaluate_frame(frame)
+                self.last_status = res.status
+
+                if res.status == "NO_FACE":
+                    consecutive_admin_frames = 0
+                    consecutive_spoof_frames = 0
+                    time.sleep(0.6)
+                    continue
+
+                elif res.status == "ADMIN_VERIFIED":
+                    consecutive_spoof_frames = 0
+                    consecutive_admin_frames += 1
+
+                    if consecutive_admin_frames >= 2:
+                        was_auth = self.authenticated
+                        with self._lock:
+                            self.authenticated = True
+                            self.last_auth_time = time.time()
+
+                        if not was_auth:
+                            log.info("🛡️ [BIOMETRIC SENTINEL] Admin Verified: %s (Confidence: %.1f%%, Liveness: %.1f%%)",
+                                     self.admin_name, res.confidence * 100, res.liveness_score * 100)
+                            broadcast_ui_event({
+                                "type": "SECURITY_STATUS",
+                                "authenticated": True,
+                                "user": self.admin_name,
+                                "threat_level": "NOMINAL",
+                                "liveness_score": round(res.liveness_score, 2),
+                                "confidence": round(res.confidence, 2)
+                            })
+                            broadcast_ui_event({
+                                "type": "SUBTITLE",
+                                "role": "jarvis",
+                                "text": f"Biometric clearance confirmed: {self.admin_name}."
+                            })
+                            if self.voice_engine:
+                                self.voice_engine.speak(f"Biometric clearance confirmed. Welcome, {self.admin_name}.")
+                    time.sleep(0.4)
+
+                elif res.status == "SPOOF_DETECTED":
+                    consecutive_admin_frames = 0
+                    consecutive_spoof_frames += 1
+
+                    if consecutive_spoof_frames >= 2:
+                        with self._lock:
+                            self.authenticated = False
+
+                        now = time.time()
+                        if now - self.last_intruder_alert_ts > self.intruder_alert_cooldown:
+                            self.last_intruder_alert_ts = now
+                            log.warning("🚨 [SECURITY BREACH] Presentation attack / spoof detected! (%s: %s)",
+                                        res.spoof_type, res.details)
+
+                            broadcast_ui_event({
+                                "type": "SECURITY_STATUS",
+                                "authenticated": False,
+                                "threat_level": "SPOOF_DETECTED",
+                                "spoof_type": res.spoof_type,
+                                "details": res.details
+                            })
+                            broadcast_ui_event({
+                                "type": "SUBTITLE",
+                                "role": "jarvis",
+                                "text": f"🚨 Security alert: Presentation attack blocked ({res.spoof_type})."
+                            })
+
+                            # Dispatch Telegram intruder photo alert
+                            try:
+                                ok, enc = cv2.imencode(".jpg", frame)
+                                if ok and self.telegram:
+                                    caption = (
+                                        f"🚨 *JARVIS INTRUDER / SPOOF ALERT*\n"
+                                        f"Threat: Presentation Attack ({res.spoof_type})\n"
+                                        f"Analysis: {res.details}\n"
+                                        f"Liveness Score: {res.liveness_score:.2f}\n"
+                                        f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                    )
+                                    self.telegram.send_photo(enc.tobytes(), caption=caption)
+                                    log.info("Telegram intruder snapshot dispatched successfully.")
+                            except Exception as ex:
+                                log.warning("Could not dispatch intruder snapshot: %s", ex)
+
+                            if self.voice_engine:
+                                self.voice_engine.speak("Security alert. Presentation attack detected. Authorization denied.")
+                    time.sleep(0.5)
+
+                elif res.status == "GUEST_DETECTED":
+                    consecutive_admin_frames = 0
+                    consecutive_spoof_frames = 0
+                    with self._lock:
+                        self.authenticated = False
+                    time.sleep(0.6)
+
+            except Exception as e:
+                log.warning("Sentinel loop cycle notice: %s", e)
+                time.sleep(1.0)
+
+        if cap:
+            cap.release()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # SIGNAL BUS — state files for cross-process communication
 # ═══════════════════════════════════════════════════════════════════════════
 class SignalBus:
@@ -814,6 +1104,8 @@ _BH_ALLOWED = ("add_img", "add_card", "clear", "reset", "hand", "give",
                "present", "blueprint", "simulate", "stress", "construct",
                "dynamic_construct", "modify_construct")
 _global_voice_engine = None
+_biometric_sentinel = None
+_admin_authenticated = False
 _active_construct: dict = {}
 
 
@@ -1809,12 +2101,26 @@ class NeuralBrain:
                 return self.mcp_mgr.execute_tool(server_name, query)
             return "MCP tool execution failed."
 
+        elif name in ("verify_biometrics", "get_security_status"):
+            global _biometric_sentinel
+            if _biometric_sentinel:
+                return _biometric_sentinel.get_security_status_summary()
+            return "Biometric sentinel is offline."
+
         return "Action completed."
 
     def query_stream(self, user_prompt: str, on_sentence=None, on_status=None) -> str:
         """Stream response from Ollama, execute tools if needed, and feed sentences to TTS."""
         with self._lock:
             tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_security_status",
+                        "description": "Check real-time biometric authorization, optical face recognition, and anti-spoofing security status",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                },
                 {
                     "type": "function",
                     "function": {
@@ -2415,6 +2721,16 @@ class VoiceEngine:
             if self.memory:
                 self.memory.log_event(f"Voice: \"{transcript}\"")
 
+            # Biometric Voice Verification & Audio Anti-Replay Check
+            global _biometric_sentinel
+            if _biometric_sentinel:
+                v_res = _biometric_sentinel.evaluate_voice_command_audio(audio, sample_rate=16000)
+                if v_res.get("status") == "REPLAY_SPOOF_DETECTED":
+                    log.warning("Voice command rejected: %s", v_res.get("details"))
+                    self.speak("Security warning: Presentation attack detected. Audio replay blocked.")
+                    self.bus.set_state("idle")
+                    return
+
             # Route the command
             self._route_voice_command(transcript)
         except Exception as e:
@@ -2596,8 +2912,27 @@ class VoiceEngine:
                 self.speak("I have not logged any new corrections or reflections yet, sir.")
             return
 
-        # ── 7c. User Profile & Explicit Self-Improvement ──
-        if any(q in t for q in ["show profile", "user profile", "who am i", "show user profile", "my profile"]):
+        # ── 7c. Biometrics & Security Clearance ──
+        if any(q in t for q in [
+            "who am i", "verify identity", "verify my identity", "am i verified",
+            "biometric status", "security clearance", "security status"
+        ]):
+            global _biometric_sentinel
+            if _biometric_sentinel:
+                status_summary = _biometric_sentinel.get_security_status_summary()
+                self.speak(status_summary)
+            else:
+                self.speak("Biometric sentinel is offline, sir.")
+            return
+
+        if any(q in t for q in [
+            "enroll biometrics", "enroll face", "enroll voice", "register face", "calibrate biometrics"
+        ]):
+            self.speak("To calibrate your biometric profile, please run python enroll_admin.py in your terminal, sir.")
+            return
+
+        # ── 7d. User Profile & Explicit Self-Improvement ──
+        if any(q in t for q in ["show profile", "user profile", "show user profile", "my profile"]):
             profile_info = self.memory.read_profile() if self.memory else ""
             if profile_info:
                 clean_p = ", ".join([l.replace("- **", "").replace("**:", " is") for l in profile_info.splitlines() if l.strip().startswith("- **")][:3])
@@ -3792,7 +4127,16 @@ def main() -> int:
     _voice_engine = VoiceEngine(_signal_bus, _memory_manager, _neural_brain, _learning_engine)
     _voice_engine.start()
 
-    # 6. Log boot status
+    # 8. Start Biometric Sentinel & Anti-Spoofing Daemon
+    global _biometric_sentinel
+    _biometric_sentinel = BiometricSentinelDaemon(
+        telegram_bridge=_telegram_bridge,
+        voice_engine=_voice_engine,
+        memory=_memory_manager
+    )
+    _biometric_sentinel.start()
+
+    # Log boot status
     log.info("━━━ All subsystems online ━━━")
     log.info("  Orb HUD:       http://localhost:%d", ORB_HTTP_PORT)
     log.info("  WebSocket:     ws://localhost:%d", ORB_WS_PORT)
@@ -3800,6 +4144,7 @@ def main() -> int:
     log.info("  Memory Vault:  %s", vault_path)
     log.info("  Signal Bus:    %s", state_dir)
     log.info("  Voice PTT Key: %s", JARVIS_CFG.get("ptt_key", "F4"))
+    log.info("  Biometrics:    Active (Admin: %s)", _biometric_sentinel.admin_name)
     _memory_manager.log_event("All subsystems online")
 
     log.info(
