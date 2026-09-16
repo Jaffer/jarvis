@@ -14,6 +14,7 @@ const themeBtn = document.getElementById("btn-theme");
 const voiceBtn = document.getElementById("btn-voice");
 const resetBtn = document.getElementById("btn-reset");
 const fullscreenBtn = document.getElementById("btn-fullscreen");
+const soundscapeBtn = document.getElementById("btn-soundscape");
 const toastEl = document.getElementById("hud-toast");
 const pipContainer = document.getElementById("pip-container");
 const voiceRingEl = document.getElementById("voice-ring");
@@ -80,6 +81,272 @@ function cycleTheme() {
     themeBtn.textContent = `THEME [T]: ${label.split("//")[0].trim()}`;
   }
   showToast(`Theme: ${label || "UNKNOWN"}`, 2000);
+}
+
+// ——— STARK SOUNDSCAPE & PROCEDURAL SFX ENGINE ———
+class JarvisSoundscape {
+  constructor() {
+    this.ctx = null;
+    this.ambientGain = null;
+    this.masterGain = null;
+    this.enabled = true;
+    this.ambientRunning = false;
+    this.droneOsc1 = null;
+    this.droneOsc2 = null;
+  }
+
+  init() {
+    if (this.ctx) return;
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) return;
+      this.ctx = new AudioContextClass();
+
+      this.masterGain = this.ctx.createGain();
+      this.masterGain.gain.setValueAtTime(0.75, this.ctx.currentTime);
+      this.masterGain.connect(this.ctx.destination);
+
+      this._startAmbientDrone();
+    } catch (e) {
+      console.warn("WebAudio initialization notice:", e);
+    }
+  }
+
+  unlock() {
+    if (!this.ctx) {
+      this.init();
+    } else if (this.ctx.state === "suspended") {
+      this.ctx.resume();
+    }
+  }
+
+  _startAmbientDrone() {
+    if (!this.ctx || this.ambientRunning) return;
+    try {
+      // 55Hz fundamental (A1) + 110Hz warm harmonic (A2)
+      this.droneOsc1 = this.ctx.createOscillator();
+      this.droneOsc1.type = "sine";
+      this.droneOsc1.frequency.setValueAtTime(55.0, this.ctx.currentTime);
+
+      this.droneOsc2 = this.ctx.createOscillator();
+      this.droneOsc2.type = "triangle";
+      this.droneOsc2.frequency.setValueAtTime(110.0, this.ctx.currentTime);
+
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = "lowpass";
+      filter.frequency.setValueAtTime(160, this.ctx.currentTime);
+      filter.Q.setValueAtTime(1.8, this.ctx.currentTime);
+
+      this.ambientGain = this.ctx.createGain();
+      this.ambientGain.gain.setValueAtTime(0.04, this.ctx.currentTime);
+
+      const osc2Gain = this.ctx.createGain();
+      osc2Gain.gain.setValueAtTime(0.35, this.ctx.currentTime);
+
+      this.droneOsc1.connect(filter);
+      this.droneOsc2.connect(osc2Gain);
+      osc2Gain.connect(filter);
+
+      filter.connect(this.ambientGain);
+      this.ambientGain.connect(this.masterGain);
+
+      this.droneOsc1.start();
+      this.droneOsc2.start();
+      this.ambientRunning = true;
+    } catch (e) {
+      console.warn("Ambient drone start notice:", e);
+    }
+  }
+
+  duck(targetGain = 0.005, rampTime = 0.08) {
+    if (!this.ambientGain || !this.ctx) return;
+    try {
+      this.ambientGain.gain.setTargetAtTime(targetGain, this.ctx.currentTime, rampTime);
+    } catch (_) {}
+  }
+
+  unduck(targetGain = 0.04, rampTime = 0.6) {
+    if (!this.ambientGain || !this.ctx || !this.enabled) return;
+    try {
+      this.ambientGain.gain.setTargetAtTime(targetGain, this.ctx.currentTime, rampTime);
+    } catch (_) {}
+  }
+
+  setMuted(muted) {
+    this.enabled = !muted;
+    if (this.masterGain && this.ctx) {
+      this.masterGain.gain.setTargetAtTime(this.enabled ? 0.75 : 0.0, this.ctx.currentTime, 0.05);
+    }
+  }
+
+  playWake() {
+    if (!this.enabled) return;
+    this.unlock();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    [880, 1760].forEach((freq, i) => {
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, now);
+      const amp = i === 0 ? 0.35 : 0.18;
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(amp, now + 0.008);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.42);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now);
+      osc.stop(now + 0.45);
+    });
+  }
+
+  playThinking() {
+    if (!this.enabled) return;
+    this.unlock();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const filter = this.ctx.createBiquadFilter();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(130.81, now);
+    osc.frequency.exponentialRampToValueAtTime(220.0, now + 0.45);
+
+    filter.type = "bandpass";
+    filter.frequency.setValueAtTime(200, now);
+    filter.Q.setValueAtTime(3.0, now);
+
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.28, now + 0.15);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.48);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.50);
+  }
+
+  playAuthConfirmed() {
+    if (!this.enabled) return;
+    this.unlock();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const notes = [
+      { f: 1046.50, t: 0.00, d: 0.10 },
+      { f: 1318.51, t: 0.07, d: 0.11 },
+      { f: 1567.98, t: 0.14, d: 0.18 }
+    ];
+    notes.forEach(({ f, t, d }) => {
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(f, now + t);
+      gain.gain.setValueAtTime(0.001, now + t);
+      gain.gain.linearRampToValueAtTime(0.24, now + t + 0.006);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + t + d);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now + t);
+      osc.stop(now + t + d);
+    });
+  }
+
+  playBargeInCut() {
+    if (!this.enabled) return;
+    this.unlock();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = "sawtooth";
+    osc.frequency.setValueAtTime(1200, now);
+    osc.frequency.exponentialRampToValueAtTime(240, now + 0.035);
+
+    gain.gain.setValueAtTime(0.22, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.035);
+
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.04);
+  }
+
+  playSecurityAlert() {
+    if (!this.enabled) return;
+    this.unlock();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    [0, 0.12, 0.24].forEach((offset) => {
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = "square";
+      osc.frequency.setValueAtTime(880, now + offset);
+      osc.frequency.setValueAtTime(659.25, now + offset + 0.05);
+
+      gain.gain.setValueAtTime(0.18, now + offset);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.09);
+
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.10);
+    });
+  }
+
+  playBlueprintWhoosh() {
+    if (!this.enabled) return;
+    this.unlock();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const filter = this.ctx.createBiquadFilter();
+
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(220, now);
+    osc.frequency.exponentialRampToValueAtTime(880, now + 0.22);
+    osc.frequency.exponentialRampToValueAtTime(330, now + 0.48);
+
+    filter.type = "bandpass";
+    filter.frequency.setValueAtTime(600, now);
+    filter.frequency.exponentialRampToValueAtTime(1800, now + 0.22);
+    filter.frequency.exponentialRampToValueAtTime(500, now + 0.48);
+    filter.Q.setValueAtTime(2.5, now);
+
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.28, now + 0.20);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.50);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.52);
+  }
+
+  play(sfxName) {
+    switch (sfxName) {
+      case "wake": this.playWake(); break;
+      case "thinking": this.playThinking(); break;
+      case "auth_confirmed": this.playAuthConfirmed(); break;
+      case "barge_in_cut": this.playBargeInCut(); break;
+      case "security_alert": this.playSecurityAlert(); break;
+      case "blueprint_whoosh": this.playBlueprintWhoosh(); break;
+    }
+  }
+}
+
+const soundscape = new JarvisSoundscape();
+
+function toggleSoundscape() {
+  soundscape.unlock();
+  soundscape.setMuted(!soundscape.enabled);
+  if (soundscapeBtn) {
+    soundscapeBtn.textContent = `SOUNDSCAPE [S]: ${soundscape.enabled ? "ON" : "MUTED"}`;
+    soundscapeBtn.className = soundscape.enabled ? "hud-btn btn-active" : "hud-btn";
+  }
+  showToast(`Soundscape: ${soundscape.enabled ? "ACTIVE" : "MUTED"}`);
 }
 
 // Hand Gesture Callbacks
@@ -355,6 +622,7 @@ function handleServerEvent(data) {
   switch (data.type) {
     case "ACTIVATED":
       scene.triggerBurst();
+      soundscape.play("wake");
       showToast(`⚡ ${data.reason.toUpperCase()} — JARVIS ONLINE`, 4000);
       const orbBadge = document.getElementById("system-status");
       if (orbBadge) {
@@ -363,9 +631,28 @@ function handleServerEvent(data) {
       }
       break;
 
+    case "SFX_PLAY":
+      if (data.sfx) {
+        soundscape.play(data.sfx);
+      }
+      break;
+
+    case "SFX_MUTE":
+      soundscape.setMuted(data.muted);
+      if (soundscapeBtn) {
+        soundscapeBtn.textContent = `SOUNDSCAPE [S]: ${soundscape.enabled ? "ON" : "MUTED"}`;
+        soundscapeBtn.className = soundscape.enabled ? "hud-btn btn-active" : "hud-btn";
+      }
+      break;
+
     case "SPEAKING":
       scene.setSpeaking(data.active);
       setVoiceState(data.active ? "speaking" : "idle");
+      if (data.active) {
+        soundscape.duck();
+      } else {
+        soundscape.unduck();
+      }
       const speechBadge = document.getElementById("speech-status");
       if (speechBadge) {
         speechBadge.textContent = data.active ? "VOICE: TRANSMITTING" : "VOICE: READY";
@@ -383,6 +670,11 @@ function handleServerEvent(data) {
 
     case "VOICE_STATE":
       setVoiceState(data.state || "idle");
+      if (data.state === "listening" || data.state === "speaking" || data.state === "thinking") {
+        soundscape.duck();
+      } else {
+        soundscape.unduck();
+      }
       break;
 
     case "VOICE_WAVEFORM":
@@ -484,6 +776,7 @@ async function initLocalMic() {
 // Button Events
 gestureBtn?.addEventListener("click", toggleCamera);
 themeBtn?.addEventListener("click", cycleTheme);
+soundscapeBtn?.addEventListener("click", toggleSoundscape);
 voiceBtn?.addEventListener("click", toggleVoiceCommands);
 resetBtn?.addEventListener("click", () => {
   scene.resetView();
@@ -503,6 +796,7 @@ document.querySelectorAll(".shortcut-item").forEach((item) => {
     const sc = item.getAttribute("data-shortcut");
     if (sc === "g") toggleCamera();
     else if (sc === "t") cycleTheme();
+    else if (sc === "s") toggleSoundscape();
     else if (sc === "v") toggleVoiceCommands();
     else if (sc === "r") {
       scene.resetView();
@@ -525,6 +819,8 @@ window.addEventListener("keydown", (e) => {
     toggleCamera();
   } else if (key === "t") {
     cycleTheme();
+  } else if (key === "s") {
+    toggleSoundscape();
   } else if (key === "v") {
     toggleVoiceCommands();
   } else if (key === "r") {
@@ -554,11 +850,13 @@ setTimeout(() => {
   startVoiceCommands();
 }, 400);
 
-// If browser security policy requires user gesture for microphone, auto-start on first interaction
+// If browser security policy requires user gesture for audio & microphone, auto-unlock on first interaction
 window.addEventListener("pointerdown", () => {
+  soundscape.unlock();
   if (!speechActive) startVoiceCommands();
 }, { once: true });
 window.addEventListener("keydown", () => {
+  soundscape.unlock();
   if (!speechActive) startVoiceCommands();
 }, { once: true });
 

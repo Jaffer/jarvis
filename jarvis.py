@@ -72,6 +72,11 @@ from dotenv import load_dotenv
 import numpy as np
 
 try:
+    from soundscape import SoundEffectsEngine
+except ImportError:
+    SoundEffectsEngine = None
+
+try:
     import sounddevice as sd
 except (ImportError, OSError):
     sd = None
@@ -854,8 +859,11 @@ class BiometricSentinelDaemon:
             res = self.voice_sentinel.evaluate_voice(audio_data, sample_rate)
             if res.status == "ADMIN_VERIFIED":
                 with self._lock:
+                    was_auth = self.authenticated
                     self.authenticated = True
                     self.last_auth_time = time.time()
+                if not was_auth and _sound_engine:
+                    _sound_engine.play("auth_confirmed")
                 broadcast_ui_event({
                     "type": "SECURITY_STATUS",
                     "authenticated": True,
@@ -869,6 +877,8 @@ class BiometricSentinelDaemon:
                 now = time.time()
                 if now - self.last_intruder_alert_ts > self.intruder_alert_cooldown:
                     self.last_intruder_alert_ts = now
+                    if _sound_engine:
+                        _sound_engine.play("security_alert")
                     msg = (
                         f"🚨 *JARVIS SECURITY ALERT: AUDIO REPLAY ATTACK*\n"
                         f"Target Profile: {self.admin_name}\n"
@@ -958,6 +968,8 @@ class BiometricSentinelDaemon:
                             self.last_auth_time = time.time()
 
                         if not was_auth:
+                            if _sound_engine:
+                                _sound_engine.play("auth_confirmed")
                             log.info("🛡️ [BIOMETRIC SENTINEL] Admin Verified: %s (Confidence: %.1f%%, Liveness: %.1f%%)",
                                      self.admin_name, res.confidence * 100, res.liveness_score * 100)
                             broadcast_ui_event({
@@ -988,6 +1000,8 @@ class BiometricSentinelDaemon:
                         now = time.time()
                         if now - self.last_intruder_alert_ts > self.intruder_alert_cooldown:
                             self.last_intruder_alert_ts = now
+                            if _sound_engine:
+                                _sound_engine.play("security_alert")
                             log.warning("🚨 [SECURITY BREACH] Presentation attack / spoof detected! (%s: %s)",
                                         res.spoof_type, res.details)
 
@@ -2813,6 +2827,24 @@ class VoiceEngine:
         if t_cleaned:
             t = t_cleaned
 
+        # ── Sound Effects & Soundscape Controls ──
+        if any(q in t for q in ["mute sound effects", "turn off sound effects", "disable sound effects", "mute sfx", "disable sfx"]):
+            if _sound_engine:
+                _sound_engine.mute()
+            broadcast_ui_event({"type": "SFX_MUTE", "muted": True})
+            self.speak("Sound effects muted, sir.")
+            self.bus.set_state("idle")
+            return
+
+        if any(q in t for q in ["unmute sound effects", "turn on sound effects", "enable sound effects", "unmute sfx", "enable sfx"]):
+            if _sound_engine:
+                _sound_engine.unmute()
+                _sound_engine.play("wake")
+            broadcast_ui_event({"type": "SFX_MUTE", "muted": False})
+            self.speak("Sound effects online, sir.")
+            self.bus.set_state("idle")
+            return
+
         # ── 1. Barehands Board ──
         if any(q in t for q in [
             "open barehands board", "open barehands", "barehands board", "barehands",
@@ -2840,11 +2872,15 @@ class VoiceEngine:
             if any(w in t for w in ["arc reactor", "reactor", "arc core"]) and not any(w in t for w in ["modify", "add", "change"]):
                 _bh_cmds.append({"a": "blueprint", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
                 broadcast_ui_event({"type": "RENDER_3D_BLUEPRINT", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
+                if _sound_engine:
+                    _sound_engine.play("blueprint_whoosh")
                 self.speak("Rendering holographic 3D blueprint of the Arc Reactor Core on Barehands Board.")
             elif any(w in t for w in ["modify", "add", "change", "increase", "widen", "replace", "upgrade"]) and _active_construct:
                 manifest, diagnosis = construct_or_modify_3d_object(t, action="modify", modifications=t)
                 _bh_cmds.append({"a": "dynamic_construct", "manifest": manifest, "exploded": exploded})
                 broadcast_ui_event({"type": "DYNAMIC_CONSTRUCT", "manifest": manifest, "exploded": exploded})
+                if _sound_engine:
+                    _sound_engine.play("blueprint_whoosh")
                 self.speak(diagnosis)
             else:
                 raw_name = t
@@ -3016,6 +3052,8 @@ class VoiceEngine:
             t_start = time.perf_counter()
             log.info("🎙️ [VOICE ROUTER] Processing Spoken Command: '%s'", transcript)
             self.bus.set_state("thinking")
+            if _sound_engine:
+                _sound_engine.play("thinking")
             broadcast_ui_event({"type": "STATUS", "status": "NEURAL // REASONING", "phrase": transcript})
             broadcast_ui_event({"type": "SUBTITLE", "role": "user", "text": transcript})
 
@@ -3074,6 +3112,8 @@ class VoiceEngine:
         log.info("⚡ [VOICE ENGINE] Interruption triggered (%s). Halting playback immediately.", reason)
         self._stop_speaking.set()
         _tts_playing.clear()
+        if _sound_engine:
+            _sound_engine.play("barge_in_cut")
 
         # 1. Drain and purge pending TTS queue atomically
         drained = 0
@@ -3205,6 +3245,7 @@ class VoiceEngine:
 _memory_manager: MemoryManager | None = None
 _signal_bus: SignalBus | None = None
 _voice_engine: VoiceEngine | None = None
+_sound_engine: SoundEffectsEngine | None = None
 _tts_playing = threading.Event()  # set while TTS audio is playing — suppresses clap detection
 
 
@@ -4075,6 +4116,8 @@ def trigger_welcome_sequence(reason: str = "Double clap") -> bool:
             return False
         _welcome_sequence_done = True
     broadcast_ui_event({"type": "ACTIVATED", "reason": reason})
+    if _sound_engine:
+        _sound_engine.play("wake")
     log.info("%s detected — running welcome once.", reason)
     threading.Thread(target=run_double_clap_actions, daemon=True).start()
     return True
@@ -4219,6 +4262,15 @@ def main() -> int:
     # 4. Start Barehands Board server
     bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
     _start_barehands_server(bh_port)
+
+    # 4b. Initialize Stark SFX & Soundscape Engine
+    global _sound_engine
+    if SoundEffectsEngine is not None:
+        _sound_engine = SoundEffectsEngine(
+            broadcast_fn=broadcast_ui_event,
+            tts_checker=lambda: _tts_playing.is_set()
+        )
+        _sound_engine.play("wake")
 
     # 5. Initialize Self-Code Manager, MCP Manager, Telegram Bridge, and Mobile Call Engine
     brain_cfg = JARVIS_CFG.get("brain", {})
