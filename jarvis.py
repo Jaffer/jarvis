@@ -1814,8 +1814,13 @@ class NeuralBrain:
         ))
         self.history: list[dict] = []
         self._lock = threading.Lock()
+        self._interrupted = threading.Event()
         log.info("Neural Brain online (Model: %s at %s)", self.model, self.host)
         threading.Thread(target=self._prewarm_ollama, daemon=True).start()
+
+    def interrupt(self) -> None:
+        """Signal NeuralBrain to abort current streaming generation immediately."""
+        self._interrupted.set()
 
     def _prewarm_ollama(self) -> None:
         """Background pre-warm Ollama model to avoid cold-start timeout on first voice command."""
@@ -2113,6 +2118,7 @@ class NeuralBrain:
     def query_stream(self, user_prompt: str, on_sentence=None, on_status=None) -> str:
         """Stream response from Ollama, execute tools if needed, and feed sentences to TTS."""
         with self._lock:
+            self._interrupted.clear()
             tools = [
                 {
                     "type": "function",
@@ -2481,6 +2487,9 @@ class NeuralBrain:
             sentences = re.split(r"(?<=[.!?])\s+", clean_text)
             for s in sentences:
                 s = s.strip()
+                if self._interrupted.is_set():
+                    log.info("NeuralBrain: Sentence streaming aborted by user barge-in.")
+                    break
                 if s and on_sentence:
                     on_sentence(s)
 
@@ -2578,7 +2587,7 @@ class VoiceEngine:
             if key == ptt_key and not recording:
                 recording = True
                 audio_chunks = []
-                self._stop_speaking.set()  # Interrupt current speech
+                self.interrupt("ptt_pressed")  # Instant barge-in, queue purge, and brain signal
                 self.bus.set_state("listening")
                 log.info("PTT: listening...")
                 # Start recording in background
@@ -2609,8 +2618,8 @@ class VoiceEngine:
             log.warning("PTT listener failed: %s", e)
 
     def _handsfree_loop(self):
-        """Continuous hands-free voice loop using audio energy endpointing."""
-        log.info("Voice Engine: Hands-free listening loop active.")
+        """Continuous full-duplex hands-free voice loop with adaptive acoustic barge-in detection."""
+        log.info("Voice Engine: Full-duplex hands-free listening loop active.")
         self._load_stt()
         if self._stt_model is None:
             log.info("Continuous hands-free speech is active natively via Chrome Holographic HUD Web Speech.")
@@ -2619,45 +2628,71 @@ class VoiceEngine:
         sample_rate = 16000
         block_len = 512
         silence_limit_s = 0.85
-        speech_threshold = 0.05
+        baseline_speech_threshold = 0.045
+
+        # Adaptive speaker energy floor tracking variables
+        speaker_energy_floor = 0.02
+        alpha_speaker = 0.08  # EMA update rate during active playback
+        consecutive_speech_blocks = 0
+        min_consecutive_to_trigger = 2  # 2 blocks (~64ms) confirmation prevents false acoustic clicks
 
         while self._active:
             try:
-                if _tts_playing.is_set():
-                    time.sleep(0.2)
-                    continue
-
                 audio_buffer = []
                 in_speech = False
                 silence_start = None
+                recent_pre_speech_blocks = []  # Ring buffer of recent frames to preserve the first phoneme
 
                 with sd.InputStream(samplerate=sample_rate, channels=1, dtype="float32", blocksize=block_len) as stream:
                     while self._active:
-                        if _tts_playing.is_set():
-                            break
                         data, _ = stream.read(block_len)
                         rms = float(np.sqrt(np.mean(data ** 2)))
                         now = time.monotonic()
+                        tts_active = _tts_playing.is_set()
 
-                        if rms > speech_threshold:
+                        # Adaptive Playback Energy Floor Tracker
+                        if tts_active:
+                            speaker_energy_floor = (1.0 - alpha_speaker) * speaker_energy_floor + alpha_speaker * rms
+                            current_threshold = max(0.12, speaker_energy_floor * 1.85)
+                        else:
+                            speaker_energy_floor = max(0.02, speaker_energy_floor * 0.95)
+                            current_threshold = baseline_speech_threshold
+
+                        if rms > current_threshold:
+                            consecutive_speech_blocks += 1
                             if not in_speech:
-                                in_speech = True
-                                self._stop_speaking.set()
-                                self.bus.set_state("listening")
-                                audio_buffer = []
-                            silence_start = None
-                            audio_buffer.append((data * 32767.0).astype(np.int16))
-                        elif in_speech:
-                            audio_buffer.append((data * 32767.0).astype(np.int16))
-                            if silence_start is None:
-                                silence_start = now
-                            elif now - silence_start >= silence_limit_s:
-                                in_speech = False
-                                break
+                                if consecutive_speech_blocks >= min_consecutive_to_trigger:
+                                    in_speech = True
+                                    if tts_active:
+                                        self.interrupt("user_barge_in")
+                                    else:
+                                        self._stop_speaking.set()
+                                    self.bus.set_state("listening")
+                                    # Include recent pre-speech frames to avoid clipping first syllable
+                                    audio_buffer = list(recent_pre_speech_blocks)
+                                    audio_buffer.append((data * 32767.0).astype(np.int16))
+                            else:
+                                silence_start = None
+                                audio_buffer.append((data * 32767.0).astype(np.int16))
+                        else:
+                            consecutive_speech_blocks = 0
+                            if in_speech:
+                                audio_buffer.append((data * 32767.0).astype(np.int16))
+                                if silence_start is None:
+                                    silence_start = now
+                                elif now - silence_start >= silence_limit_s:
+                                    in_speech = False
+                                    break
+                            else:
+                                # Maintain 3-frame (~96ms) rolling buffer
+                                recent_pre_speech_blocks.append((data * 32767.0).astype(np.int16))
+                                if len(recent_pre_speech_blocks) > 3:
+                                    recent_pre_speech_blocks.pop(0)
 
-                if audio_buffer and not _tts_playing.is_set():
+                if audio_buffer and self._active:
                     self._process_recording(audio_buffer)
             except Exception as e:
+                log.debug("Handsfree loop stream notice: %s", e)
                 time.sleep(1.0)
 
     def _record_audio(self, chunks: list, max_seconds: float = 30.0):
@@ -2752,6 +2787,31 @@ class VoiceEngine:
             self.speak("Goodbye, sir.")
             self.bus.set_state("idle")
             return
+
+        # ── Standalone Barge-in & Interruption Phrases ──
+        barge_in_standalone = [
+            "hold that thought", "hold on", "wait", "wait wait", "stop", "stop talking",
+            "quiet", "silence", "cut the audio", "cut it", "cut audio", "shut up",
+            "never mind", "nevermind", "cancel", "that's enough", "thats enough", "pause", "stand down"
+        ]
+        if t in barge_in_standalone:
+            log.info("Voice: Standalone barge-in acknowledged (%r)", t)
+            import random
+            ack = random.choice([
+                "Standing by, sir.",
+                "Understood, sir.",
+                "Right away, sir.",
+                "Holding, sir."
+            ])
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": ack})
+            self.speak(ack)
+            self.bus.set_state("idle")
+            return
+
+        # Clean leading barge-in prefixes so subsequent commands route cleanly
+        t_cleaned = re.sub(r"^(wait|hold on|hold that thought|stop|cut that|never mind|cancel)[,\s]+", "", t).strip()
+        if t_cleaned:
+            t = t_cleaned
 
         # ── 1. Barehands Board ──
         if any(q in t for q in [
@@ -2962,6 +3022,10 @@ class VoiceEngine:
             first_sentence_time: list[float] = []
 
             def on_sentence(chunk: str):
+                if self.brain and self.brain._interrupted.is_set():
+                    return
+                if self._stop_speaking.is_set():
+                    return
                 if not first_sentence_time:
                     first_sentence_time.append(time.perf_counter())
                     ttft_ms = int((first_sentence_time[0] - t_start) * 1000)
@@ -2970,9 +3034,14 @@ class VoiceEngine:
                 self.speak(chunk)
 
             def on_status(st: str):
-                broadcast_ui_event({"type": "STATUS", "status": st, "phrase": transcript})
+                if not (self.brain and self.brain._interrupted.is_set()):
+                    broadcast_ui_event({"type": "STATUS", "status": st, "phrase": transcript})
 
             resp = self.brain.query_stream(transcript, on_sentence=on_sentence, on_status=on_status)
+            if self.brain and self.brain._interrupted.is_set():
+                log.info("VoiceEngine: Brain response interrupted mid-stream; discarding remainder.")
+                self.bus.set_state("idle")
+                return
             total_duration = time.perf_counter() - t_start
             total_ms = int(total_duration * 1000)
             ttft_ms = int((first_sentence_time[0] - t_start) * 1000) if first_sentence_time else total_ms
@@ -3000,6 +3069,39 @@ class VoiceEngine:
         self.speak(f"I heard: {transcript}")
         self.bus.set_state("idle")
 
+    def interrupt(self, reason: str = "user_barge_in") -> None:
+        """Instantly halt active speech, purge all queued sentences, and abort hardware playback in <25ms."""
+        log.info("⚡ [VOICE ENGINE] Interruption triggered (%s). Halting playback immediately.", reason)
+        self._stop_speaking.set()
+        _tts_playing.clear()
+
+        # 1. Drain and purge pending TTS queue atomically
+        drained = 0
+        while not self._tts_queue.empty():
+            try:
+                self._tts_queue.get_nowait()
+                drained += 1
+            except queue.Empty:
+                break
+        if drained:
+            log.info("Purged %d pending sentence(s) from TTS queue.", drained)
+
+        # 2. Halt PortAudio hardware playback immediately
+        try:
+            sd.stop()
+        except Exception:
+            pass
+
+        # 3. Inform NeuralBrain to abort running streaming generation
+        if self.brain and hasattr(self.brain, "interrupt"):
+            self.brain.interrupt()
+
+        # 4. Notify UI & SignalBus of instantaneous state change
+        broadcast_ui_event({"type": "SPEAKING", "active": False})
+        broadcast_ui_event({"type": "STATUS", "status": "LISTENING // INTERRUPTED", "phrase": "Barge-in active"})
+        if self.bus:
+            self.bus.set_state("listening")
+
     def speak(self, text: str):
         """Queue text for TTS playback."""
         self._stop_speaking.clear()
@@ -3013,6 +3115,9 @@ class VoiceEngine:
             except queue.Empty:
                 continue
 
+            if self._stop_speaking.is_set():
+                continue
+
             if not text.strip():
                 continue
 
@@ -3024,10 +3129,14 @@ class VoiceEngine:
             except Exception as e:
                 log.warning("TTS failed: %s", e)
             finally:
-                self.bus.set_state("idle")
+                if not self._stop_speaking.is_set():
+                    self.bus.set_state("idle")
 
     def _speak_elevenlabs(self, text: str):
-        """Stream TTS through ElevenLabs with waveform feedback."""
+        """Stream TTS through ElevenLabs with non-blocking chunked playback for <25ms barge-in."""
+        if self._stop_speaking.is_set():
+            return
+
         api_key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
         if not api_key:
             log.warning("No ELEVENLABS_API_KEY set; TTS skipped.")
@@ -3049,7 +3158,7 @@ class VoiceEngine:
             log.warning("ElevenLabs TTS error: %s", e)
             return
 
-        if not raw:
+        if not raw or self._stop_speaking.is_set():
             return
 
         pcm_i16 = np.frombuffer(raw, dtype=np.int16)
@@ -3061,14 +3170,32 @@ class VoiceEngine:
         bt_device = _detect_and_route_bluetooth_audio()
         broadcast_ui_event({"type": "SPEAKING", "active": True})
         _tts_playing.set()
+
+        block_size = 1024
+        dev = bt_device if bt_device is not None else None
         try:
-            if bt_device is not None:
-                sd.play(pcm_f, pcm_rate, device=bt_device)
-            else:
-                sd.play(pcm_f, pcm_rate)
-            sd.wait()
+            # High-performance chunked OutputStream (checks interruption every ~23ms)
+            with sd.OutputStream(samplerate=pcm_rate, channels=1, dtype="float32", blocksize=block_size, device=dev) as stream:
+                total_samples = len(pcm_f)
+                cursor = 0
+                while cursor < total_samples and not self._stop_speaking.is_set() and self._active:
+                    end = min(cursor + block_size, total_samples)
+                    chunk = pcm_f[cursor:end]
+                    if len(chunk) < block_size:
+                        chunk = np.pad(chunk, (0, block_size - len(chunk)))
+                    stream.write(chunk)
+                    cursor = end
         except Exception as e:
-            log.warning("Audio playback error: %s", e)
+            # Fallback for devices that don't support raw OutputStream write
+            try:
+                if not self._stop_speaking.is_set():
+                    sd.play(pcm_f, pcm_rate, device=dev)
+                    while sd.get_stream() and sd.get_stream().active and not self._stop_speaking.is_set() and self._active:
+                        time.sleep(0.02)
+                    if self._stop_speaking.is_set():
+                        sd.stop()
+            except Exception as ex2:
+                log.warning("Audio playback error: %s (fallback: %s)", e, ex2)
         finally:
             _tts_playing.clear()
             broadcast_ui_event({"type": "SPEAKING", "active": False})
