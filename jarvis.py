@@ -225,6 +225,13 @@ class MemoryManager:
                     res = subprocess.run(["git", "push", remote_url, "main"], cwd=repo_root, capture_output=True, timeout=15)
                     if res.returncode == 0:
                         log.info("⚡ [MEMORY SYNC] Pushed updated Memory Vault records to GitHub repository!")
+                        deploy_hook = os.environ.get("RENDER_DEPLOY_HOOK", "").strip()
+                        if deploy_hook:
+                            try:
+                                urllib.request.urlopen(deploy_hook, timeout=5)
+                                log.info("⚡ [RENDER DEPLOY HOOK] Triggered Render automatic deploy!")
+                            except Exception as dh_err:
+                                log.debug("Render deploy hook notice: %s", dh_err)
                     else:
                         log.warning("Memory Vault git push notice (code %d): %s", res.returncode, res.stderr.decode() if res.stderr else "")
         except Exception as e:
@@ -531,6 +538,13 @@ class SelfCodeManager:
                     subprocess.run(["git", "commit", "-m", f"⚡ [JARVIS Self-Code] {instruction[:60]}"], cwd=self.root_dir, check=False)
                     subprocess.run(["git", "push", remote_url, "main"], cwd=self.root_dir, check=False)
                     log.info("⚡ [SELF CODE IMPROVEMENT] Pushed code change directly to GitHub Jaffer/jarvis main branch!")
+                    deploy_hook = os.environ.get("RENDER_DEPLOY_HOOK", "").strip()
+                    if deploy_hook:
+                        try:
+                            urllib.request.urlopen(deploy_hook, timeout=5)
+                            log.info("⚡ [RENDER DEPLOY HOOK] Triggered Render automatic deploy!")
+                        except Exception as dh_err:
+                            log.debug("Render deploy hook notice: %s", dh_err)
                 except Exception as push_err:
                     log.warning("Self-code git push notice: %s", push_err)
 
