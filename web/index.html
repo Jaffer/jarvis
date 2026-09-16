@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JARVIS // Holographic Core & Vision HUD</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' stroke='%23ffaa30' stroke-width='8' fill='none'/><circle cx='50' cy='50' r='20' fill='%23ffcc66'/></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Outfit:wght@300;400;600;700;900&display=swap" rel="stylesheet">
+  
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+        "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/+esm"
+      }
+    }
+  </script>
+
+  <style>
+    :root {
+      --bg-color: #050608;
+      --color-primary: #ffaa30;
+      --color-primary-glow: rgba(255, 170, 48, 0.45);
+      --color-cyan: #00e5ff;
+      --color-cyan-glow: rgba(0, 229, 255, 0.4);
+      --color-hot: #ffcc66;
+      --color-border: rgba(255, 170, 48, 0.22);
+      --glass-bg: rgba(12, 14, 20, 0.68);
+      --font-ui: 'Outfit', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+
+    body, html {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: var(--bg-color);
+      color: #fff;
+      font-family: var(--font-ui);
+    }
+
+    #canvas-container {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+    }
+
+    /* Ambient background grid and vignette */
+    .vignette-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 2;
+      background: radial-gradient(circle at center, transparent 40%, rgba(5, 6, 8, 0.85) 100%),
+                  linear-gradient(rgba(255, 170, 48, 0.025) 1px, transparent 1px),
+                  linear-gradient(90deg, rgba(255, 170, 48, 0.025) 1px, transparent 1px);
+      background-size: 100% 100%, 40px 40px, 40px 40px;
+    }
+
+    /* CRT Scanlines overlay */
+    .overlay-scanlines {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 11;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0px, transparent 2px,
+        rgba(0, 0, 0, 0.12) 2px, rgba(0, 0, 0, 0.12) 4px
+      );
+      opacity: 0.25;
+    }
+
+    /* Film grain overlay */
+    .overlay-grain {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 10;
+      opacity: 0.05;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 150px;
+      mix-blend-mode: screen;
+    }
+
+    /* Voice state indicator ring */
+    .voice-ring {
+      position: absolute;
+      bottom: 100px;
+      right: 40px;
+      width: 54px;
+      height: 54px;
+      border-radius: 50%;
+      border: 2px solid rgba(255, 170, 48, 0.3);
+      z-index: 15;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.3s ease;
+    }
+    .voice-ring[data-state="idle"] {
+      border-color: rgba(255, 170, 48, 0.2);
+      box-shadow: 0 0 8px rgba(255, 170, 48, 0.1);
+    }
+    .voice-ring[data-state="listening"] {
+      border-color: #00e5ff;
+      box-shadow: 0 0 20px rgba(0, 229, 255, 0.5);
+      animation: voicePulse 1s infinite;
+    }
+    .voice-ring[data-state="thinking"] {
+      border-color: #ffaa30;
+      box-shadow: 0 0 16px rgba(255, 170, 48, 0.4);
+      animation: voiceSpin 1.5s linear infinite;
+    }
+    .voice-ring[data-state="speaking"] {
+      border-color: #00e676;
+      box-shadow: 0 0 22px rgba(0, 230, 118, 0.5);
+      animation: voicePulse 0.6s infinite alternate;
+    }
+    .voice-ring-label {
+      font-family: var(--font-mono);
+      font-size: 8px;
+      letter-spacing: 1px;
+      color: rgba(255, 255, 255, 0.6);
+      text-transform: uppercase;
+    }
+
+    /* Interactive Bottom-Left Shortcut Buttons */
+    .shortcuts-legend {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      line-height: 2.0;
+      color: rgba(255, 255, 255, 0.6);
+      flex-shrink: 0;
+      white-space: nowrap;
+      z-index: 60;
+    }
+    .shortcut-item {
+      display: inline-flex;
+      align-items: center;
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 4px;
+      transition: all 0.2s ease;
+      user-select: none;
+    }
+    .shortcut-item:hover {
+      background: rgba(255, 170, 48, 0.15);
+      color: #fff;
+    }
+    .shortcuts-legend .key {
+      display: inline-block;
+      padding: 1px 5px;
+      border: 1px solid rgba(255, 170, 48, 0.45);
+      border-radius: 3px;
+      margin-right: 4px;
+      font-size: 9px;
+      color: var(--color-primary);
+      box-shadow: 0 0 6px rgba(255, 170, 48, 0.2);
+      transition: all 0.2s ease;
+    }
+    .shortcut-item:hover .key {
+      border-color: var(--color-primary);
+      box-shadow: 0 0 10px var(--color-primary-glow);
+      background: rgba(255, 170, 48, 0.2);
+    }
+
+    @keyframes voicePulse {
+      0% { transform: scale(1); }
+      100% { transform: scale(1.08); }
+    }
+    @keyframes voiceSpin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    /* HUD Header */
+    .hud-header {
+      position: absolute;
+      top: 24px;
+      left: 32px;
+      right: 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    .brand-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .brand-title {
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: 3px;
+      color: var(--color-primary);
+      text-shadow: 0 0 16px var(--color-primary-glow);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand-title::before {
+      content: '';
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      background: var(--color-primary);
+      box-shadow: 0 0 10px var(--color-primary);
+      border-radius: 50%;
+    }
+
+    .brand-sub {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 1.5px;
+      color: rgba(255, 255, 255, 0.5);
+    }
+
+    .status-panel {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      background: var(--glass-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 8px 18px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+    }
+
+    .status-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .status-label {
+      color: rgba(255, 255, 255, 0.45);
+      font-size: 10px;
+      text-transform: uppercase;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+
+    .badge-standby {
+      background: rgba(255, 170, 48, 0.12);
+      color: var(--color-primary);
+      border: 1px solid rgba(255, 170, 48, 0.3);
+    }
+
+    .badge-active {
+      background: rgba(255, 70, 30, 0.22);
+      color: #ff5533;
+      border: 1px solid rgba(255, 70, 30, 0.6);
+      box-shadow: 0 0 12px rgba(255, 70, 30, 0.4);
+      animation: pulseGlow 1.5s infinite alternate;
+    }
+
+    .badge-zoom {
+      background: rgba(0, 229, 255, 0.2);
+      color: var(--color-cyan);
+      border: 1px solid var(--color-cyan);
+      box-shadow: 0 0 10px var(--color-cyan-glow);
+    }
+
+    .badge-connected {
+      background: rgba(0, 230, 118, 0.15);
+      color: #00e676;
+      border: 1px solid rgba(0, 230, 118, 0.4);
+    }
+
+    /* Live Audio Meter */
+    .audio-meter-container {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      width: 100px;
+    }
+
+    .audio-meter-track {
+      width: 100%;
+      height: 5px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    .audio-meter-bar {
+      height: 100%;
+      width: 5%;
+      background: linear-gradient(90deg, var(--color-primary), var(--color-cyan));
+      box-shadow: 0 0 8px var(--color-primary-glow);
+      transition: width 0.08s ease-out;
+    }
+
+    /* Center Crosshair */
+    .reticle-container {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 3;
+      opacity: 0.35;
+      width: 320px;
+      height: 320px;
+      border: 1px dashed rgba(255, 170, 48, 0.25);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .reticle-container::before {
+      content: '';
+      position: absolute;
+      width: 440px;
+      height: 440px;
+      border: 1px solid rgba(255, 170, 48, 0.08);
+      border-radius: 50%;
+    }
+
+    /* Bottom HUD Toolbar */
+    .hud-footer {
+      position: absolute;
+      bottom: 20px;
+      left: 28px;
+      right: 28px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 16px;
+      z-index: 10;
+    }
+
+    .action-controls {
+      display: flex;
+      gap: 12px;
+      background: var(--glass-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 8px 14px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+    }
+
+    .hud-btn {
+      background: rgba(255, 170, 48, 0.06);
+      border: 1px solid rgba(255, 170, 48, 0.25);
+      color: rgba(255, 255, 255, 0.85);
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 1px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .hud-btn:hover {
+      background: rgba(255, 170, 48, 0.18);
+      border-color: var(--color-primary);
+      color: #fff;
+      box-shadow: 0 0 14px var(--color-primary-glow);
+      transform: translateY(-1px);
+    }
+
+    .hud-btn.btn-active {
+      background: rgba(0, 229, 255, 0.16);
+      border-color: var(--color-cyan);
+      color: var(--color-cyan);
+      box-shadow: 0 0 14px var(--color-cyan-glow);
+    }
+
+    /* Webcam PIP preview */
+    .pip-wrapper {
+      position: relative;
+      width: 170px;
+      height: 128px;
+      background: rgba(12, 14, 20, 0.85);
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 6px 30px rgba(0, 0, 0, 0.7);
+      display: none;
+    }
+
+    .pip-wrapper.active {
+      display: block;
+    }
+
+    .pip-wrapper video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+      opacity: 0.65;
+    }
+
+    .pip-wrapper canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    .pip-tag {
+      position: absolute;
+      top: 6px;
+      left: 8px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 1px;
+      color: var(--color-primary);
+      background: rgba(0, 0, 0, 0.6);
+      padding: 2px 6px;
+      border-radius: 3px;
+    }
+
+    /* Toast notification */
+    .toast-box {
+      position: absolute;
+      top: 88px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-20px);
+      background: rgba(16, 20, 28, 0.92);
+      border: 1px solid var(--color-primary);
+      box-shadow: 0 0 24px var(--color-primary-glow);
+      color: #fff;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      letter-spacing: 1px;
+      padding: 10px 24px;
+      border-radius: 20px;
+      z-index: 100;
+      opacity: 0;
+      pointer-events: none;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .toast-box.visible {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    @keyframes pulseGlow {
+      from { box-shadow: 0 0 6px rgba(255, 70, 30, 0.4); }
+      to { box-shadow: 0 0 20px rgba(255, 70, 30, 0.9); }
+    }
+
+    /* Cybernetic Subtitle & Dialogue Terminal */
+    .cyber-terminal {
+      position: fixed;
+      bottom: 100px;
+      left: 28px;
+      width: 440px;
+      max-height: 180px;
+      background: rgba(10, 14, 24, 0.72);
+      backdrop-filter: blur(14px);
+      border: 1px solid rgba(255, 170, 48, 0.28);
+      border-radius: 8px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), inset 0 0 16px rgba(255, 170, 48, 0.05);
+      z-index: 50;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      font-family: var(--font-mono);
+      transition: border-color 0.3s ease;
+    }
+
+    .cyber-terminal:hover {
+      border-color: rgba(255, 170, 48, 0.55);
+    }
+
+    .terminal-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      background: rgba(255, 170, 48, 0.08);
+      border-bottom: 1px solid rgba(255, 170, 48, 0.18);
+      font-size: 10px;
+      letter-spacing: 1px;
+      color: rgba(255, 255, 255, 0.85);
+    }
+
+    .terminal-pulse-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #00e5ff;
+      box-shadow: 0 0 8px #00e5ff;
+      animation: pulseGlow 1.8s infinite alternate;
+    }
+
+    .terminal-status {
+      flex: 1;
+      color: var(--color-primary);
+      font-weight: 600;
+    }
+
+    .terminal-model {
+      color: rgba(255, 255, 255, 0.5);
+      font-size: 9px;
+    }
+
+    .terminal-feed {
+      padding: 8px 12px;
+      overflow-y: auto;
+      max-height: 150px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 11.5px;
+      line-height: 1.45;
+    }
+
+    .terminal-feed::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .terminal-feed::-webkit-scrollbar-thumb {
+      background: rgba(255, 170, 48, 0.3);
+      border-radius: 2px;
+    }
+
+    .terminal-line {
+      display: flex;
+      gap: 6px;
+      animation: fadeIn 0.25s ease-out;
+    }
+
+    .terminal-speaker {
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .terminal-user .terminal-speaker {
+      color: var(--color-cyan);
+    }
+
+    .terminal-user .terminal-text {
+      color: rgba(255, 255, 255, 0.95);
+    }
+
+    .terminal-jarvis .terminal-speaker {
+      color: var(--color-primary);
+    }
+
+    .terminal-jarvis .terminal-text {
+      color: #ffeedd;
+    }
+
+    .terminal-tool {
+      color: #ffcc66;
+      font-style: italic;
+      font-size: 10.5px;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 3D Canvas container -->
+  <div id="canvas-container"></div>
+  <div class="vignette-overlay"></div>
+  <div class="overlay-scanlines"></div>
+  <div class="overlay-grain"></div>
+  <div class="reticle-container"></div>
+
+  <!-- Voice State Indicator Ring -->
+  <div id="voice-ring" class="voice-ring" data-state="idle">
+    <span class="voice-ring-label">IDLE</span>
+  </div>
+
+  <!-- Toast Notification Alert -->
+  <div id="hud-toast" class="toast-box">JARVIS ONLINE</div>
+
+  <!-- HUD Top Bar -->
+  <header class="hud-header">
+    <div class="brand-group">
+      <div class="brand-title">JARVIS // MARK VII</div>
+      <div class="brand-sub">HOLOGRAPHIC 3D AVATAR & VISION CORE</div>
+    </div>
+
+    <div class="status-panel">
+      <div class="status-item">
+        <span class="status-label">Core:</span>
+        <span id="system-status" class="badge badge-standby">ARMED</span>
+      </div>
+
+      <div class="status-item">
+        <span class="status-label">Voice:</span>
+        <span id="speech-status" class="badge badge-active">VOICE: HANDS-FREE</span>
+      </div>
+
+      <div class="status-item">
+        <span class="status-label">Audio Input:</span>
+        <div class="audio-meter-container">
+          <div class="audio-meter-track">
+            <div id="audio-meter-bar" class="audio-meter-bar"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="status-item">
+        <span class="status-label">Gestures:</span>
+        <span id="status-mode" class="badge badge-standby">STANDBY</span>
+        <span id="status-hands" style="color: rgba(255,255,255,0.6); font-size: 11px;">0 HANDS</span>
+      </div>
+
+      <div class="status-item">
+        <span class="status-label">Link:</span>
+        <span id="ws-status" class="badge badge-standby">CONNECTING</span>
+      </div>
+
+      <div class="status-item">
+        <span class="status-label">Vitals:</span>
+        <span id="vitals-cpu" class="badge badge-connected">CPU: --</span>
+        <span id="vitals-ram" class="badge badge-connected" style="margin-left: 3px;">RAM: --</span>
+      </div>
+
+      <div class="status-item">
+        <span class="status-label">Brain:</span>
+        <span id="brain-badge" class="badge badge-active">LLAMA-3.2:3B</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Cybernetic Subtitle & Dialogue Terminal -->
+  <div id="cyber-terminal" class="cyber-terminal">
+    <div class="terminal-header">
+      <div class="terminal-pulse-dot"></div>
+      <span id="terminal-status" class="terminal-status">NEURAL LINK // READY</span>
+      <span id="terminal-model" class="terminal-model">LLAMA-3.2:3B</span>
+    </div>
+    <div id="terminal-feed" class="terminal-feed">
+      <div class="terminal-line terminal-jarvis">
+        <span class="terminal-speaker">JARVIS:</span>
+        <span class="terminal-text">Systems online and neural link established, sir. Ready for commands.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- HUD Bottom Bar -->
+  <footer class="hud-footer">
+    <div class="shortcuts-legend">
+      <div>
+        <span class="shortcut-item" data-shortcut="g"><span class="key">G</span> gestures</span> &nbsp; 
+        <span class="shortcut-item" data-shortcut="t"><span class="key">T</span> theme</span> &nbsp; 
+        <span class="shortcut-item" data-shortcut="v"><span class="key">V</span> voice</span>
+      </div>
+      <div>
+        <span class="shortcut-item" data-shortcut="r"><span class="key">R</span> reset</span> &nbsp; 
+        <span class="shortcut-item" data-shortcut="zoom-in"><span class="key">+</span> zoom in</span> &nbsp; 
+        <span class="shortcut-item" data-shortcut="zoom-out"><span class="key">-</span> zoom out</span> &nbsp; 
+        <span class="shortcut-item" data-shortcut="f"><span class="key">F</span> fullscreen</span>
+      </div>
+      <div>
+        <span class="shortcut-item" data-shortcut="m"><span class="key">M</span> mic visualizer</span> &nbsp; 
+        <span style="opacity: 0.55; font-size: 9.5px;"><span class="key" style="opacity: 0.5;">DRAG</span> spin &nbsp; <span class="key" style="opacity: 0.5;">SCROLL</span> zoom</span>
+      </div>
+    </div>
+
+    <div class="action-controls">
+      <button id="btn-toggle-gesture" class="hud-btn">GESTURES [G]: OFF</button>
+      <button id="btn-theme" class="hud-btn">THEME [T]: ULTRON</button>
+      <button id="btn-voice" class="hud-btn btn-active">HANDS-FREE [V]: ON</button>
+      <button id="btn-reset" class="hud-btn">RESET [R]</button>
+      <button id="btn-fullscreen" class="hud-btn">FULLSCREEN [F]</button>
+    </div>
+
+    <!-- Webcam Hand Tracking PIP Window -->
+    <div id="pip-container" class="pip-wrapper">
+      <span class="pip-tag">VISION // MEDIAPIPE</span>
+      <video id="webcam-video" playsinline muted></video>
+      <canvas id="webcam-overlay" width="640" height="480"></canvas>
+    </div>
+  </footer>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

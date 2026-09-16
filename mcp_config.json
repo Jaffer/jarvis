@@ -1,0 +1,38 @@
+{
+  "mcpServers": {
+    "google_workspace": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-gdrive"],
+      "env": {
+        "GOOGLE_APPLICATION_CREDENTIALS": "./credentials.json"
+      }
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "$GITHUB_PERSONAL_ACCESS_TOKEN"
+      }
+    },
+    "spotify": {
+      "command": "npx",
+      "args": ["-y", "spotify-mcp-server"],
+      "env": {
+        "SPOTIFY_CLIENT_ID": "$SPOTIFY_CLIENT_ID",
+        "SPOTIFY_CLIENT_SECRET": "$SPOTIFY_CLIENT_SECRET"
+      }
+    },
+    "puppeteer": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-puppeteer"]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "./"]
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    }
+  }
+}

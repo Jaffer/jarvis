@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>J.A.R.V.I.S. // Live Mobile Voice Call</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Outfit', sans-serif;
+      background: #030712;
+      color: #06b6d4;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: space-between;
+      padding: 2rem 1.5rem;
+      overflow: hidden;
+    }
+    .header {
+      text-align: center;
+      margin-top: 1rem;
+    }
+    .header h1 {
+      font-size: 1.5rem;
+      letter-spacing: 4px;
+      text-transform: uppercase;
+      color: #38bdf8;
+      text-shadow: 0 0 15px rgba(56, 189, 248, 0.4);
+    }
+    .header p {
+      font-size: 0.85rem;
+      color: #94a3b8;
+      margin-top: 0.25rem;
+    }
+    .call-core {
+      position: relative;
+      width: 220px;
+      height: 220px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .orb-ring {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      border: 2px dashed rgba(6, 182, 212, 0.4);
+      animation: rotateRing 15s linear infinite;
+    }
+    .orb-glow {
+      position: absolute;
+      width: 160px;
+      height: 160px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(6, 182, 212, 0.8) 0%, rgba(14, 165, 233, 0.3) 50%, transparent 70%);
+      box-shadow: 0 0 40px rgba(6, 182, 212, 0.6), inset 0 0 20px rgba(255, 255, 255, 0.8);
+      animation: pulseGlow 2.5s ease-in-out infinite alternate;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .orb-glow svg {
+      width: 48px;
+      height: 48px;
+      fill: #ffffff;
+      filter: drop-shadow(0 0 8px rgba(255,255,255,0.8));
+    }
+    .status-text {
+      text-align: center;
+      font-size: 1.1rem;
+      color: #f8fafc;
+      font-weight: 600;
+      letter-spacing: 1px;
+    }
+    .sub-status {
+      font-size: 0.85rem;
+      color: #38bdf8;
+      margin-top: 0.4rem;
+    }
+    .controls {
+      display: flex;
+      gap: 1.5rem;
+      margin-bottom: 2rem;
+    }
+    .btn-end {
+      background: #ef4444;
+      color: white;
+      border: none;
+      padding: 0.9rem 2rem;
+      border-radius: 50px;
+      font-size: 1rem;
+      font-weight: 600;
+      letter-spacing: 1px;
+      box-shadow: 0 0 20px rgba(239, 68, 68, 0.5);
+      cursor: pointer;
+    }
+    @keyframes rotateRing { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    @keyframes pulseGlow { 0% { transform: scale(0.95); opacity: 0.8; } 100% { transform: scale(1.05); opacity: 1; } }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>J.A.R.V.I.S.</h1>
+    <p>SECURE DIRECT VOICE CALL</p>
+  </div>
+
+  <div class="call-core">
+    <div class="orb-ring"></div>
+    <div class="orb-glow" id="micBtn">
+      <svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/></svg>
+    </div>
+  </div>
+
+  <div>
+    <div class="status-text" id="statusLabel">CALL CONNECTED</div>
+    <div class="sub-status" id="subStatus">Tap orb to speak or end call</div>
+  </div>
+
+  <div class="controls">
+    <button class="btn-end" onclick="window.close(); history.back();">END CALL</button>
+  </div>
+
+  <script>
+    const wsUrl = `ws://${window.location.hostname}:8765`;
+    let ws = null;
+    function connectWS() {
+      ws = new WebSocket(wsUrl);
+      ws.onopen = () => {
+        document.getElementById('statusLabel').innerText = "ONLINE // ENCRYPTED";
+        document.getElementById('subStatus').innerText = "J.A.R.V.I.S. is listening";
+      };
+      ws.onclose = () => {
+        document.getElementById('statusLabel').innerText = "DISCONNECTED";
+        setTimeout(connectWS, 2000);
+      };
+    }
+    connectWS();
+  </script>
+</body>
+</html>
