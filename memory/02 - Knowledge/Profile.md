@@ -18,3 +18,4 @@
 
 - **communication_style**: User frequently uses repetitive, fragmented, or stream-of-consciousness speech patterns (e.g., repeating phrases like 'quick, quick, quick' or 'open bare-hand mode' multiple times) and may use non-standard or ambiguous terminology.
 - **location**: Hyderabad
+- **voice_command_accuracy**: User frequently mispronounces 'bare hands' as 'bear hands' in voice commands.
