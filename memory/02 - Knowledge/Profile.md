@@ -15,3 +15,5 @@
 
 ## Notes
 - (Jarvis adds observations here over time)
+
+- **communication_style**: User frequently uses repetitive, fragmented, or stream-of-consciousness speech patterns (e.g., repeating phrases like 'quick, quick, quick' or 'open bare-hand mode' multiple times) and may use non-standard or ambiguous terminology.
