@@ -319,6 +319,13 @@ class MemoryManager:
                 pass
         return ""
 
+    def flush(self, timeout: float = 10.0):
+        """Flush pending memory items and wait for background git push to complete."""
+        start = time.time()
+        while not self._queue.empty() and (time.time() - start) < timeout:
+            time.sleep(0.1)
+        time.sleep(0.5)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # AUTONOMOUS LEARNING & SELF-IMPROVEMENT ENGINE
@@ -3269,6 +3276,9 @@ def main() -> int:
                 time.sleep(3600)
         except KeyboardInterrupt:
             log.info("Shutting down headless JARVIS gracefully...")
+            if _memory_manager:
+                _memory_manager.log_event("JARVIS shutdown (Ctrl+C)")
+                _memory_manager.flush(timeout=10.0)
             return 0
 
     input_idx = _choose_input_device(blocksize)
@@ -3393,6 +3403,7 @@ def main() -> int:
             _signal_bus.set_state("idle")
         if _memory_manager:
             _memory_manager.log_event("JARVIS shutdown (Ctrl+C)")
+            _memory_manager.flush(timeout=10.0)
         log.info("Goodbye.")
         return 0
     except sd.PortAudioError as e:
