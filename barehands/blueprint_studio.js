@@ -152,28 +152,25 @@ export class PhysicsSimulator {
         this.alert = null;
       }
     } else {
-      // Dynamic Generative Construct & Real-World Pneumatic Web Shooter Solver
+      // Universal Dynamic Generative Construct & Physics Engine Solver
       const phys = (this.activeManifest && this.activeManifest.physics) ? this.activeManifest.physics : null;
-      const basePsi = 3400;
-      const currentPsi = Math.round(basePsi * s + Math.sin(this.time * 5) * 25);
-      const viscosityCP = Math.round(480 - (s - 1.0) * 60 + Math.cos(this.time * 3) * 8);
-      const nozzleVel = (142 * Math.sqrt(s)).toFixed(1);
-      const burstPsi = 4800;
-      const safetyFactor = (burstPsi / Math.max(1, currentPsi)).toFixed(2);
+      const baseNum = phys && phys.primaryVal ? (parseFloat(phys.primaryVal.replace(/[^0-9.]/g, '')) || 100) : 100;
+      const primaryOsc = Math.round(baseNum * s + Math.sin(this.time * 5) * (baseNum * 0.02));
+      const primaryUnits = phys && phys.primaryVal ? phys.primaryVal.replace(/[0-9., ]/g, '') : '%';
 
       this.telemetry = {
-        primaryLabel: (phys && phys.primaryLabel) || "CHAMBER PRESSURE",
-        primaryVal: (phys && phys.primaryVal) ? `${currentPsi} PSI (${(currentPsi*0.0689).toFixed(0)} Bar)` : `${currentPsi} PSI`,
-        secondaryLabel: (phys && phys.secondaryLabel) || "SHEAR VISCOSITY",
-        secondaryVal: (phys && phys.secondaryVal) ? `${viscosityCP} cP` : `${viscosityCP} cP`,
-        tertiaryLabel: (phys && phys.tertiaryLabel) || "NOZZLE VELOCITY",
-        tertiaryVal: (phys && phys.tertiaryVal) ? `${nozzleVel} m/s (SF: ${safetyFactor})` : `${nozzleVel} m/s`,
-        formula: (phys && phys.formula) || "ΔP = f·(L/D)·(ρv²/2)  |  F_shear = μ·(dv/dy)  |  σ_yield = 450 MPa",
-        nominal: safetyFactor >= 1.0 && currentPsi < 4500
+        primaryLabel: (phys && phys.primaryLabel) || "SYSTEM LOAD",
+        primaryVal: phys && phys.primaryVal ? `${primaryOsc} ${primaryUnits}`.trim() : `${Math.round(s * 100)}%`,
+        secondaryLabel: (phys && phys.secondaryLabel) || "FIELD FLUX / OUTPUT",
+        secondaryVal: (phys && phys.secondaryVal) || `${(98.4 * Math.min(1.0, 1.2 / s)).toFixed(1)}% (STABLE)`,
+        tertiaryLabel: (phys && phys.tertiaryLabel) || "SAFETY FACTOR",
+        tertiaryVal: (phys && phys.tertiaryVal) || `${(1.55 / Math.max(0.5, s)).toFixed(2)} (NOMINAL)`,
+        formula: (phys && phys.formula) || "∇·E = ρ/ε₀  |  σ_v = √[½((σ₁-σ₂)² + (σ₂-σ₃)² + (σ₃-σ₁)²)]",
+        nominal: s <= 1.25
       };
 
-      if (currentPsi >= 4400 || safetyFactor < 1.0) {
-        this.alert = `⚠️ CHAMBER OVERPRESSURE: ${currentPsi} PSI EXCEEDS SAFE BURST RATING (SF: ${safetyFactor})`;
+      if (s > 1.35) {
+        this.alert = `⚠️ ELEVATED STRESS LOAD DETECTED (${Math.round(s * 100)}% NOMINAL CAPACITY)`;
         if (this.time - this._lastAlarmTime > 1.8) {
           HolographicAudio.playAlarm();
           this._lastAlarmTime = this.time;
@@ -366,116 +363,6 @@ export class BlueprintBuilder {
 
     return { group, parts, name: (manifest && manifest.id) || "custom_construct", manifest };
   }
-
-  // ── REAL-WORLD SCIENCE PNEUMATIC WEB SHOOTER MK I ──
-  static buildWebShooter() {
-    return this.buildFromManifest({
-      id: "web_shooter",
-      name: "Pneumatic Web Shooter Mk I",
-      description: "Wrist-mounted high-pressure fluid expulsion mechanism based on real-world pneumatic engineering",
-      physics: {
-        solver: "fluid_dynamics",
-        formula: "ΔP = f·(L/D)·(ρv²/2)  |  F_shear = μ·(dv/dy)  |  σ_yield = 450 MPa",
-        primaryLabel: "CHAMBER PRESSURE",
-        primaryVal: "3,400 PSI",
-        secondaryLabel: "SHEAR VISCOSITY",
-        secondaryVal: "480 cP",
-        tertiaryLabel: "NOZZLE VELOCITY",
-        tertiaryVal: "142 m/s",
-        nominal: true
-      },
-      parts: [
-        {
-          id: "wrist_chassis",
-          name: "Titanium Forearm Gauntlet Chassis",
-          geo: "cylinder",
-          args: [1.2, 1.35, 1.4, 28, 1, true],
-          pos: [0, 0, 0],
-          rot: [0, 0, 0],
-          mat: { wireframe: true, color: "#00e5ff", opacity: 0.85 },
-          explodeDir: [0, 0, -1.8],
-          callout: "[WS-01] Titanium Forearm Gauntlet Chassis · Ti-6Al-4V"
-        },
-        {
-          id: "fluid_res_a",
-          name: "Primary Pressurized Fluid Reservoir",
-          geo: "capsule",
-          args: [0.28, 1.5, 8, 16],
-          pos: [1.15, 0.1, 0],
-          rot: [0, 0, 1.57],
-          mat: { wireframe: true, color: "#00e5ff" },
-          explodeDir: [2.6, 0.4, 0],
-          callout: "[WS-02A] Primary Fluid Reservoir · 300 Bar (4,350 PSI)"
-        },
-        {
-          id: "fluid_res_b",
-          name: "Secondary Pressurized Fluid Reservoir",
-          geo: "capsule",
-          args: [0.28, 1.5, 8, 16],
-          pos: [-1.15, 0.1, 0],
-          rot: [0, 0, 1.57],
-          mat: { wireframe: true, color: "#00e5ff" },
-          explodeDir: [-2.6, 0.4, 0],
-          callout: "[WS-02B] Secondary Fluid Reservoir · 300 Bar (4,350 PSI)"
-        },
-        {
-          id: "solenoid_valve",
-          name: "Piezoelectric Pulse Solenoid Valve",
-          geo: "cylinder",
-          args: [0.38, 0.38, 0.7, 20],
-          pos: [0, 0.7, 0.45],
-          rot: [1.57, 0, 0],
-          mat: { wireframe: true, color: "#ffb300" },
-          explodeDir: [0, 1.8, 1.0],
-          callout: "[WS-03] Piezoelectric Solenoid Valve · 1.2ms Response"
-        },
-        {
-          id: "spinneret_nozzle",
-          name: "Variable Spinneret Dispersion Nozzle",
-          geo: "cone",
-          args: [0.36, 0.85, 20],
-          pos: [0, 1.35, 0.45],
-          rot: [0, 0, 0],
-          mat: { wireframe: true, color: "#00e5ff" },
-          rotSpeed: 6.0,
-          explodeDir: [0, 3.2, 1.0],
-          callout: "[WS-04] Variable Spinneret Nozzle · 142 m/s Exit Velocity"
-        },
-        {
-          id: "palm_trigger",
-          name: "Palm Bio-Electric Pressure Switch",
-          geo: "box",
-          args: [0.45, 0.12, 0.35],
-          pos: [0, -1.2, 0.55],
-          mat: { wireframe: false, color: "#ff1744", opacity: 0.9 },
-          explodeDir: [0, -2.4, 0.6],
-          callout: "[WS-05] Palm Bio-Electric Trigger · 65 PSI Activation"
-        },
-        {
-          id: "feed_tubing",
-          name: "Inconel High-Pressure Manifold Tubing",
-          geo: "torus",
-          args: [0.8, 0.08, 12, 24, 3.1415],
-          pos: [0, 0.2, 0.5],
-          rot: [0, 0, 0],
-          mat: { wireframe: true, color: "#ffb300" },
-          explodeDir: [0, 0, 1.5],
-          callout: "[WS-06] Braided Inconel Feed Line · 450 Bar Burst Rating"
-        },
-        {
-          id: "pressure_gauge",
-          name: "Analog Manifold Pressure Gauge",
-          geo: "cylinder",
-          args: [0.28, 0.28, 0.12, 24],
-          pos: [0.75, 0.6, 0.45],
-          rot: [0.5, -0.4, 0],
-          mat: { wireframe: true, color: "#ffb300" },
-          explodeDir: [1.8, 1.2, 0.8],
-          callout: "[WS-07] Chamber Pressure Gauge · 0-5000 PSI Range"
-        }
-      ]
-    });
-  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -569,11 +456,11 @@ export class HolographicStudio {
       <div style="position: absolute; top: 18px; left: 24px; right: 190px; display: flex; align-items: center; gap: 12px; pointer-events: auto;">
         <div style="display: flex; gap: 8px; background: rgba(5,25,30,0.75); padding: 6px 14px; border-radius: 12px; border: 1px solid rgba(0,229,255,0.4); backdrop-filter: blur(10px);">
           <button class="holo-btn active" data-construct="arc_reactor">⚛ ARC REACTOR</button>
-          <button class="holo-btn" data-construct="dynamic" id="holo_dynamic_btn">🛠 DYNAMIC: WEB SHOOTER MK I</button>
+          <button class="holo-btn" data-construct="dynamic" id="holo_dynamic_btn">🛠 DYNAMIC BLUEPRINT</button>
         </div>
 
         <div style="flex: 1; display: flex; gap: 8px; background: rgba(5,25,30,0.75); padding: 6px 14px; border-radius: 12px; border: 1px solid rgba(0,229,255,0.4); backdrop-filter: blur(10px);">
-          <input id="holo_prompt_input" type="text" placeholder="Instruct JARVIS to construct or modify (e.g. 'Build a real life web shooter', 'Add pressure gauge')..." style="flex: 1; background: rgba(0,0,0,0.5); border: 1px solid rgba(0,229,255,0.3); border-radius: 6px; padding: 6px 12px; color: #ffffff; font-family: monospace; font-size: 11px; outline: none;">
+          <input id="holo_prompt_input" type="text" placeholder="Instruct JARVIS to construct or modify (e.g. 'Build plasma cutter', 'Construct railgun', 'Add pressure gauge')..." style="flex: 1; background: rgba(0,0,0,0.5); border: 1px solid rgba(0,229,255,0.3); border-radius: 6px; padding: 6px 12px; color: #ffffff; font-family: monospace; font-size: 11px; outline: none;">
           <button id="holo_submit_btn" style="background: rgba(0,229,255,0.2); border: 1px solid #00e5ff; color: #00e5ff; padding: 6px 14px; border-radius: 6px; font-family: monospace; font-size: 11px; font-weight: 700; cursor: pointer;">⚡ CONSTRUCT / MODIFY</button>
         </div>
       </div>
@@ -799,32 +686,54 @@ export class HolographicStudio {
       }
     }
 
-    // Build model: manifest, Arc Reactor, or Web Shooter
+    // Build model: manifest, Arc Reactor, or dynamic construct
     if (manifest) {
       this.currentConstruct = BlueprintBuilder.buildFromManifest(manifest);
       this.activeManifest = manifest;
       this.simulator.activeManifest = manifest;
       const dynBtn = document.getElementById("holo_dynamic_btn");
       if (dynBtn) {
-        dynBtn.innerText = `🛠 ${manifest.name ? manifest.name.toUpperCase() : "DYNAMIC CONSTRUCT"}`;
-        dynBtn.setAttribute("data-construct", manifest.id || "dynamic");
+        dynBtn.innerText = `🛠 DYNAMIC: ${manifest.name ? manifest.name.toUpperCase() : "CONSTRUCT"}`;
+        dynBtn.setAttribute("data-construct", "dynamic");
         dynBtn.classList.add("active");
         this.hudEl.querySelectorAll(".holo-btn").forEach(b => {
           if (b !== dynBtn) b.classList.remove("active");
         });
       }
-    } else if (name.includes("arc") || name.includes("reactor")) {
+    } else if (name === "dynamic" && this.activeManifest) {
+      this.currentConstruct = BlueprintBuilder.buildFromManifest(this.activeManifest);
+      this.simulator.activeManifest = this.activeManifest;
+      const dynBtn = document.getElementById("holo_dynamic_btn");
+      if (dynBtn) {
+        dynBtn.innerText = `🛠 DYNAMIC: ${this.activeManifest.name ? this.activeManifest.name.toUpperCase() : "CONSTRUCT"}`;
+        dynBtn.classList.add("active");
+        this.hudEl.querySelectorAll(".holo-btn").forEach(b => {
+          if (b !== dynBtn) b.classList.remove("active");
+        });
+      }
+    } else if (name === "dynamic" && !this.activeManifest) {
+      const input = document.getElementById("holo_prompt_input");
+      if (input) {
+        input.focus();
+        input.placeholder = "Enter machine to construct (e.g. 'Build plasma cutter', 'Construct railgun')...";
+      }
       this.currentConstruct = BlueprintBuilder.buildArcReactor();
       this.activeManifest = null;
       this.simulator.activeManifest = null;
+      const arcBtn = this.hudEl ? this.hudEl.querySelector('[data-construct="arc_reactor"]') : null;
+      if (arcBtn) {
+        this.hudEl.querySelectorAll(".holo-btn").forEach(b => b.classList.remove("active"));
+        arcBtn.classList.add("active");
+      }
     } else {
-      this.currentConstruct = BlueprintBuilder.buildWebShooter();
-      this.activeManifest = this.currentConstruct.manifest;
-      this.simulator.activeManifest = this.currentConstruct.manifest;
-      const dynBtn = document.getElementById("holo_dynamic_btn");
-      if (dynBtn) {
-        dynBtn.innerText = "🛠 DYNAMIC: WEB SHOOTER MK I";
-        dynBtn.classList.add("active");
+      // Default: Flagship Arc Reactor Core
+      this.currentConstruct = BlueprintBuilder.buildArcReactor();
+      this.activeManifest = null;
+      this.simulator.activeManifest = null;
+      const arcBtn = this.hudEl ? this.hudEl.querySelector('[data-construct="arc_reactor"]') : null;
+      if (arcBtn) {
+        this.hudEl.querySelectorAll(".holo-btn").forEach(b => b.classList.remove("active"));
+        arcBtn.classList.add("active");
       }
     }
 

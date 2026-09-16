@@ -817,261 +817,409 @@ _global_voice_engine = None
 _active_construct: dict = {}
 
 
-def _get_default_web_shooter_manifest() -> dict:
-    """Returns baseline real-world pneumatic Web Shooter Mk I 3D manifest."""
+def _call_llm_for_construct(messages: list) -> str:
+    """Calls Groq Cloud AI or local Ollama to synthesize a structured 3D blueprint manifest."""
+    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if groq_key:
+        models = ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "allam-2-7b"]
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {groq_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "Jarvis/1.0 (Linux; x86_64)"
+        }
+        for m in models:
+            try:
+                payload = {
+                    "model": m,
+                    "messages": messages,
+                    "temperature": 0.4,
+                    "max_tokens": 1200,
+                    "response_format": {"type": "json_object"}
+                }
+                req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    data = json.loads(resp.read().decode())
+                    msg = data.get("choices", [{}])[0].get("message", {})
+                    content = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+                    if content:
+                        log.info("⚡ Groq 3D blueprint synthesized via %s", m)
+                        return content
+            except Exception as e:
+                log.warning("Groq model %s construct query notice: %s", m, e)
+
+    try:
+        ollama_host = JARVIS_CFG.get("brain", {}).get("host", "http://localhost:11434")
+        ollama_model = JARVIS_CFG.get("brain", {}).get("model", "llama3.2")
+        req_data = json.dumps({
+            "model": ollama_model,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": 0.3, "num_predict": 1000}
+        }).encode()
+        req = urllib.request.Request(
+            f"{ollama_host}/api/chat",
+            data=req_data,
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            res = json.loads(r.read())
+            return res.get("message", {}).get("content", "").strip()
+    except Exception as e:
+        log.warning("Ollama local 3D construct query notice: %s", e)
+
+    return ""
+
+
+def _procedural_construct_synthesizer(prompt: str) -> dict:
+    """Intelligent procedural engineering synthesizer for any arbitrary mechanical construct."""
+    p_lower = prompt.lower()
+    clean_name = prompt.strip().title() or "Mechanical Construct"
+    construct_id = re.sub(r'[^a-z0-9_]', '', clean_name.lower().replace(" ", "_")) or "construct"
+
+    # 1. Electromagnetic / Railgun / Induction / Accelerator Domain
+    if any(w in p_lower for w in ["railgun", "gauss", "accelerator", "magnetic", "electromagnetic", "lorentz", "induction"]):
+        return {
+            "id": construct_id,
+            "name": clean_name,
+            "description": f"High-yield electromagnetic assembly for {clean_name} based on Lorentz force propulsion",
+            "physics": {
+                "solver": "em_field",
+                "formula": "F = I(L × B)  |  B = (μ₀·I)/(2π·r)  |  E = ½·C·V² = 4.2 MJ",
+                "primaryLabel": "MAGNETIC FLUX",
+                "primaryVal": "14.6 T",
+                "secondaryLabel": "RAIL CURRENT",
+                "secondaryVal": "180 kA",
+                "tertiaryLabel": "EXIT VELOCITY",
+                "tertiaryVal": "2,450 m/s",
+                "nominal": True
+            },
+            "parts": [
+                {"id": "housing", "name": "Reinforced Dielectric Rail Housing", "geo": "box", "args": [1.4, 0.9, 4.2], "pos": [0, 0, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff", "opacity": 0.8}, "explodeDir": [0, -1.8, 0], "callout": "[EM-01] Dielectric Casing · High-Strength Ceramic"},
+                {"id": "rail_a", "name": "Primary OFHC Copper Lorentz Rail (+)", "geo": "box", "args": [0.25, 0.35, 4.0], "pos": [0.38, 0, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#ffb300"}, "explodeDir": [2.4, 0, 0], "callout": "[EM-02A] Positive Lorentz Rail · OFHC Copper"},
+                {"id": "rail_b", "name": "Return OFHC Copper Lorentz Rail (-)", "geo": "box", "args": [0.25, 0.35, 4.0], "pos": [-0.38, 0, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#ffb300"}, "explodeDir": [-2.4, 0, 0], "callout": "[EM-02B] Ground Return Rail · OFHC Copper"},
+                {"id": "choke_coil", "name": "Inductive Flux Augmentation Stator", "geo": "torus", "args": [1.2, 0.22, 16, 32], "pos": [0, 0, -1.2], "rot": [1.57, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff"}, "rotSpeed": 4.5, "explodeDir": [0, 0, -2.5], "callout": "[EM-03] Magnetic Induction Choke · 14.6 Tesla"},
+                {"id": "cap_bank", "name": "High-Density Film Capacitor Bank", "geo": "capsule", "args": [0.35, 1.4, 8, 16], "pos": [0, 0.9, -0.6], "rot": [0, 0, 1.57], "mat": {"wireframe": False, "color": "#ff1744", "opacity": 0.9}, "explodeDir": [0, 2.6, 0], "callout": "[EM-04] Pulse Discharge Bank · 4.2 Megajoules"},
+                {"id": "injector", "name": "Pneumatic Pre-Fire Armature Injector", "geo": "cone", "args": [0.4, 0.9, 20], "pos": [0, 0, -2.4], "rot": [1.57, 0, 0], "mat": {"wireframe": True, "color": "#ffb300"}, "explodeDir": [0, 0, -3.2], "callout": "[EM-05] High-Speed Armature Injector · Mach 1.4"},
+                {"id": "coolant_line", "name": "Liquid Nitrogen Cryo Jacket", "geo": "torus", "args": [0.95, 0.08, 12, 24, 3.1415], "pos": [0, -0.5, 0.4], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#3d5afe"}, "explodeDir": [0, -2.2, 1.0], "callout": "[EM-06] LN2 Cryogenic Manifold · 77 Kelvin"},
+                {"id": "muzzle_clamp", "name": "Bore Alignment Stabilizer Collar", "geo": "ring", "args": [0.6, 0.85, 24], "pos": [0, 0, 2.1], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff"}, "explodeDir": [0, 0, 2.8], "callout": "[EM-07] Muzzle Stabilizer Ring · Precision Bore Alignment"}
+            ]
+        }
+
+    # 2. Plasma / Torch / Thermal / Laser / Directed Energy Domain
+    elif any(w in p_lower for w in ["plasma", "torch", "cutter", "laser", "arc", "thermal", "burner"]):
+        return {
+            "id": construct_id,
+            "name": clean_name,
+            "description": f"Thermal ionization assembly for {clean_name} utilizing constricted plasma kinematics",
+            "physics": {
+                "solver": "thermal",
+                "formula": "Q = -k∇T + εσ(T⁴ - T₀⁴)  |  T_arc = 28,000 K  |  σ_gas = 1.4×10⁴ S/m",
+                "primaryLabel": "ARC TEMPERATURE",
+                "primaryVal": "28,500 K",
+                "secondaryLabel": "GAS IONIZATION",
+                "secondaryVal": "99.2%",
+                "tertiaryLabel": "THERMAL EFFICIENCY",
+                "tertiaryVal": "94.8% (NOMINAL)",
+                "nominal": True
+            },
+            "parts": [
+                {"id": "torch_body", "name": "Insulated High-Temp Torch Chassis", "geo": "cylinder", "args": [0.75, 0.85, 2.8, 24], "pos": [0, 0, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff"}, "explodeDir": [0, -2.0, 0], "callout": "[PL-01] Composite Torch Body · Alumina Ceramic"},
+                {"id": "electrode", "name": "Hafnium Cathode Core Insert", "geo": "cylinder", "args": [0.18, 0.18, 1.8, 16], "pos": [0, 0.4, 0], "rot": [0, 0, 0], "mat": {"wireframe": False, "color": "#ffb300", "opacity": 0.95}, "explodeDir": [0, 2.2, 0], "callout": "[PL-02] Hafnium Electrode Core · 28,500 K Arc"},
+                {"id": "swirl_ring", "name": "Vortex Gas Swirl Ring", "geo": "torus", "args": [0.45, 0.09, 12, 24], "pos": [0, 1.2, 0], "rot": [1.57, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff"}, "rotSpeed": 8.0, "explodeDir": [0, 2.8, 0], "callout": "[PL-03] Gas Swirl Ring · Centrifugal Plasma Stabilization"},
+                {"id": "nozzle", "name": "Constricted Orifice Dispersion Nozzle", "geo": "cone", "args": [0.42, 0.9, 20], "pos": [0, 1.8, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#ffb300"}, "explodeDir": [0, 3.8, 0], "callout": "[PL-04] Constricted Copper Nozzle · Mach 2 Plasma Jet"},
+                {"id": "shield_cup", "name": "Outer Gas Deflector Shield", "geo": "cylinder", "args": [0.55, 0.7, 0.8, 20], "pos": [0, 1.6, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff", "opacity": 0.6}, "explodeDir": [0, 3.2, 0], "callout": "[PL-05] Shield Gas Cup · Argon/Helium Barrier"},
+                {"id": "cooling_jacket", "name": "Dual-Pass Liquid Cooling Loop", "geo": "capsule", "args": [0.22, 1.4, 8, 16], "pos": [0.85, -0.2, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#3d5afe"}, "explodeDir": [2.4, 0, 0], "callout": "[PL-06] Deionized Water Heat Exchanger"},
+                {"id": "power_coupling", "name": "High-Frequency Pilot Arc Starter", "geo": "box", "args": [0.5, 0.35, 0.6], "pos": [-0.85, -0.6, 0], "rot": [0, 0, 0], "mat": {"wireframe": False, "color": "#ff1744", "opacity": 0.9}, "explodeDir": [-2.2, 0, 0], "callout": "[PL-07] HF Arc Ignition Module · 15 kV Spark"}
+            ]
+        }
+
+    # 3. Aerospace / Propulsion / Thruster / Ion Engine / Turbine
+    elif any(w in p_lower for w in ["thruster", "engine", "propulsion", "ion", "rocket", "turbine", "motor", "drive"]):
+        return {
+            "id": construct_id,
+            "name": clean_name,
+            "description": f"High-efficiency aerospace propulsion construct for {clean_name} modeled on electrostatic ion acceleration",
+            "physics": {
+                "solver": "fluid_dynamics",
+                "formula": "T = ṁ·v_e + (p_e - p₀)·A_e  |  I_sp = 3,450 s  |  η_prop = 0.88",
+                "primaryLabel": "SPECIFIC IMPULSE",
+                "primaryVal": "3,450 s",
+                "secondaryLabel": "BEAM CURRENT",
+                "secondaryVal": "42.8 A",
+                "tertiaryLabel": "NET THRUST",
+                "tertiaryVal": "1.85 kN",
+                "nominal": True
+            },
+            "parts": [
+                {"id": "nacelle", "name": "Titanium Main Propulsion Nacelle", "geo": "cylinder", "args": [1.4, 1.5, 2.6, 28], "pos": [0, 0, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff"}, "explodeDir": [0, 0, -2.2], "callout": "[TH-01] Outer Structural Nacelle · Ti-6Al-4V"},
+                {"id": "discharge_core", "name": "Xenon Ionization Chamber", "geo": "cylinder", "args": [0.85, 0.85, 1.8, 20], "pos": [0, 0, 0.2], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#3d5afe"}, "explodeDir": [0, 0, 1.0], "callout": "[TH-02] Ionization Discharge Core · 13.56 MHz RF"},
+                {"id": "accel_grid", "name": "Molybdenum Electrostatic Accelerator Grid", "geo": "ring", "args": [0.75, 1.15, 28], "pos": [0, 0, 1.4], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#ffb300"}, "rotSpeed": 3.0, "explodeDir": [0, 0, 3.2], "callout": "[TH-03] Twin Molybdenum Grids · 1.8 kV Potential"},
+                {"id": "neutralizer", "name": "Hollow Cathode Electron Emitter", "geo": "cone", "args": [0.25, 0.6, 16], "pos": [1.2, 0.3, 1.2], "rot": [0, 0, -0.6], "mat": {"wireframe": True, "color": "#ffb300"}, "explodeDir": [2.6, 0.8, 2.2], "callout": "[TH-04] Beam Neutralizer Cathode"},
+                {"id": "magnetic_coil", "name": "Magnetic Ring Solenoid Cusp", "geo": "torus", "args": [1.25, 0.16, 16, 32], "pos": [0, 0, -0.4], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff"}, "explodeDir": [0, 0, -1.8], "callout": "[TH-05] SmCo Magnetic Confinement Rings"},
+                {"id": "propellant_tank", "name": "Carbon-Composite Supercritical Xenon Tank", "geo": "capsule", "args": [0.38, 1.6, 8, 16], "pos": [-1.25, 0, -0.4], "rot": [0, 0, 0], "mat": {"wireframe": False, "color": "#ff1744", "opacity": 0.85}, "explodeDir": [-2.6, 0, -1.0], "callout": "[TH-06] Supercritical Gas Cell · 150 Bar"}
+            ]
+        }
+
+    # 4. Robotics / Exoskeleton / Actuator / Kinematics
+    elif any(w in p_lower for w in ["exoskeleton", "robot", "arm", "leg", "brace", "joint", "actuator", "prosthetic", "glove"]):
+        return {
+            "id": construct_id,
+            "name": clean_name,
+            "description": f"Biomechanical kinematic construct for {clean_name} based on high-torque harmonic actuation",
+            "physics": {
+                "solver": "structural",
+                "formula": "τ = J·α + b·ω  |  σ_v = √[½((σ₁-σ₂)² + (σ₂-σ₃)² + (σ₃-σ₁)²)]  |  SF = 1.62",
+                "primaryLabel": "PEAK TORQUE",
+                "primaryVal": "380 N·m",
+                "secondaryLabel": "ACTUATION LATENCY",
+                "secondaryVal": "2.4 ms",
+                "tertiaryLabel": "SAFETY FACTOR",
+                "tertiaryVal": "1.62 (NOMINAL)",
+                "nominal": True
+            },
+            "parts": [
+                {"id": "strut", "name": "Titanium Structural Load Spar", "geo": "cylinder", "args": [0.45, 0.55, 3.2, 20], "pos": [0, 0, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff"}, "explodeDir": [0, -2.0, 0], "callout": "[EX-01] Load-Bearing Spar · Ti-6Al-4V"},
+                {"id": "harmonic_drive", "name": "High-Ratio Harmonic Gear Drive", "geo": "cylinder", "args": [0.85, 0.85, 0.65, 24], "pos": [0, 1.4, 0], "rot": [1.57, 0, 0], "mat": {"wireframe": True, "color": "#ffb300"}, "rotSpeed": 4.0, "explodeDir": [0, 2.8, 1.2], "callout": "[EX-02] Brushless Harmonic Actuator · 160:1 Reduction"},
+                {"id": "rotary_encoder", "name": "Optical 20-Bit Absolute Angle Encoder", "geo": "ring", "args": [0.4, 0.75, 24], "pos": [0, 1.4, 0.45], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff"}, "explodeDir": [0, 2.8, 2.4], "callout": "[EX-03] Absolute Encoder · 0.001° Precision"},
+                {"id": "tendon_a", "name": "Carbon-Fiber Artificial Muscle Tendon", "geo": "capsule", "args": [0.15, 1.6, 6, 12], "pos": [0.55, 0.2, 0.3], "rot": [0.1, 0, 0.2], "mat": {"wireframe": False, "color": "#ff1744", "opacity": 0.9}, "explodeDir": [2.2, 0, 1.0], "callout": "[EX-04A] High-Tensile Electro-Active Tendon"},
+                {"id": "tendon_b", "name": "Antagonistic Return Tendon", "geo": "capsule", "args": [0.15, 1.6, 6, 12], "pos": [-0.55, 0.2, 0.3], "rot": [0.1, 0, -0.2], "mat": {"wireframe": False, "color": "#ff1744", "opacity": 0.9}, "explodeDir": [-2.2, 0, 1.0], "callout": "[EX-04B] Return Tendon · 8,500 N Tensile Limit"},
+                {"id": "cuff", "name": "Biometric Conformal Attachment Cuff", "geo": "torus", "args": [0.95, 0.15, 12, 24, 4.2], "pos": [0, -1.2, 0], "rot": [1.57, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff"}, "explodeDir": [0, -2.8, 0], "callout": "[EX-05] Adaptive Ergonomic Bio-Cuff"}
+            ]
+        }
+
+    # 5. Fluidics / Pneumatic / Hydraulic / Dispenser / Valve
+    elif any(w in p_lower for w in ["fluid", "pneumatic", "hydraulic", "valve", "dispenser", "injector", "pump", "tank", "gauge", "pressure", "shooter"]):
+        return {
+            "id": construct_id,
+            "name": clean_name,
+            "description": f"High-pressure fluid kinematics assembly for {clean_name}",
+            "physics": {
+                "solver": "fluid_dynamics",
+                "formula": "ΔP = f·(L/D)·(ρv²/2)  |  F_shear = μ·(dv/dy)  |  v_exit = √(2ΔP/ρ)",
+                "primaryLabel": "CHAMBER PRESSURE",
+                "primaryVal": "3,400 PSI",
+                "secondaryLabel": "DYNAMIC VISCOSITY",
+                "secondaryVal": "480 cP",
+                "tertiaryLabel": "FLOW VELOCITY",
+                "tertiaryVal": "142 m/s",
+                "nominal": True
+            },
+            "parts": [
+                {"id": "chassis", "name": "Titanium Manifold Mount Chassis", "geo": "cylinder", "args": [1.1, 1.25, 1.4, 24], "pos": [0, 0, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff"}, "explodeDir": [0, 0, -1.8], "callout": "[FL-01] Manifold Chassis · Ti-6Al-4V"},
+                {"id": "res_a", "name": "Primary 300 Bar Fluid Reservoir", "geo": "capsule", "args": [0.28, 1.4, 8, 16], "pos": [1.05, 0.1, 0], "rot": [0, 0, 1.57], "mat": {"wireframe": True, "color": "#00e5ff"}, "explodeDir": [2.4, 0.4, 0], "callout": "[FL-02A] Primary Fluid Reservoir · 300 Bar"},
+                {"id": "res_b", "name": "Secondary Auxiliary Fluid Reservoir", "geo": "capsule", "args": [0.28, 1.4, 8, 16], "pos": [-1.05, 0.1, 0], "rot": [0, 0, 1.57], "mat": {"wireframe": True, "color": "#00e5ff"}, "explodeDir": [-2.4, 0.4, 0], "callout": "[FL-02B] Secondary Reservoir · 300 Bar"},
+                {"id": "valve", "name": "Piezoelectric Pulse Solenoid Valve", "geo": "cylinder", "args": [0.35, 0.35, 0.7, 20], "pos": [0, 0.65, 0.4], "rot": [1.57, 0, 0], "mat": {"wireframe": True, "color": "#ffb300"}, "explodeDir": [0, 1.8, 1.0], "callout": "[FL-03] Piezo Solenoid Valve · 1.2ms Response"},
+                {"id": "nozzle", "name": "Variable Dispersion Ejection Nozzle", "geo": "cone", "args": [0.32, 0.8, 20], "pos": [0, 1.3, 0.4], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff"}, "rotSpeed": 5.0, "explodeDir": [0, 3.2, 1.0], "callout": "[FL-04] Dispersion Nozzle · 142 m/s Exit"},
+                {"id": "manifold_line", "name": "High-Pressure Braided Inconel Feed Line", "geo": "torus", "args": [0.75, 0.07, 12, 24, 3.1415], "pos": [0, 0.15, 0.45], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#ffb300"}, "explodeDir": [0, 0, 1.6], "callout": "[FL-05] Braided Inconel Manifold · 450 Bar Rating"},
+                {"id": "dial", "name": "Analog Chamber Pressure Gauge", "geo": "cylinder", "args": [0.26, 0.26, 0.12, 20], "pos": [0.7, 0.55, 0.4], "rot": [0.5, -0.4, 0], "mat": {"wireframe": True, "color": "#ffb300"}, "explodeDir": [1.8, 1.2, 0.8], "callout": "[FL-06] Chamber Pressure Dial · 0-5000 PSI"}
+            ]
+        }
+
+    # 6. Universal Mechanical Construct Default
     return {
-        "id": "web_shooter",
-        "name": "Pneumatic Web Shooter Mk I",
-        "description": "Wrist-mounted high-pressure fluid expulsion mechanism based on real-world pneumatic engineering",
+        "id": construct_id,
+        "name": clean_name,
+        "description": f"Holographic 3D engineering schematic for {clean_name} based on multi-axis kinematics",
         "physics": {
-            "solver": "fluid_dynamics",
-            "formula": "ΔP = f·(L/D)·(ρv²/2)  |  F_shear = μ·(dv/dy)  |  σ_yield = 450 MPa",
-            "primaryLabel": "CHAMBER PRESSURE",
-            "primaryVal": "3,400 PSI",
-            "secondaryLabel": "SHEAR VISCOSITY",
-            "secondaryVal": "480 cP",
-            "tertiaryLabel": "NOZZLE VELOCITY",
-            "tertiaryVal": "142 m/s",
+            "solver": "structural",
+            "formula": "σ_v = √[½((σ₁-σ₂)² + (σ₂-σ₃)² + (σ₃-σ₁)²)]  |  f_n = (1/2π)√(k/m)",
+            "primaryLabel": "YIELD STRESS",
+            "primaryVal": "420 MPa",
+            "secondaryLabel": "RESONANT FREQ",
+            "secondaryVal": "1.85 kHz",
+            "tertiaryLabel": "SAFETY FACTOR",
+            "tertiaryVal": "1.55 (NOMINAL)",
             "nominal": True
         },
         "parts": [
-            {
-                "id": "wrist_chassis",
-                "name": "Titanium Forearm Gauntlet Chassis",
-                "geo": "cylinder",
-                "args": [1.2, 1.35, 1.4, 28, 1, True],
-                "pos": [0, 0, 0],
-                "rot": [0, 0, 0],
-                "mat": {"wireframe": True, "color": "#00e5ff", "opacity": 0.85},
-                "explodeDir": [0, 0, -1.8],
-                "callout": "[WS-01] Titanium Forearm Gauntlet Chassis · Ti-6Al-4V"
-            },
-            {
-                "id": "fluid_res_a",
-                "name": "Primary Pressurized Fluid Reservoir",
-                "geo": "capsule",
-                "args": [0.28, 1.5, 8, 16],
-                "pos": [1.15, 0.1, 0],
-                "rot": [0, 0, 1.57],
-                "mat": {"wireframe": True, "color": "#00e5ff"},
-                "explodeDir": [2.6, 0.4, 0],
-                "callout": "[WS-02A] Primary Fluid Reservoir · 300 Bar (4,350 PSI)"
-            },
-            {
-                "id": "fluid_res_b",
-                "name": "Secondary Pressurized Fluid Reservoir",
-                "geo": "capsule",
-                "args": [0.28, 1.5, 8, 16],
-                "pos": [-1.15, 0.1, 0],
-                "rot": [0, 0, 1.57],
-                "mat": {"wireframe": True, "color": "#00e5ff"},
-                "explodeDir": [-2.6, 0.4, 0],
-                "callout": "[WS-02B] Secondary Fluid Reservoir · 300 Bar (4,350 PSI)"
-            },
-            {
-                "id": "solenoid_valve",
-                "name": "Piezoelectric Pulse Solenoid Valve",
-                "geo": "cylinder",
-                "args": [0.38, 0.38, 0.7, 20],
-                "pos": [0, 0.7, 0.45],
-                "rot": [1.57, 0, 0],
-                "mat": {"wireframe": True, "color": "#ffb300"},
-                "explodeDir": [0, 1.8, 1.0],
-                "callout": "[WS-03] Piezoelectric Solenoid Valve · 1.2ms Response"
-            },
-            {
-                "id": "spinneret_nozzle",
-                "name": "Variable Spinneret Dispersion Nozzle",
-                "geo": "cone",
-                "args": [0.36, 0.85, 20],
-                "pos": [0, 1.35, 0.45],
-                "rot": [0, 0, 0],
-                "mat": {"wireframe": True, "color": "#00e5ff"},
-                "rotSpeed": 6.0,
-                "explodeDir": [0, 3.2, 1.0],
-                "callout": "[WS-04] Variable Spinneret Nozzle · 142 m/s Exit Velocity"
-            },
-            {
-                "id": "palm_trigger",
-                "name": "Palm Bio-Electric Pressure Switch",
-                "geo": "box",
-                "args": [0.45, 0.12, 0.35],
-                "pos": [0, -1.2, 0.55],
-                "mat": {"wireframe": False, "color": "#ff1744", "opacity": 0.9},
-                "explodeDir": [0, -2.4, 0.6],
-                "callout": "[WS-05] Palm Bio-Electric Trigger · 65 PSI Activation"
-            },
-            {
-                "id": "feed_tubing",
-                "name": "Inconel High-Pressure Manifold Tubing",
-                "geo": "torus",
-                "args": [0.8, 0.08, 12, 24, 3.1415],
-                "pos": [0, 0.2, 0.5],
-                "rot": [0, 0, 0],
-                "mat": {"wireframe": True, "color": "#ffb300"},
-                "explodeDir": [0, 0, 1.5],
-                "callout": "[WS-06] Braided Inconel Feed Line · 450 Bar Burst Rating"
-            },
-            {
-                "id": "pressure_gauge",
-                "name": "Analog Manifold Pressure Gauge",
-                "geo": "cylinder",
-                "args": [0.28, 0.28, 0.12, 24],
-                "pos": [0.75, 0.6, 0.45],
-                "rot": [0.5, -0.4, 0],
-                "mat": {"wireframe": True, "color": "#ffb300"},
-                "explodeDir": [1.8, 1.2, 0.8],
-                "callout": "[WS-07] Chamber Pressure Gauge · 0-5000 PSI Range"
-            }
+            {"id": "chassis", "name": f"{clean_name} Structural Chassis", "geo": "cylinder", "args": [1.2, 1.3, 2.2, 24], "pos": [0, 0, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff"}, "explodeDir": [0, 0, -2.2], "callout": f"[MC-01] {clean_name} Primary Chassis"},
+            {"id": "actuator", "name": "High-Torque Central Actuator", "geo": "torus", "args": [1.6, 0.22, 16, 32], "pos": [0, 0.4, 0], "rot": [1.57, 0, 0], "mat": {"wireframe": True, "color": "#ffb300"}, "rotSpeed": 3.0, "explodeDir": [0, 2.4, 0], "callout": "[MC-02] Magnetic Actuator Core"},
+            {"id": "emitter", "name": "Pulse Dispersion Emitter", "geo": "cone", "args": [0.55, 1.1, 20], "pos": [0, 1.6, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff"}, "explodeDir": [0, 3.6, 0], "callout": "[MC-03] Pulse Vector Emitter"},
+            {"id": "power_cell", "name": "High-Density Energy Cell", "geo": "capsule", "args": [0.32, 1.3, 8, 16], "pos": [1.15, -0.2, 0], "rot": [0, 0, 1.57], "mat": {"wireframe": False, "color": "#ff1744", "opacity": 0.9}, "explodeDir": [2.6, 0, 0], "callout": "[MC-04] High-Density Energy Cell"},
+            {"id": "stabilizer_ring", "name": "Harmonic Damper Ring", "geo": "ring", "args": [0.8, 1.2, 24], "pos": [0, -0.8, 0], "rot": [1.57, 0, 0], "mat": {"wireframe": True, "color": "#3d5afe"}, "explodeDir": [0, -2.6, 0], "callout": "[MC-05] Harmonic Damper Ring"},
+            {"id": "feed_tubing", "name": "Braided Manifold Line", "geo": "torus", "args": [0.85, 0.08, 12, 24, 3.1415], "pos": [0, 0, 0.6], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#ffb300"}, "explodeDir": [0, 0, 1.8], "callout": "[MC-06] Braided Conduit Line"}
         ]
     }
 
 
 def construct_or_modify_3d_object(prompt: str, action: str = "create", modifications: str = "") -> tuple[dict, str]:
-    """Dynamically creates or modifies a 3D mechanical construct based on real-world engineering."""
+    """Dynamically creates or modifies an arbitrary 3D mechanical construct using AI reasoning and engineering synthesis."""
     global _active_construct
-    p_lower = (prompt + " " + modifications).lower().replace("_", " ")
 
+    # If action is CREATE or no active construct:
     if not _active_construct or action == "create":
-        if any(w in p_lower for w in ["web shooter", "webshooter", "spider", "wrist shooter"]):
-            _active_construct = _get_default_web_shooter_manifest()
-            diagnosis = (
-                "Constructing real-world pneumatic web shooter schematic, sir. "
-                "I've referenced high-pressure fluid expulsion mechanics. "
-                "The dual-canister system operates at 3,400 PSI with a piezoelectric solenoid valve "
-                "and variable spinneret nozzle. Displaying on Barehands Board now."
-            )
-            return _active_construct, diagnosis
-        else:
-            obj_name = prompt.strip().title() or "Mechanical Assembly"
-            _active_construct = {
-                "id": prompt.lower().replace(" ", "_"),
-                "name": obj_name,
-                "description": f"Holographic 3D construct for {obj_name} generated from engineering principles",
-                "physics": {
-                    "solver": "structural",
-                    "formula": "σ_v = √[½((σ₁-σ₂)² + (σ₂-σ₃)² + (σ₃-σ₁)²)] | SF = 1.45",
-                    "primaryLabel": "YIELD STRESS",
-                    "primaryVal": "420 MPa",
-                    "secondaryLabel": "RESONANT FREQUENCY",
-                    "secondaryVal": "1.85 kHz",
-                    "tertiaryLabel": "SAFETY FACTOR",
-                    "tertiaryVal": "1.45 (NOMINAL)",
-                    "nominal": True
-                },
-                "parts": [
-                    {
-                        "id": "main_chassis",
-                        "name": f"{obj_name} Structural Chassis",
-                        "geo": "cylinder",
-                        "args": [1.2, 1.2, 2.0, 24],
-                        "pos": [0, 0, 0],
-                        "rot": [0, 0, 0],
-                        "mat": {"wireframe": True, "color": "#00e5ff"},
-                        "explodeDir": [0, 0, -2.0],
-                        "callout": f"[MC-01] {obj_name} Primary Chassis"
-                    },
-                    {
-                        "id": "actuator_core",
-                        "name": "Central Magnetic Actuator",
-                        "geo": "torus",
-                        "args": [1.8, 0.25, 16, 32],
-                        "pos": [0, 0.4, 0],
-                        "rot": [1.57, 0, 0],
-                        "mat": {"wireframe": True, "color": "#ffb300"},
-                        "explodeDir": [0, 2.5, 0],
-                        "callout": "[MC-02] Magnetic Actuator Core"
-                    },
-                    {
-                        "id": "energy_emitter",
-                        "name": "Pulse Vector Emitter",
-                        "geo": "cone",
-                        "args": [0.6, 1.2, 20],
-                        "pos": [0, 1.6, 0],
-                        "rot": [0, 0, 0],
-                        "mat": {"wireframe": True, "color": "#00e5ff"},
-                        "explodeDir": [0, 3.8, 0],
-                        "callout": "[MC-03] Pulse Vector Emitter"
-                    },
-                    {
-                        "id": "power_capsule",
-                        "name": "High-Density Energy Cell",
-                        "geo": "capsule",
-                        "args": [0.35, 1.2, 8, 16],
-                        "pos": [1.2, -0.2, 0],
-                        "rot": [0, 0, 1.57],
-                        "mat": {"wireframe": True, "color": "#ff1744"},
-                        "explodeDir": [2.8, 0, 0],
-                        "callout": "[MC-04] High-Density Energy Cell"
-                    }
-                ]
-            }
-            diagnosis = f"Synthesizing 3D blueprint for {obj_name}. Real-world structural stress and kinematics mapped. Loaded on Barehands Board."
-            return _active_construct, diagnosis
+        clean_name = prompt.strip().title() or "Mechanical Construct"
+
+        # Prepare AI system prompt for Stark engineering synthesis
+        sys_prompt = (
+            "You are J.A.R.V.I.S., Tony Stark's engineering and holographic design AI. "
+            "Synthesize a movie-accurate 3D mechanical construct and blueprint parts manifest for the requested machine "
+            "based on real-world engineering, physics, kinematics, and materials science.\n"
+            "Return ONLY a single valid JSON object without commentary or markdown codeblocks.\n"
+            "SCHEMA:\n"
+            "{\n"
+            '  "id": "slug_name",\n'
+            '  "name": "Machine Name",\n'
+            '  "description": "Engineering overview",\n'
+            '  "physics": {\n'
+            '    "solver": "thermal" | "fluid_dynamics" | "stress" | "em_field" | "structural",\n'
+            '    "formula": "Real physics equation(s)",\n'
+            '    "primaryLabel": "METRIC NAME", "primaryVal": "Value with unit",\n'
+            '    "secondaryLabel": "METRIC NAME", "secondaryVal": "Value with unit",\n'
+            '    "tertiaryLabel": "METRIC NAME", "tertiaryVal": "Value with unit",\n'
+            '    "nominal": true\n'
+            '  },\n'
+            '  "parts": [\n'
+            '    {\n'
+            '      "id": "unique_part_id",\n'
+            '      "name": "Human Part Name",\n'
+            '      "geo": "cylinder" | "box" | "torus" | "cone" | "capsule" | "sphere" | "ring",\n'
+            '      "args": [number, ...],\n'
+            '      "pos": [x, y, z],\n'
+            '      "rot": [rx, ry, rz],\n'
+            '      "mat": {"wireframe": boolean, "color": "#hex", "opacity": 0.85},\n'
+            '      "rotSpeed": 0.0,\n'
+            '      "explodeDir": [ex, ey, ez],\n'
+            '      "callout": "[TAG] Part Name · Engineering Spec/Material"\n'
+            '    }\n'
+            '  ]\n'
+            "}\n"
+            "Generate between 6 and 10 intricate, realistic sub-assemblies with appropriate 3D coordinates and explosion vectors."
+        )
+
+        user_content = f"Construct a high-precision 3D blueprint schematic for: {prompt}. Reference real-world science and engineering."
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_content}
+        ]
+
+        raw_llm = _call_llm_for_construct(messages)
+        manifest = None
+        if raw_llm:
+            try:
+                clean_json = raw_llm.strip()
+                if clean_json.startswith("```"):
+                    clean_json = re.sub(r'^```[a-zA-Z]*\n', '', clean_json)
+                    clean_json = re.sub(r'\n```$', '', clean_json)
+                parsed = json.loads(clean_json)
+                if isinstance(parsed, dict) and "parts" in parsed and len(parsed["parts"]) >= 4:
+                    manifest = parsed
+                    log.info("⚡ AI synthesized 3D construct for: %s (%d parts)", manifest.get("name"), len(manifest["parts"]))
+            except Exception as e:
+                log.warning("Could not parse AI construct JSON: %s. Using procedural synthesis.", e)
+
+        if not manifest:
+            manifest = _procedural_construct_synthesizer(prompt)
+
+        _active_construct = manifest
+        name = manifest.get("name", clean_name)
+        solver = manifest.get("physics", {}).get("solver", "structural").replace("_", " ")
+        p_count = len(manifest.get("parts", []))
+
+        diagnosis = (
+            f"Synthesizing 3D blueprint for {name}, sir. "
+            f"Referenced real-world {solver} physics and kinematics. "
+            f"Compiled {p_count} sub-assemblies on Barehands Board."
+        )
+        return _active_construct, diagnosis
 
     # Action is MODIFY:
+    mod_text = (modifications or prompt).strip()
+    p_lower = mod_text.lower()
+
+    # Try AI modification first
+    sys_prompt = (
+        "You are J.A.R.V.I.S., Tony Stark's engineering AI. "
+        "The user wants to modify an existing 3D construct manifest in real time. "
+        "Update the JSON manifest to incorporate their requested changes (add new parts, scale/alter existing parts, or update physics telemetry). "
+        "Return ONLY the updated valid JSON object without markdown codeblocks or commentary."
+    )
+    user_content = (
+        f"Active 3D Construct:\n{json.dumps(_active_construct, indent=2)}\n\n"
+        f"User Modification Instruction:\n{mod_text}"
+    )
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": user_content}
+    ]
+
+    raw_llm = _call_llm_for_construct(messages)
+    if raw_llm:
+        try:
+            clean_json = raw_llm.strip()
+            if clean_json.startswith("```"):
+                clean_json = re.sub(r'^```[a-zA-Z]*\n', '', clean_json)
+                clean_json = re.sub(r'\n```$', '', clean_json)
+            parsed = json.loads(clean_json)
+            if isinstance(parsed, dict) and "parts" in parsed and len(parsed["parts"]) >= 1:
+                _active_construct = parsed
+                log.info("⚡ AI modified 3D construct successfully")
+                diagnosis = f"Modifications applied to {_active_construct.get('name', 'construct')}, sir: {mod_text}. Render updated on Barehands Board."
+                return _active_construct, diagnosis
+        except Exception as e:
+            log.warning("AI construct modification notice: %s. Using procedural modification.", e)
+
+    # Procedural modification fallback
     parts = _active_construct.setdefault("parts", [])
     phys = _active_construct.setdefault("physics", {})
-
     added_items = []
-    if "laser" in p_lower or "sight" in p_lower:
-        laser_part = {
-            "id": "laser_sight",
-            "name": "Tactical Laser Targeting Diode",
+
+    if any(w in p_lower for w in ["gauge", "dial", "manometer", "sensor"]):
+        if not any("gauge" in p.get("id", "") for p in parts):
+            parts.append({
+                "id": f"aux_gauge_{len(parts)}",
+                "name": "Telemetry Diagnostics Dial",
+                "geo": "cylinder",
+                "args": [0.28, 0.28, 0.12, 24],
+                "pos": [0.8, 0.7, 0.5],
+                "rot": [0.5, -0.4, 0],
+                "mat": {"wireframe": True, "color": "#ffb300"},
+                "explodeDir": [2.0, 1.4, 1.0],
+                "callout": "[MOD] Dynamic Telemetry Dial · Real-Time Readout"
+            })
+            added_items.append("telemetry gauge")
+
+    if any(w in p_lower for w in ["canister", "tank", "reservoir", "cell", "battery"]):
+        parts.append({
+            "id": f"aux_reservoir_{len(parts)}",
+            "name": "Auxiliary High-Capacity Pressure Cell",
+            "geo": "capsule",
+            "args": [0.28, 1.4, 8, 16],
+            "pos": [0, -0.8, -1.1],
+            "rot": [1.57, 0, 0],
+            "mat": {"wireframe": True, "color": "#00e5ff"},
+            "explodeDir": [0, -2.0, -2.2],
+            "callout": "[MOD] Auxiliary Energy / Pressure Cell (High-Cap)"
+        })
+        added_items.append("auxiliary reservoir cell")
+
+    if any(w in p_lower for w in ["laser", "sight", "optics", "beam"]):
+        parts.append({
+            "id": f"laser_diode_{len(parts)}",
+            "name": "Tactical Alignment Laser Diode",
             "geo": "cylinder",
             "args": [0.1, 0.1, 0.8, 12],
             "pos": [0, 1.1, 0.85],
             "rot": [1.57, 0, 0],
             "mat": {"wireframe": False, "color": "#ff1744", "opacity": 0.95},
             "explodeDir": [0, 2.2, 1.8],
-            "callout": "[MOD] 650nm Tactical Target Laser Diode"
-        }
-        parts.append(laser_part)
-        added_items.append("tactical laser sight")
+            "callout": "[MOD] 650nm Coherent Guidance Diode"
+        })
+        added_items.append("guidance laser diode")
 
-    if "dual" in p_lower or "extra canister" in p_lower or "second canister" in p_lower:
-        extra_can = {
-            "id": "fluid_res_c",
-            "name": "Auxiliary High-Capacity Fluid Reservoir",
-            "geo": "capsule",
-            "args": [0.28, 1.5, 8, 16],
-            "pos": [0, -0.6, -1.15],
-            "rot": [1.57, 0, 0],
-            "mat": {"wireframe": True, "color": "#00e5ff"},
-            "explodeDir": [0, -1.8, -2.2],
-            "callout": "[MOD] Secondary High-Capacity Fluid Reservoir (300 Bar)"
-        }
-        parts.append(extra_can)
-        added_items.append("secondary fluid reservoir")
-
-    if "gauge" in p_lower or "dial" in p_lower:
-        gauge_found = any(p.get("id") == "pressure_gauge" for p in parts)
-        if not gauge_found:
-            gauge_part = {
-                "id": "pressure_gauge",
-                "name": "Analog Manifold Pressure Gauge",
-                "geo": "cylinder",
-                "args": [0.28, 0.28, 0.12, 24],
-                "pos": [0.75, 0.6, 0.45],
-                "rot": [0.5, -0.4, 0],
-                "mat": {"wireframe": True, "color": "#ffb300"},
-                "explodeDir": [1.8, 1.2, 0.8],
-                "callout": "[MOD] Chamber Pressure Gauge (0-5000 PSI)"
-            }
-            parts.append(gauge_part)
-            added_items.append("pressure gauge dial")
-
-    if "pressure" in p_lower or "psi" in p_lower or "boost" in p_lower:
-        phys["primaryVal"] = "4,200 PSI"
-        phys["formula"] = "ΔP = 4,200 PSI (High-Yield Dispersion Overdrive)"
-        added_items.append("pressure boost to 4,200 PSI")
-
-    if "nozzle" in p_lower or "barrel" in p_lower:
+    if any(w in p_lower for w in ["nozzle", "bore", "barrel"]):
         for p in parts:
-            if "nozzle" in p.get("id", ""):
-                p["args"] = [0.5, 1.1, 24]
-                p["callout"] = "[MOD] High-Dispersion Wide-Bore Nozzle"
-        added_items.append("wide-bore dispersion nozzle")
+            if any(k in p.get("id", "") for k in ["nozzle", "barrel", "emitter"]):
+                p["args"] = [p["args"][0] * 1.35 if len(p.get("args", [])) > 0 else 0.5, 1.1, 24]
+                p["callout"] = f"{p.get('name', 'Nozzle')} · Wide-Bore Recalibrated"
+        added_items.append("wide-bore nozzle expansion")
+
+    if any(w in p_lower for w in ["pressure", "boost", "increase", "torque", "overdrive", "voltage"]):
+        if "primaryVal" in phys:
+            phys["primaryVal"] = f"{int(float(re.sub(r'[^0-9.]', '', phys['primaryVal']) or 100) * 1.25)} (OVERDRIVE)"
+        phys["nominal"] = False
+        added_items.append("output capacity increased by 25%")
 
     if not added_items:
         added_items.append("component tolerances recalibrated")
@@ -1563,7 +1711,7 @@ class NeuralBrain:
                     f"{'Components separated in Exploded View.' if exploded else 'Unified assembly active.'}"
                 )
             else:
-                # Dynamic Construct / Real-World Web Shooter or Modification
+                # Dynamic Construct / Universal 3D Engineering Synthesis or Modification
                 query = modifications if action == "modify" else construct
                 manifest, diagnosis = construct_or_modify_3d_object(query, action=action, modifications=modifications)
                 cmd = {
@@ -1764,13 +1912,13 @@ class NeuralBrain:
                     "type": "function",
                     "function": {
                         "name": "render_3d_blueprint",
-                        "description": "Construct, render, or modify interactive 3D holographic blueprints on Barehands Board. Supports the Arc Reactor Core and ANY dynamic real-world engineering construct (e.g. 'web_shooter', pneumatic mechanisms, mechanical assemblies) with real-world physics and live modifications.",
+                        "description": "Construct, render, or modify interactive 3D holographic blueprints on Barehands Board. Supports the Arc Reactor Core and ANY dynamic real-world engineering construct (e.g. 'plasma_cutter', 'railgun', 'ion_engine', 'exoskeleton', 'pneumatic_mechanism') with real-world physics and live modifications.",
                         "parameters": {
                             "type": "object",
                             "properties": {
                                 "construct": {
                                     "type": "string",
-                                    "description": "Name or type of 3D object to construct (e.g. 'arc_reactor', 'web_shooter', 'exoskeleton', 'laser_cutter')"
+                                    "description": "Name or type of 3D object to construct (e.g. 'arc_reactor', 'plasma_cutter', 'railgun', 'ion_engine', 'exoskeleton')"
                                 },
                                 "action": {
                                     "type": "string",
@@ -2305,24 +2453,43 @@ class VoiceEngine:
 
         # ── 1b. 3D Holographic Blueprints & Dynamic Constructs ──
         if any(q in t for q in [
-            "blueprint", "construct", "render 3d", "show 3d", "3d model",
-            "web shooter", "webshooter", "take it apart", "explode view",
-            "explode blueprint", "assemble blueprint", "modify blueprint"
+            "blueprint", "construct", "render 3d", "show 3d", "3d model", "create 3d", "design 3d",
+            "take it apart", "explode view", "explode blueprint", "assemble blueprint",
+            "modify blueprint", "modify construct", "modify the blueprint"
         ]):
             exploded = any(w in t for w in ["explode", "take it apart", "disassemble", "separate"])
             bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
 
-            if any(w in t for w in ["arc reactor", "reactor", "arc core"]):
+            if any(w in t for w in ["arc reactor", "reactor", "arc core"]) and not any(w in t for w in ["modify", "add", "change"]):
                 _bh_cmds.append({"a": "blueprint", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
                 broadcast_ui_event({"type": "RENDER_3D_BLUEPRINT", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
                 self.speak("Rendering holographic 3D blueprint of the Arc Reactor Core on Barehands Board.")
-            elif any(w in t for w in ["modify", "add", "change", "increase", "widen"]) and _active_construct:
+            elif any(w in t for w in ["modify", "add", "change", "increase", "widen", "replace", "upgrade"]) and _active_construct:
                 manifest, diagnosis = construct_or_modify_3d_object(t, action="modify", modifications=t)
                 _bh_cmds.append({"a": "dynamic_construct", "manifest": manifest, "exploded": exploded})
                 broadcast_ui_event({"type": "DYNAMIC_CONSTRUCT", "manifest": manifest, "exploded": exploded})
                 self.speak(diagnosis)
             else:
-                prompt_name = "web shooter" if any(w in t for w in ["web shooter", "webshooter", "spider"]) else t
+                raw_name = t
+                for prefix in [
+                    "construct a", "construct an", "construct",
+                    "build a", "build an", "build",
+                    "design a", "design an", "design",
+                    "render 3d", "show 3d", "3d model of",
+                    "create 3d", "create a", "create an", "create",
+                    "blueprint for", "blueprint of", "blueprint"
+                ]:
+                    if prefix in raw_name:
+                        idx = raw_name.find(prefix) + len(prefix)
+                        extracted = raw_name[idx:].strip()
+                        if extracted:
+                            raw_name = extracted
+                            break
+
+                for noise in ["in 3d", "on barehands", "on board", "blueprint", "schematic", "please", "jarvis"]:
+                    raw_name = raw_name.replace(noise, "").strip()
+
+                prompt_name = raw_name or "Mechanical Construct"
                 manifest, diagnosis = construct_or_modify_3d_object(prompt_name, action="create")
                 _bh_cmds.append({"a": "dynamic_construct", "manifest": manifest, "exploded": exploded})
                 broadcast_ui_event({"type": "DYNAMIC_CONSTRUCT", "manifest": manifest, "exploded": exploded})
