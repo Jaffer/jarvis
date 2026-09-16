@@ -73,7 +73,7 @@ import numpy as np
 
 try:
     from soundscape import SoundEffectsEngine
-except ImportError:
+except (ImportError, OSError, Exception):
     SoundEffectsEngine = None
 
 try:

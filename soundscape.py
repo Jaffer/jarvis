@@ -27,7 +27,7 @@ import numpy as np
 
 try:
     import sounddevice as sd
-except ImportError:
+except (ImportError, OSError, Exception):
     sd = None
 
 log = logging.getLogger("JARVIS.Soundscape")
