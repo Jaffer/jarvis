@@ -201,8 +201,13 @@ class MemoryManager:
         try:
             repo_root = self.vault_path.parent
             if (repo_root / ".git").exists():
-                subprocess.run(["git", "pull", "--rebase"], cwd=repo_root, capture_output=True, timeout=10)
-                log.info("⚡ [MEMORY SYNC] Pulled latest Memory Vault records from GitHub.")
+                token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "").strip()
+                if token:
+                    remote_url = f"https://x-access-token:{token}@github.com/Jaffer/jarvis.git"
+                    subprocess.run(["git", "config", "user.name", "JARVIS AI Assistant"], cwd=repo_root, check=False)
+                    subprocess.run(["git", "config", "user.email", "jarvis@ai.assistant"], cwd=repo_root, check=False)
+                    subprocess.run(["git", "pull", remote_url, "main", "--rebase"], cwd=repo_root, capture_output=True, timeout=15)
+                    log.info("⚡ [MEMORY SYNC] Pulled latest Memory Vault records from GitHub.")
         except Exception as e:
             log.debug("Memory Vault pull notice: %s", e)
 
@@ -210,12 +215,20 @@ class MemoryManager:
         try:
             repo_root = self.vault_path.parent
             if (repo_root / ".git").exists():
-                subprocess.run(["git", "add", str(self.vault_path)], cwd=repo_root, capture_output=True, timeout=5)
-                subprocess.run(["git", "commit", "-m", f"Memory Vault Auto-Sync: {reason[:40]}"], cwd=repo_root, capture_output=True, timeout=5)
-                subprocess.run(["git", "push"], cwd=repo_root, capture_output=True, timeout=10)
-                log.info("⚡ [MEMORY SYNC] Pushed updated Memory Vault records to GitHub.")
+                token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "").strip()
+                if token:
+                    remote_url = f"https://x-access-token:{token}@github.com/Jaffer/jarvis.git"
+                    subprocess.run(["git", "config", "user.name", "JARVIS AI Assistant"], cwd=repo_root, check=False)
+                    subprocess.run(["git", "config", "user.email", "jarvis@ai.assistant"], cwd=repo_root, check=False)
+                    subprocess.run(["git", "add", str(self.vault_path)], cwd=repo_root, capture_output=True, timeout=10)
+                    subprocess.run(["git", "commit", "-m", f"Memory Vault Auto-Sync: {reason[:40]}"], cwd=repo_root, capture_output=True, timeout=10)
+                    res = subprocess.run(["git", "push", remote_url, "main"], cwd=repo_root, capture_output=True, timeout=15)
+                    if res.returncode == 0:
+                        log.info("⚡ [MEMORY SYNC] Pushed updated Memory Vault records to GitHub repository!")
+                    else:
+                        log.warning("Memory Vault git push notice (code %d): %s", res.returncode, res.stderr.decode() if res.stderr else "")
         except Exception as e:
-            log.debug("Memory Vault push notice: %s", e)
+            log.warning("Memory Vault push notice: %s", e)
 
     def _writer_loop(self):
         while True:

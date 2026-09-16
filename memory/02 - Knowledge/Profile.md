@@ -1,7 +1,8 @@
 # User Profile
 
 ## Identity
-- **Name**: Sir (default; update when learned)
+- **Name**: Vasim
+- **Title**: Sir
 - **Agent Name**: JARVIS
 
 ## Preferences
