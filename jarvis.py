@@ -1082,27 +1082,34 @@ class NeuralBrain:
         return ""
 
     def _query_groq(self, messages: list, groq_key: str) -> str:
-        """Fallback to 24/7 Groq Cloud AI when Ollama is offline."""
-        try:
-            url = "https://api.groq.com/openai/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {groq_key}",
-                "Content-Type": "application/json",
-                "User-Agent": "Jarvis/1.0 (Linux; x86_64)"
-            }
-            payload = {
-                "model": "openai/gpt-oss-20b",
-                "messages": messages,
-                "temperature": 0.6,
-                "max_tokens": 150
-            }
-            req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read().decode())
-                return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-        except Exception as e:
-            log.warning("Groq Cloud AI query error: %s", e)
-            return "I am currently unable to reach the neural core, sir."
+        """24/7 Groq Cloud AI primary engine with dynamic multi-model fallback."""
+        models = ["qwen/qwen3.8-27b", "allam-2-7b", "openai/gpt-oss-20b"]
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {groq_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "Jarvis/1.0 (Linux; x86_64)"
+        }
+        for m in models:
+            try:
+                payload = {
+                    "model": m,
+                    "messages": messages,
+                    "temperature": 0.6,
+                    "max_tokens": 350
+                }
+                req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode())
+                    msg = data.get("choices", [{}])[0].get("message", {})
+                    content = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+                    if content:
+                        log.info("⚡ Groq Cloud AI response generated via model: %s", m)
+                        return content
+            except Exception as e:
+                log.warning("Groq model %s query notice: %s", m, e)
+
+        return ""
 
     def execute_tool(self, name: str, args: dict) -> str:
         """Execute autonomous tools invoked by the LLM."""
