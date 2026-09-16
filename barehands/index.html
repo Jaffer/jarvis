@@ -26,7 +26,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
   html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden;
                background:#000; font-family:-apple-system,"SF Pro Display",sans-serif; }
   body.overlay { background:transparent; }
-  body.keybg { /* background color set by JS from ?key= (default magenta) */ }
+  body.keybg { background:transparent; /* background color set by JS from ?key= (default magenta) */ }
   /* green-key fallback: the UI can't be green on a green key (learned live
      2026-08-07 — the cursor got keyed out of existence). Cyan takes over. */
   body.ui-cyan .cursor { border-color:rgba(0,229,255,0.9); background:rgba(0,229,255,0.12); }
@@ -221,6 +221,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
   .cursor .dwell { position:absolute; inset:-7px; border-radius:50%;
                    background:conic-gradient(#8ff0e4 calc(var(--p)*360deg), transparent 0);
                    -webkit-mask:radial-gradient(circle, transparent 58%, black 60%);
+                   mask:radial-gradient(circle, transparent 58%, black 60%);
                    opacity:0.95; }
   #hint { position:absolute; bottom:14px; left:0; right:0; text-align:center;
           color:rgba(230,255,240,0.7); font-size:13.5px; z-index:998;
