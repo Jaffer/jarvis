@@ -105,7 +105,8 @@ class FaceSentinel:
             log.debug("FaceSentinel: MediaPipe legacy solutions unavailable: %s", e)
 
     def _load_admin_profile(self):
-        """Loads enrolled admin face embedding and parameters."""
+        """Loads enrolled admin face embedding and parameters from vault file or environment variable."""
+        # 1. Local vault file
         p = Path(self.profile_path)
         if p.is_file():
             try:
@@ -117,8 +118,23 @@ class FaceSentinel:
                         self.admin_embedding = np.array(emb, dtype=np.float32)
                         self.admin_name = data.get("admin_name", "Admin")
                         log.info("FaceSentinel: Enrolled admin profile loaded for '%s'.", self.admin_name)
+                        return
             except Exception as e:
                 log.warning("FaceSentinel: Profile load notice: %s", e)
+
+        # 2. Cloud environment variable fallback (e.g. for Render deployment)
+        env_profile = os.environ.get("ADMIN_BIOMETRIC_PROFILE", "").strip()
+        if env_profile:
+            try:
+                data = json.loads(env_profile)
+                face_data = data.get("face", {})
+                emb = face_data.get("embedding")
+                if emb:
+                    self.admin_embedding = np.array(emb, dtype=np.float32)
+                    self.admin_name = data.get("admin_name", "Admin")
+                    log.info("FaceSentinel: Enrolled admin profile loaded from environment variable for '%s'.", self.admin_name)
+            except Exception as e:
+                log.warning("FaceSentinel: Env profile parse notice: %s", e)
 
     def extract_face_embedding(self, landmarks_3d: list[tuple[float, float, float]]) -> np.ndarray:
         """

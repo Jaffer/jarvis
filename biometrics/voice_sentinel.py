@@ -5,6 +5,7 @@ VoiceSentinel: Acoustic Speaker Verification & Audio Anti-Replay Engine
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -36,7 +37,8 @@ class VoiceSentinel:
         self._load_admin_profile()
 
     def _load_admin_profile(self):
-        """Loads enrolled admin voiceprint embedding and acoustic signature."""
+        """Loads enrolled admin voiceprint embedding from vault file or environment variable."""
+        # 1. Local vault file
         p = Path(self.profile_path)
         if p.is_file():
             try:
@@ -48,8 +50,23 @@ class VoiceSentinel:
                         self.admin_voiceprint = np.array(emb, dtype=np.float32)
                         self.admin_name = data.get("admin_name", "Admin")
                         log.info("VoiceSentinel: Enrolled admin voice profile loaded for '%s'.", self.admin_name)
+                        return
             except Exception as e:
                 log.warning("VoiceSentinel: Profile load notice: %s", e)
+
+        # 2. Cloud environment variable fallback (e.g. for Render deployment)
+        env_profile = os.environ.get("ADMIN_BIOMETRIC_PROFILE", "").strip()
+        if env_profile:
+            try:
+                data = json.loads(env_profile)
+                voice_data = data.get("voice", {})
+                emb = voice_data.get("embedding")
+                if emb:
+                    self.admin_voiceprint = np.array(emb, dtype=np.float32)
+                    self.admin_name = data.get("admin_name", "Admin")
+                    log.info("VoiceSentinel: Enrolled admin voice profile loaded from environment variable for '%s'.", self.admin_name)
+            except Exception as e:
+                log.warning("VoiceSentinel: Env profile parse notice: %s", e)
 
     def extract_voiceprint(self, audio_data: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
         """
