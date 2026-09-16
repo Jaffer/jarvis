@@ -743,6 +743,27 @@ function handleServerEvent(data) {
         terminalStatusEl.textContent = `WATCHDOG // ${data.category ? data.category.toUpperCase() : 'ALERT'}`;
       }
       break;
+
+    case "VISION_SCAN_START":
+      scene.triggerBurst();
+      soundscape.play("thinking");
+      showToast("🔍 OPTICAL SCAN // ACQUIRING TARGET", 4000);
+      if (terminalStatusEl) {
+        terminalStatusEl.textContent = "SCANNING // OBJECT ANALYSIS";
+      }
+      container?.classList.add("vision-scanning");
+      setTimeout(() => container?.classList.remove("vision-scanning"), 8000);
+      break;
+
+    case "VISION_SCAN_RESULT":
+      container?.classList.remove("vision-scanning");
+      scene.triggerBurst();
+      showToast(`✅ SCAN COMPLETE: ${(data.analysis || '').slice(0, 75)}...`, 5000);
+      addTerminalLine("jarvis", `[OPTICAL SCAN] ${data.analysis || ''}`, true);
+      if (terminalStatusEl) {
+        terminalStatusEl.textContent = `VISION // ${(data.backend || 'ANALYZED').toUpperCase()}`;
+      }
+      break;
   }
 }
 

@@ -82,6 +82,11 @@ except (ImportError, OSError, Exception):
     ProactiveWatchdogDaemon = None
 
 try:
+    from vision_scanner import VisionScanner
+except (ImportError, OSError, Exception):
+    VisionScanner = None
+
+try:
     import sounddevice as sd
 except (ImportError, OSError):
     sd = None
@@ -737,6 +742,36 @@ class TelegramBridge:
                                 self.send_message(f"🤖 **J.A.R.V.I.S.**: {response}", chat_id=cid)
                                 broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": response})
 
+                        photos = msg.get("photo", [])
+                        if photos:
+                            file_id = photos[-1].get("file_id")
+                            caption = msg.get("caption", "Analyze this image and describe what you see, sir").strip()
+                            log.info("📱 [TELEGRAM] Received photo for optical analysis (caption: '%s')", caption)
+                            broadcast_ui_event({"type": "SUBTITLE", "role": "user", "text": f"[Telegram Photo]: {caption}"})
+                            global _vision_scanner
+                            if _vision_scanner and file_id:
+                                try:
+                                    f_req = urllib.request.Request(f"https://api.telegram.org/bot{self.token}/getFile?file_id={file_id}")
+                                    with urllib.request.urlopen(f_req, timeout=10) as f_resp:
+                                        f_data = json.loads(f_resp.read().decode())
+                                        file_path = f_data.get("result", {}).get("file_path")
+                                        if file_path:
+                                            dl_url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
+                                            with urllib.request.urlopen(dl_url, timeout=15) as dl_resp:
+                                                raw_bytes = dl_resp.read()
+                                                if cv2 is not None:
+                                                    nparr = np.frombuffer(raw_bytes, np.uint8)
+                                                    tg_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                                                    if tg_frame is not None:
+                                                        res = _vision_scanner.analyze(prompt=caption, frame=tg_frame)
+                                                        self.send_message(f"👁️ **Optical Analysis** ({res.get('backend')}):\n{res.get('analysis')}", chat_id=cid)
+                                                        broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": res.get("analysis", "")})
+                                except Exception as tg_ex:
+                                    log.warning("Telegram photo processing error: %s", tg_ex)
+                                    self.send_message("Sir, I encountered an error processing the optical transmission.", chat_id=cid)
+                            else:
+                                self.send_message("Vision analysis module is currently offline, sir.", chat_id=cid)
+
             except Exception as e:
                 time.sleep(4)
 
@@ -820,6 +855,7 @@ class BiometricSentinelDaemon:
         self.camera_index = 0
         self._thread = None
         self._lock = threading.Lock()
+        self._latest_frame = None
         self.face_sentinel = None
         self.voice_sentinel = None
 
@@ -833,6 +869,13 @@ class BiometricSentinelDaemon:
             log.info("Biometric Sentinel loaded (Admin profile: %s)", self.admin_name)
         except Exception as e:
             log.warning("Biometrics module load notice: %s", e)
+
+    def get_latest_frame(self):
+        """Thread-safe acquisition of the most recent optical camera frame."""
+        with self._lock:
+            if self._latest_frame is not None:
+                return self._latest_frame.copy()
+            return None
 
     def start(self):
         """Start the background optical surveillance thread."""
@@ -952,6 +995,9 @@ class BiometricSentinelDaemon:
                 if not ret or frame is None:
                     time.sleep(1.0)
                     continue
+
+                with self._lock:
+                    self._latest_frame = frame.copy()
 
                 res = self.face_sentinel.evaluate_frame(frame)
                 self.last_status = res.status
@@ -1125,6 +1171,7 @@ _BH_ALLOWED = ("add_img", "add_card", "clear", "reset", "hand", "give",
                "dynamic_construct", "modify_construct")
 _global_voice_engine = None
 _biometric_sentinel = None
+_vision_scanner = None
 _admin_authenticated = False
 _active_construct: dict = {}
 
@@ -2132,6 +2179,14 @@ class NeuralBrain:
                 return _biometric_sentinel.get_security_status_summary()
             return "Biometric sentinel is offline."
 
+        elif name == "analyze_visual":
+            global _vision_scanner
+            prompt = args.get("prompt", "Analyze what you see in front of the camera in detail")
+            if _vision_scanner:
+                res = _vision_scanner.analyze(prompt)
+                return res.get("analysis", "Optical analysis yielded no conclusive data.")
+            return "Vision scanner module is currently offline."
+
         return "Action completed."
 
     def query_stream(self, user_prompt: str, on_sentence=None, on_status=None) -> str:
@@ -2139,6 +2194,23 @@ class NeuralBrain:
         with self._lock:
             self._interrupted.clear()
             tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "analyze_visual",
+                        "description": "Capture a live frame from the webcam and run multimodal visual analysis. Use when the user asks to analyze, scan, identify, inspect, or read an object, component, schematic, or scene in front of the camera.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "prompt": {
+                                    "type": "string",
+                                    "description": "Specific visual inspection query, e.g. 'Identify this component and materials' or 'Read the visible text'"
+                                }
+                            },
+                            "required": ["prompt"]
+                        }
+                    }
+                },
                 {
                     "type": "function",
                     "function": {
@@ -2887,6 +2959,39 @@ class VoiceEngine:
                 if _sound_engine:
                     _sound_engine.play("wake")
             self.speak("Proactive watchdog alerts enabled, sir.")
+            self.bus.set_state("idle")
+            return
+
+        # ── AR Vision & Object Scanner ──
+        if any(q in t for q in [
+            "analyze this", "scan this", "what am i looking at", "what is this",
+            "identify this", "scan this object", "analyze this object",
+            "what do you see", "scan blueprint", "read this", "optical scan",
+            "visual scan", "inspect this", "take a look at this"
+        ]):
+            if _sound_engine:
+                _sound_engine.play("thinking")
+            broadcast_ui_event({"type": "VISION_SCAN_START"})
+            broadcast_ui_event({"type": "STATUS", "status": "SCANNING // OBJECT ANALYSIS", "phrase": "Visual scan initiated"})
+            self.speak("Scanning now, sir.")
+
+            global _vision_scanner
+            if _vision_scanner:
+                result = _vision_scanner.analyze(prompt=t)
+                broadcast_ui_event({
+                    "type": "VISION_SCAN_RESULT",
+                    "analysis": result.get("analysis", ""),
+                    "quality": result.get("quality", ""),
+                    "backend": result.get("backend", "")
+                })
+                if hasattr(self, "_interrupted") and self._interrupted.is_set():
+                    log.info("Visual scan spoken output aborted by user barge-in.")
+                elif result.get("analysis"):
+                    self.speak(result["analysis"])
+                else:
+                    self.speak("I wasn't able to get a conclusive visual analysis, sir.")
+            else:
+                self.speak("Vision scanner module is currently offline, sir.")
             self.bus.set_state("idle")
             return
 
@@ -4362,6 +4467,16 @@ def main() -> int:
     )
     _biometric_sentinel.start()
 
+    # 8b. Start AR Vision & Object Scanner
+    global _vision_scanner
+    if VisionScanner is not None:
+        _vision_scanner = VisionScanner(
+            biometric_sentinel=_biometric_sentinel,
+            broadcast_fn=broadcast_ui_event,
+            groq_key=os.environ.get("GROQ_API_KEY", "").strip(),
+            ollama_host=brain_cfg.get("host", "http://localhost:11434").rstrip("/"),
+        )
+
     # 9. Start Proactive Watchdog Daemon
     global _watchdog_daemon
     if ProactiveWatchdogDaemon is not None:
@@ -4384,6 +4499,7 @@ def main() -> int:
     log.info("  Signal Bus:    %s", state_dir)
     log.info("  Voice PTT Key: %s", JARVIS_CFG.get("ptt_key", "F4"))
     log.info("  Biometrics:    Active (Admin: %s)", _biometric_sentinel.admin_name)
+    log.info("  Vision:        Active (Groq VLM / Ollama / Local Optics)")
     log.info("  Watchdog:      Active (Proactive Diagnostics)")
     _memory_manager.log_event("All subsystems online")
 

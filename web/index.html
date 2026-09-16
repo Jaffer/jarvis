@@ -58,6 +58,48 @@
       z-index: 1;
     }
 
+    /* AR Vision Scanner HUD Sweep Overlay */
+    @keyframes vision-sweep-line {
+      0% { top: 0%; opacity: 0.9; }
+      50% { top: 100%; opacity: 0.3; }
+      100% { top: 0%; opacity: 0.9; }
+    }
+    @keyframes vision-reticle-pulse {
+      0%, 100% { opacity: 0.5; transform: translateX(-50%) scale(1); }
+      50% { opacity: 1.0; transform: translateX(-50%) scale(1.05); }
+    }
+    .vision-scanning::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, transparent, #00ffff, #ff9d00, #00ffff, transparent);
+      box-shadow: 0 0 20px rgba(0, 255, 255, 0.8), 0 0 35px rgba(255, 157, 0, 0.6);
+      animation: vision-sweep-line 1.8s ease-in-out infinite;
+      z-index: 50;
+      pointer-events: none;
+    }
+    .vision-scanning::before {
+      content: 'OPTICAL SCAN // ANALYZING TARGET';
+      position: absolute;
+      top: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-family: monospace;
+      font-size: 11px;
+      letter-spacing: 3px;
+      color: #00ffff;
+      text-shadow: 0 0 10px rgba(0, 255, 255, 0.8);
+      background: rgba(0, 15, 25, 0.7);
+      border: 1px solid rgba(0, 255, 255, 0.4);
+      padding: 4px 16px;
+      border-radius: 4px;
+      z-index: 51;
+      animation: vision-reticle-pulse 1.2s ease-in-out infinite;
+      pointer-events: none;
+    }
+
     /* Ambient background grid and vignette */
     .vignette-overlay {
       position: absolute;
