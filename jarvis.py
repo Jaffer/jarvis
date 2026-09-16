@@ -128,7 +128,7 @@ KEY_DOUBLE_TAP_MIN_GAP_S = 0.05  # debounce time to avoid key-repeat triggers
 
 # 3D Holographic Orb UI
 OPEN_ORB_UI_ON_TRIGGER = os.environ.get("OPEN_ORB_UI", "true").lower() in ("true", "1", "yes")
-ORB_HTTP_PORT = int(os.environ.get("ORB_HTTP_PORT", "5050"))
+ORB_HTTP_PORT = int(os.environ.get("PORT") or os.environ.get("ORB_HTTP_PORT") or "5050")
 ORB_WS_PORT = int(os.environ.get("ORB_WS_PORT", "8765"))
 
 # Song: Spotify or YouTube URL/URI (empty = disabled until chosen)
@@ -635,8 +635,12 @@ class MobileCallEngine:
 
     def initiate_call(self, topic: str = "General Check-in") -> str:
         """Initiate immediate call alert with WebRTC portal link."""
-        local_ip = self._get_local_ip()
-        call_url = f"http://{local_ip}:{ORB_HTTP_PORT}/call.html"
+        render_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+        if render_url:
+            call_url = f"{render_url.rstrip('/')}/call.html"
+        else:
+            local_ip = self._get_local_ip()
+            call_url = f"http://{local_ip}:{ORB_HTTP_PORT}/call.html"
         msg = (
             f"🚨 **J.A.R.V.I.S. MOBILE CALL ALERT** 🚨\n\n"
             f"Sir, I am calling you regarding: *{topic}*.\n\n"
