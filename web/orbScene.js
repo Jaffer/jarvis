@@ -544,6 +544,398 @@ export function createOrbScene(container) {
     outerShell.add(hex);
   }
 
+  // ═══════════════════════════════════════════════
+  // HOLOGRAPHIC 3D CONSTRUCT & GESTURE MANIPULATION
+  // ═══════════════════════════════════════════════
+  class HologramManager {
+    constructor(scene, camera) {
+      this.scene = scene;
+      this.camera = camera;
+      this.root = new THREE.Group();
+      this.root.position.set(0, 0.4, 0);
+      this.scene.add(this.root);
+
+      this.active = false;
+      this.subAssemblies = [];
+      this.currentExplode = 0.0;
+      this.targetExplode = 0.0;
+      this.rotationSpeed = 0.004;
+
+      // Laser Raycaster & Reticle
+      this.raycaster = new THREE.Raycaster();
+      this.laserActive = false;
+      this.hoveredPart = null;
+
+      // Laser visual line
+      const laserGeo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, -5),
+      ]);
+      this.laserLine = new THREE.Line(
+        laserGeo,
+        new THREE.LineBasicMaterial({
+          color: 0x00ffff,
+          transparent: true,
+          opacity: 0.85,
+          blending: THREE.AdditiveBlending,
+        })
+      );
+      this.laserLine.visible = false;
+      this.scene.add(this.laserLine);
+
+      // Contact Reticle
+      this.reticle = new THREE.Group();
+      const reticleRing = new THREE.Mesh(
+        new THREE.RingGeometry(0.08, 0.1, 32),
+        new THREE.MeshBasicMaterial({
+          color: 0x00ffff,
+          side: THREE.DoubleSide,
+          transparent: true,
+          opacity: 0.9,
+          blending: THREE.AdditiveBlending,
+        })
+      );
+      this.reticle.add(reticleRing);
+
+      const tickMat = new THREE.LineBasicMaterial({ color: 0xffaa30, transparent: true, opacity: 0.9 });
+      const tickGeo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(-0.16, 0, 0), new THREE.Vector3(0.16, 0, 0),
+        new THREE.Vector3(0, -0.16, 0), new THREE.Vector3(0, 0.16, 0),
+      ]);
+      const ticks = new THREE.LineSegments(tickGeo, tickMat);
+      this.reticle.add(ticks);
+      this.reticle.visible = false;
+      this.scene.add(this.reticle);
+
+      // Dispersion Particles
+      const dispCount = 140;
+      const dispGeo = new THREE.BufferGeometry();
+      const dispPos = new Float32Array(dispCount * 3);
+      dispGeo.setAttribute("position", new THREE.BufferAttribute(dispPos, 3));
+      this.dispMat = new THREE.PointsMaterial({
+        color: 0x00ffff,
+        size: 0.08,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      this.dispPoints = new THREE.Points(dispGeo, this.dispMat);
+      this.scene.add(this.dispPoints);
+      this.dispersionParticles = [];
+      this.dispersionTime = 0;
+
+      // Build procedural Mark 85 Arc Reactor Core
+      this.buildArcReactor();
+    }
+
+    buildArcReactor() {
+      while (this.root.children.length > 0) {
+        this.root.remove(this.root.children[0]);
+      }
+      this.subAssemblies = [];
+
+      // 1. OUTER HOUSING
+      const housingGroup = new THREE.Group();
+      const outerTorus = new THREE.Mesh(
+        new THREE.TorusGeometry(1.5, 0.06, 16, 64),
+        new THREE.MeshBasicMaterial({ color: 0x0099cc, wireframe: true, transparent: true, opacity: 0.7 })
+      );
+      housingGroup.add(outerTorus);
+
+      for (let i = 0; i < 10; i++) {
+        const angle = (i * Math.PI * 2) / 10;
+        const bx = Math.cos(angle) * 1.5;
+        const by = Math.sin(angle) * 1.5;
+        const bGeo = new THREE.BoxGeometry(0.1, 0.3, 0.08);
+        const bMesh = new THREE.Mesh(
+          bGeo,
+          new THREE.MeshBasicMaterial({ color: 0xffaa30, wireframe: true, transparent: true, opacity: 0.8 })
+        );
+        bMesh.position.set(bx, by, 0);
+        bMesh.rotation.z = angle;
+        housingGroup.add(bMesh);
+      }
+
+      const housingHit = new THREE.Mesh(
+        new THREE.TorusGeometry(1.5, 0.25, 8, 32),
+        new THREE.MeshBasicMaterial({ visible: false })
+      );
+      housingGroup.add(housingHit);
+      this.registerPart(housingGroup, housingHit, {
+        id: "outer_housing",
+        name: "Titanium-Gold Outer Housing",
+        material: "Vibranium-Titanium Composite",
+        stress: "12.4% Thermal Dissipation",
+        desc: "High-tensile structural containment ring with micro-venting apertures for magnetic flux stabilization.",
+        explodeVec: new THREE.Vector3(0, 0, -0.5),
+      });
+
+      // 2. TOROID COILS
+      const coilsGroup = new THREE.Group();
+      for (let i = 0; i < 10; i++) {
+        const angle = (i * Math.PI * 2) / 10;
+        const r = 1.15;
+        const cx = Math.cos(angle) * r;
+        const cy = Math.sin(angle) * r;
+
+        const coilTorus = new THREE.Mesh(
+          new THREE.TorusGeometry(0.22, 0.05, 12, 24),
+          new THREE.MeshBasicMaterial({ color: 0xffaa30, wireframe: true, transparent: true, opacity: 0.9 })
+        );
+        coilTorus.position.set(cx, cy, 0);
+        coilTorus.rotation.z = angle + Math.PI / 2;
+        coilsGroup.add(coilTorus);
+
+        const cyl = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.06, 0.06, 0.16, 12),
+          new THREE.MeshBasicMaterial({ color: 0xff7700, transparent: true, opacity: 0.7 })
+        );
+        cyl.position.set(cx, cy, 0);
+        cyl.rotation.z = angle + Math.PI / 2;
+        coilsGroup.add(cyl);
+      }
+
+      const coilsHit = new THREE.Mesh(
+        new THREE.RingGeometry(0.85, 1.45, 24),
+        new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
+      );
+      coilsGroup.add(coilsHit);
+      this.registerPart(coilsGroup, coilsHit, {
+        id: "toroid_coils",
+        name: "Magnetic Constriction Coils",
+        material: "High-Tc Superconducting Cuprate Solenoids",
+        stress: "38.6 Tesla Flux Density",
+        desc: "Ten toroidal constriction solenoids maintaining plasma vortex containment at 40 million Kelvin.",
+        explodeVec: new THREE.Vector3(0, 0, 0.7),
+      });
+
+      // 3. CATALYTIC CORE
+      const coreGroup = new THREE.Group();
+      const exciterRing = new THREE.Mesh(
+        new THREE.TorusGeometry(0.48, 0.04, 16, 48),
+        new THREE.MeshBasicMaterial({ color: 0x00ffff, wireframe: true, transparent: true, opacity: 1.0 })
+      );
+      coreGroup.add(exciterRing);
+
+      const dodo = new THREE.Mesh(
+        new THREE.DodecahedronGeometry(0.3, 1),
+        new THREE.MeshBasicMaterial({ color: 0x66ffff, wireframe: true, transparent: true, opacity: 0.85 })
+      );
+      coreGroup.add(dodo);
+
+      const coreHit = new THREE.Mesh(
+        new THREE.SphereGeometry(0.55, 16, 16),
+        new THREE.MeshBasicMaterial({ visible: false })
+      );
+      coreGroup.add(coreHit);
+      this.registerPart(coreGroup, coreHit, {
+        id: "catalytic_core",
+        name: "Zero-Point Catalytic Core",
+        material: "Synthesized Element 118 (Vibranium Isotope)",
+        stress: "8.4 Gigawatts Clean Yield",
+        desc: "Zero-point catalytic reaction chamber generating clean high-density plasma discharge.",
+        explodeVec: new THREE.Vector3(0, 0, 1.4),
+      });
+
+      // 4. CONDUIT BUS
+      const conduitGroup = new THREE.Group();
+      const hexBus = new THREE.Mesh(
+        new THREE.RingGeometry(0.65, 0.85, 6),
+        new THREE.MeshBasicMaterial({ color: 0x00e5ff, wireframe: true, transparent: true, opacity: 0.6, side: THREE.DoubleSide })
+      );
+      conduitGroup.add(hexBus);
+
+      const conduitHit = new THREE.Mesh(
+        new THREE.RingGeometry(0.5, 0.85, 12),
+        new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
+      );
+      conduitGroup.add(conduitHit);
+      this.registerPart(conduitGroup, conduitHit, {
+        id: "conduit_ring",
+        name: "Superconducting Conduit Bus",
+        material: "Carbon Nanotube Power Manifold",
+        stress: "0.02 Ohm Resistance",
+        desc: "Primary electrical manifold channeling terawatt pulses directly into repulsor sub-systems.",
+        explodeVec: new THREE.Vector3(0, 0, -1.2),
+      });
+
+      this.root.visible = false;
+    }
+
+    registerPart(group, hitProxy, data) {
+      group.userData = {
+        ...data,
+        basePos: group.position.clone(),
+        hitProxy: hitProxy,
+        highlighted: false,
+      };
+      hitProxy.userData.parentPart = group;
+      this.root.add(group);
+      this.subAssemblies.push(group);
+    }
+
+    setExplodeLevel(level) {
+      this.targetExplode = Math.max(0.0, Math.min(2.5, level));
+      if (!this.active && this.targetExplode > 0.05) {
+        this.root.visible = true;
+        this.active = true;
+      }
+    }
+
+    getExplodeLevel() {
+      return this.currentExplode;
+    }
+
+    toggleExplode() {
+      this.setExplodeLevel(this.targetExplode > 0.4 ? 0.0 : 1.5);
+    }
+
+    rotateBy(deltaAngle) {
+      this.root.rotation.z += deltaAngle;
+    }
+
+    loadConstruct(manifest = null) {
+      this.root.visible = true;
+      this.active = true;
+      this.targetExplode = 0.0;
+      this.currentExplode = 0.0;
+    }
+
+    dismissConstruct(save = false) {
+      if (!this.active && !this.root.visible) return;
+
+      const positions = this.dispPoints.geometry.attributes.position.array;
+      this.dispersionParticles = [];
+      const center = this.root.position;
+
+      for (let i = 0; i < 140; i++) {
+        const phi = Math.random() * Math.PI * 2;
+        const theta = Math.acos(Math.random() * 2 - 1);
+        const speed = 1.5 + Math.random() * 3.5;
+        const vel = new THREE.Vector3(
+          Math.sin(theta) * Math.cos(phi) * speed,
+          Math.sin(theta) * Math.sin(phi) * speed,
+          Math.cos(theta) * speed
+        );
+        this.dispersionParticles.push({
+          pos: new THREE.Vector3(center.x, center.y, center.z),
+          vel: vel,
+        });
+        positions[i * 3] = center.x;
+        positions[i * 3 + 1] = center.y;
+        positions[i * 3 + 2] = center.z;
+      }
+      this.dispPoints.geometry.attributes.position.needsUpdate = true;
+      this.dispMat.opacity = 1.0;
+      this.dispMat.color.setHex(save ? 0xffcc66 : 0x00ffff);
+      this.dispersionTime = 1.2;
+
+      this.root.visible = false;
+      this.active = false;
+      this.clearLaserPointer();
+    }
+
+    setLaserPointer(screenX, screenY, onTargeted = null) {
+      if (!this.root.visible) return null;
+      this.laserActive = true;
+
+      const ndcX = screenX * 2 - 1;
+      const ndcY = -(screenY * 2 - 1);
+
+      this.raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
+      const proxies = this.subAssemblies.map((p) => p.userData.hitProxy);
+      const intersects = this.raycaster.intersectObjects(proxies, false);
+
+      let targetPoint = new THREE.Vector3();
+      let hitPart = null;
+
+      if (intersects.length > 0) {
+        targetPoint.copy(intersects[0].point);
+        hitPart = intersects[0].object.userData.parentPart;
+      } else {
+        this.raycaster.ray.at(4.5, targetPoint);
+      }
+
+      const rayOrigin = this.camera.position.clone().add(new THREE.Vector3(0.2, -0.2, -0.4));
+      const linePositions = this.laserLine.geometry.attributes.position.array;
+      linePositions[0] = rayOrigin.x; linePositions[1] = rayOrigin.y; linePositions[2] = rayOrigin.z;
+      linePositions[3] = targetPoint.x; linePositions[4] = targetPoint.y; linePositions[5] = targetPoint.z;
+      this.laserLine.geometry.attributes.position.needsUpdate = true;
+      this.laserLine.visible = true;
+
+      this.reticle.position.copy(targetPoint);
+      this.reticle.lookAt(this.camera.position);
+      this.reticle.visible = true;
+
+      if (hitPart !== this.hoveredPart) {
+        if (this.hoveredPart) {
+          this.hoveredPart.scale.set(1, 1, 1);
+        }
+        this.hoveredPart = hitPart;
+        if (hitPart) {
+          hitPart.scale.set(1.08, 1.08, 1.08);
+          if (onTargeted) onTargeted(hitPart.userData);
+        }
+      }
+
+      return hitPart ? hitPart.userData : null;
+    }
+
+    clearLaserPointer() {
+      this.laserActive = false;
+      this.laserLine.visible = false;
+      this.reticle.visible = false;
+      if (this.hoveredPart) {
+        this.hoveredPart.scale.set(1, 1, 1);
+        this.hoveredPart = null;
+      }
+    }
+
+    isActive() {
+      return this.active && this.root.visible;
+    }
+
+    update(dt, t) {
+      const diff = this.targetExplode - this.currentExplode;
+      if (Math.abs(diff) > 0.001) {
+        this.currentExplode += diff * 0.12;
+        for (const part of this.subAssemblies) {
+          const u = part.userData;
+          part.position.copy(u.basePos).addScaledVector(u.explodeVec, this.currentExplode);
+        }
+      }
+
+      if (this.root.visible) {
+        this.root.rotation.z += this.rotationSpeed;
+      }
+
+      if (this.reticle.visible) {
+        this.reticle.rotation.z += 0.05;
+      }
+
+      if (this.dispersionTime > 0) {
+        this.dispersionTime -= dt;
+        const positions = this.dispPoints.geometry.attributes.position.array;
+        for (let i = 0; i < this.dispersionParticles.length; i++) {
+          const p = this.dispersionParticles[i];
+          p.pos.addScaledVector(p.vel, dt);
+          p.vel.multiplyScalar(0.96);
+          positions[i * 3] = p.pos.x;
+          positions[i * 3 + 1] = p.pos.y;
+          positions[i * 3 + 2] = p.pos.z;
+        }
+        this.dispPoints.geometry.attributes.position.needsUpdate = true;
+        this.dispMat.opacity = Math.max(0, this.dispersionTime / 1.2);
+        if (this.dispersionTime <= 0) {
+          this.dispMat.opacity = 0;
+        }
+      }
+    }
+  }
+
+  const hologramManager = new HologramManager(scene, camera);
+
   // Camera gesture helpers
   const sphericalScratch = new THREE.Spherical();
   const offsetScratch = new THREE.Vector3();
@@ -763,6 +1155,11 @@ export function createOrbScene(container) {
     // Update chromatic aberration tint per theme
     chromaticPass.uniforms.uTime.value = t;
 
+    // Update hologram construct explosion & raycasting
+    if (hologramManager) {
+      hologramManager.update(0.016, t);
+    }
+
     controls.update();
     composer.render();
   }
@@ -802,6 +1199,15 @@ export function createOrbScene(container) {
     setColorTheme,
     cycleTheme,
     getThemeName,
+    setExplodeLevel: (lvl) => hologramManager.setExplodeLevel(lvl),
+    getExplodeLevel: () => hologramManager.getExplodeLevel(),
+    toggleExplode: () => hologramManager.toggleExplode(),
+    setLaserPointer: (x, y, cb) => hologramManager.setLaserPointer(x, y, cb),
+    clearLaserPointer: () => hologramManager.clearLaserPointer(),
+    loadConstruct: (manifest) => hologramManager.loadConstruct(manifest),
+    dismissConstruct: (save) => hologramManager.dismissConstruct(save),
+    isConstructActive: () => hologramManager.isActive(),
+    rotateConstruct: (deltaAngle) => hologramManager.rotateBy(deltaAngle),
     dispose,
   };
 }

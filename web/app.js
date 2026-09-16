@@ -354,6 +354,47 @@ function initTracker() {
   tracker = new HandTracker(videoEl, overlayEl, {
     onRotate: (dt, dp) => scene.rotateBy(dt, dp),
     onZoom: (factor) => scene.zoomBy(factor),
+    onTwoHandExpand: (explodeLevel, delta) => {
+      scene.setExplodeLevel(explodeLevel);
+      if (terminalStatusEl) {
+        terminalStatusEl.textContent = `CAD EXPLODE // ${(explodeLevel * 100).toFixed(0)}%`;
+      }
+    },
+    onTwoHandRotate: (deltaAngle) => {
+      scene.rotateConstruct?.(deltaAngle);
+    },
+    onPoint: (screenX, screenY) => {
+      scene.setLaserPointer(screenX, screenY, (targeted) => {
+        soundscape.play("sub_bass_tick");
+        showToast(`🎯 TARGET: ${targeted.name.toUpperCase()}`, 1600);
+        if (terminalStatusEl) {
+          terminalStatusEl.textContent = `POINTER // ${targeted.name.toUpperCase()} [${targeted.material}]`;
+        }
+        sendWsMessage({
+          type: "GESTURE_ACTION",
+          action: "inspect_component",
+          component: targeted,
+        });
+      });
+    },
+    onPointEnd: () => {
+      scene.clearLaserPointer();
+    },
+    onSwipe: (action) => {
+      if (action === "FLICK_RIGHT") {
+        soundscape.play("chime_positive");
+        scene.triggerBurst();
+        showToast("📦 GESTURE: FLICK RIGHT -> SAVING TO VAULT", 3500);
+        sendWsMessage({ type: "GESTURE_ACTION", action: "flick_save" });
+        scene.dismissConstruct(true);
+      } else if (action === "FLICK_LEFT") {
+        soundscape.play("whoosh");
+        scene.triggerBurst();
+        showToast("💥 GESTURE: FLICK LEFT -> DISMISSING CONSTRUCT", 3500);
+        sendWsMessage({ type: "GESTURE_ACTION", action: "flick_dismiss" });
+        scene.dismissConstruct(false);
+      }
+    },
     onStatus: (st) => {
       statusModeEl.textContent = st.mode.toUpperCase();
       statusHandsEl.textContent = `${st.hands} HAND${st.hands === 1 ? "" : "S"}`;
@@ -361,6 +402,10 @@ function initTracker() {
         statusModeEl.className = "badge badge-active";
       } else if (st.mode === "zoom") {
         statusModeEl.className = "badge badge-zoom";
+      } else if (st.mode === "explode") {
+        statusModeEl.className = "badge badge-active";
+      } else if (st.mode === "pointing") {
+        statusModeEl.className = "badge badge-active";
       } else {
         statusModeEl.className = "badge badge-standby";
       }
@@ -764,6 +809,28 @@ function handleServerEvent(data) {
         terminalStatusEl.textContent = `VISION // ${(data.backend || 'ANALYZED').toUpperCase()}`;
       }
       break;
+
+    case "RENDER_3D_BLUEPRINT":
+    case "DYNAMIC_CONSTRUCT":
+      scene.loadConstruct(data.manifest || null);
+      if (data.exploded) {
+        scene.setExplodeLevel(1.5);
+      } else {
+        scene.setExplodeLevel(0.0);
+      }
+      soundscape.play("blueprint_whoosh");
+      scene.triggerBurst();
+      showToast(`📐 3D HOLOGRAM: ${data.construct ? data.construct.toUpperCase() : "BLUEPRINT ACTIVE"}`, 4000);
+      if (terminalStatusEl) {
+        terminalStatusEl.textContent = `HOLOGRAM // ${data.construct ? data.construct.toUpperCase() : "3D CAD ACTIVE"}`;
+      }
+      break;
+
+    case "DISMISS_CONSTRUCT":
+      scene.dismissConstruct(false);
+      soundscape.play("whoosh");
+      showToast("💥 HOLOGRAM DISMISSED", 2500);
+      break;
   }
 }
 
@@ -868,6 +935,18 @@ window.addEventListener("keydown", (e) => {
     }
   } else if (key === "m") {
     initLocalMic();
+  } else if (key === "e") {
+    scene.toggleExplode();
+    soundscape.play("sub_bass_tick");
+    showToast(`CAD Explode: ${(scene.getExplodeLevel() * 100).toFixed(0)}%`);
+  } else if (key === "b") {
+    scene.loadConstruct();
+    soundscape.play("blueprint_whoosh");
+    showToast("📐 3D Arc Reactor Blueprint Loaded");
+  } else if (key === "delete" || key === "backspace") {
+    scene.dismissConstruct(false);
+    soundscape.play("whoosh");
+    showToast("💥 Hologram Dismissed");
   }
 });
 

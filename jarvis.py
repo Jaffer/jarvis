@@ -3010,6 +3010,17 @@ class VoiceEngine:
             )
             return
 
+        # ── Dismiss 3D Holographic Construct ──
+        if any(q in t for q in ["dismiss blueprint", "close blueprint", "clear blueprint", "dismiss construct", "clear construct", "hide blueprint", "dismiss 3d", "close 3d"]):
+            global _active_construct
+            _active_construct = {}
+            broadcast_ui_event({"type": "DISMISS_CONSTRUCT"})
+            if _sound_engine:
+                _sound_engine.play("whoosh")
+            self.speak("Dismissing holographic blueprint, sir.")
+            self.bus.set_state("idle")
+            return
+
         # ── 1b. 3D Holographic Blueprints & Dynamic Constructs ──
         if any(q in t for q in [
             "blueprint", "construct", "render 3d", "show 3d", "3d model", "create 3d", "design 3d",
@@ -3689,6 +3700,7 @@ def _start_websocket_server(port: int = 8765) -> None:
         return
 
     async def _handler(websocket):
+        global _active_construct
         _ws_clients.add(websocket)
         try:
             await websocket.send(
@@ -3704,6 +3716,46 @@ def _start_websocket_server(port: int = 8765) -> None:
                     if data.get("type") == "TRIGGER_ACTION":
                         action_name = data.get("action", "UI Gesture")
                         trigger_welcome_sequence(f"Hologram HUD ({action_name})")
+                    elif data.get("type") == "GESTURE_ACTION":
+                        act = data.get("action")
+                        if act == "flick_save":
+                            log.info("🖐️ [GESTURE] Flick Right -> Archiving active blueprint to Memory Vault")
+                            if _memory_manager:
+                                name = _active_construct.get("name", "Mark 85 Arc Reactor Schematic") if _active_construct else "Mark 85 Arc Reactor Schematic"
+                                _memory_manager.save_note(f"Archived Holographic Blueprint: {name}", category="cad_blueprints")
+                            if _sound_engine:
+                                _sound_engine.play("chime_positive")
+                            if _voice_engine:
+                                threading.Thread(
+                                    target=_voice_engine.speak,
+                                    args=("Archiving holographic schematic to your personal vault, sir.",),
+                                    daemon=True
+                                ).start()
+                        elif act == "flick_dismiss":
+                            log.info("🖐️ [GESTURE] Flick Left -> Dismissing holographic construct")
+                            _active_construct = {}
+                            if _sound_engine:
+                                _sound_engine.play("whoosh")
+                            if _voice_engine:
+                                threading.Thread(
+                                    target=_voice_engine.speak,
+                                    args=("Dismissing holographic construct, sir.",),
+                                    daemon=True
+                                ).start()
+                        elif act == "inspect_component":
+                            comp = data.get("component", {})
+                            name = comp.get("name", "Sub-assembly")
+                            desc = comp.get("desc", "")
+                            stress = comp.get("stress", "")
+                            mat = comp.get("material", "")
+                            log.info("🖐️ [GESTURE] Laser Pointer targeting: %s (%s)", name, mat)
+                            if _voice_engine and name:
+                                diagnosis = f"Targeting {name}, sir. Fabricated from {mat}. Current reading indicates {stress}."
+                                threading.Thread(
+                                    target=_voice_engine.speak,
+                                    args=(diagnosis,),
+                                    daemon=True
+                                ).start()
                     elif data.get("type") == "VOICE_COMMAND":
                         transcript = data.get("transcript", "").strip()
                         if _voice_engine and transcript:
