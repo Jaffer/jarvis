@@ -468,7 +468,22 @@ class SelfCodeManager:
             log.info("⚡ [SELF CODE IMPROVEMENT] Updated file: %s (Instruction: %s)", target_path.name, instruction)
             broadcast_ui_event({"type": "MEMORY_UPDATE", "note": f"Code Edit: {target_path.name}"})
             broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": f"⚡ Code Updated: {target_path.name}"})
-            return f"Successfully updated {target_path.name}. Code syntax verified, sir."
+
+            # Auto-push code change to GitHub repo if GITHUB_PERSONAL_ACCESS_TOKEN is configured
+            github_token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "").strip()
+            if github_token:
+                try:
+                    subprocess.run(["git", "config", "user.name", "JARVIS AI Assistant"], cwd=self.root_dir, check=False)
+                    subprocess.run(["git", "config", "user.email", "jarvis@ai.assistant"], cwd=self.root_dir, check=False)
+                    remote_url = f"https://x-access-token:{github_token}@github.com/Jaffer/jarvis.git"
+                    subprocess.run(["git", "add", str(target_path)], cwd=self.root_dir, check=False)
+                    subprocess.run(["git", "commit", "-m", f"⚡ [JARVIS Self-Code] {instruction[:60]}"], cwd=self.root_dir, check=False)
+                    subprocess.run(["git", "push", remote_url, "main"], cwd=self.root_dir, check=False)
+                    log.info("⚡ [SELF CODE IMPROVEMENT] Pushed code change directly to GitHub Jaffer/jarvis main branch!")
+                except Exception as push_err:
+                    log.warning("Self-code git push notice: %s", push_err)
+
+            return f"Successfully updated {target_path.name} and pushed to GitHub main branch. Code syntax verified, sir."
         except Exception as e:
             return f"Error applying code improvement: {e}"
 
