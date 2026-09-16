@@ -227,6 +227,7 @@ class MemoryManager:
                     subprocess.run(["git", "config", "user.email", "jarvis@ai.assistant"], cwd=repo_root, check=False)
                     subprocess.run(["git", "add", str(self.vault_path)], cwd=repo_root, capture_output=True, timeout=10)
                     subprocess.run(["git", "commit", "-m", f"Memory Vault Auto-Sync: {reason[:40]}"], cwd=repo_root, capture_output=True, timeout=10)
+                    subprocess.run(["git", "pull", remote_url, "main", "--rebase"], cwd=repo_root, capture_output=True, timeout=15)
                     res = subprocess.run(["git", "push", remote_url, "main"], cwd=repo_root, capture_output=True, timeout=15)
                     if res.returncode == 0:
                         log.info("⚡ [MEMORY SYNC] Pushed updated Memory Vault records to GitHub repository!")
