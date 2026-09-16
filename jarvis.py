@@ -391,25 +391,56 @@ class AutonomousLearningEngine:
                 'If no new preference or correction is found, return:\n{"found": false}'
             )
 
-            req_data = json.dumps({
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": f"Recent Interactions:\n{formatted_log}"}
-                ],
-                "stream": False,
-                "keep_alive": "30m",
-                "options": {"temperature": 0.2, "num_predict": 100}
-            }).encode()
+            groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+            content = ""
+            if groq_key:
+                try:
+                    url = "https://api.groq.com/openai/v1/chat/completions"
+                    headers = {
+                        "Authorization": f"Bearer {groq_key}",
+                        "Content-Type": "application/json",
+                        "User-Agent": "Jarvis/1.0 (Linux; x86_64)"
+                    }
+                    payload = {
+                        "model": "qwen/qwen3.8-27b",
+                        "messages": [
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": f"Recent Interactions:\n{formatted_log}"}
+                        ],
+                        "temperature": 0.2,
+                        "max_tokens": 150
+                    }
+                    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        data = json.loads(resp.read().decode())
+                        msg = data.get("choices", [{}])[0].get("message", {})
+                        content = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+                except Exception as g_err:
+                    log.debug("Autonomous learning Groq query notice: %s", g_err)
 
-            req = urllib.request.Request(
-                f"{self.host}/api/chat",
-                data=req_data,
-                headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=15) as r:
-                res = json.loads(r.read())
-                content = res.get("message", {}).get("content", "").strip()
+            if not content:
+                try:
+                    req_data = json.dumps({
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": f"Recent Interactions:\n{formatted_log}"}
+                        ],
+                        "stream": False,
+                        "keep_alive": "30m",
+                        "options": {"temperature": 0.2, "num_predict": 100}
+                    }).encode()
+
+                    req = urllib.request.Request(
+                        f"{self.host}/api/chat",
+                        data=req_data,
+                        headers={"Content-Type": "application/json"}
+                    )
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        res = json.loads(r.read())
+                        content = res.get("message", {}).get("content", "").strip()
+                except Exception as o_err:
+                    log.debug("Autonomous learning local Ollama query notice: %s", o_err)
 
             match = re.search(r"\{.*\}", content, flags=re.DOTALL)
             if not match:
