@@ -1184,13 +1184,14 @@ function applyCmds(cmds) {
       // THE RING materializes center stage (the arms-together state);
       // clear = literally everything off, the ring included
       loadTree().then(() => spawnStage(0.5, 0.42));
-    } else if (c.a === "blueprint" || c.a === "simulate" || c.a === "stress" || c.a === "construct") {
+    } else if (c.a === "blueprint" || c.a === "simulate" || c.a === "stress" || c.a === "construct" || c.a === "dynamic_construct" || c.a === "modify_construct") {
       if (window.HolographicStudio) {
         window.HolographicStudio.loadConstruct(
-          c.construct || "arc_reactor",
-          c.simulation || "thermal",
+          c.construct || (c.manifest ? c.manifest.id : "dynamic"),
+          c.simulation || "fluid_dynamics",
           c.stress != null ? c.stress : 1.0,
-          c.exploded != null ? c.exploded : false
+          c.exploded != null ? c.exploded : false,
+          c.manifest || null
         );
       }
     } else if (c.a === "explode" || c.a === "assemble") {

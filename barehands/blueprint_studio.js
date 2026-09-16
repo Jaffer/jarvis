@@ -151,95 +151,36 @@ export class PhysicsSimulator {
       } else {
         this.alert = null;
       }
-    } else if (constructName.includes("thrust")) {
-      // Convergent-Divergent Rocket & Vector Thruster
-      const chamberPSI = Math.round(1850 * s + Math.sin(this.time * 6) * 40);
-      const thrustKN = (42.5 * s + Math.sin(this.time * 3) * 1.5).toFixed(1);
-      const ispSec = Math.round(310 + 25 * (1.0 / s));
-      const machNo = (2.4 * s).toFixed(2);
-
-      this.telemetry = {
-        primaryLabel: "VECTOR THRUST",
-        primaryVal: `${thrustKN} kN`,
-        secondaryLabel: "CHAMBER PRESSURE",
-        secondaryVal: `${chamberPSI} PSI`,
-        tertiaryLabel: "SPECIFIC IMPULSE (Isp)",
-        tertiaryVal: `${ispSec} s (Mach ${machNo})`,
-        formula: "F = ṁvₑ + (pₑ - p₀)Aₑ   |   Isp = F / (ṁ·g₀)",
-        nominal: chamberPSI < 2800
-      };
-
-      if (chamberPSI > 2600) {
-        this.alert = `⚠️ CHAMBER OVERPRESSURE: ${chamberPSI} PSI — GIMBAL THROTTLE REQUIRED`;
-        if (this.time - this._lastAlarmTime > 1.8) {
-          HolographicAudio.playAlarm();
-          this._lastAlarmTime = this.time;
-        }
-      } else {
-        this.alert = null;
-      }
-    } else if (constructName.includes("accelerator") || constructName.includes("collider")) {
-      // Relativistic Beam Particle Dynamics
-      const beamEnergyTeV = (7.0 * s).toFixed(2);
-      const beamCurrentMA = (540 * s).toFixed(0);
-      const vacuumTorr = "1.2 × 10⁻¹⁰";
-      const lumi = (1.8 * s).toFixed(2) + " × 10³⁴";
-
-      this.telemetry = {
-        primaryLabel: "BEAM ENERGY",
-        primaryVal: `${beamEnergyTeV} TeV`,
-        secondaryLabel: "INSTANT LUMINOSITY",
-        secondaryVal: `${lumi} cm⁻²s⁻¹`,
-        tertiaryLabel: "UHV CHAMBER",
-        tertiaryVal: `${vacuumTorr} Torr (${beamCurrentMA} mA)`,
-        formula: "γ = 1 / √(1 - v²/c²)   |   Bρ = p / q",
-        nominal: s <= 1.6
-      };
-
-      if (s > 1.6) {
-        this.alert = `⚠️ BEAM LOSS DETECTED: QUADRUPOLE MAGNET RESYNCHRONIZATION IN PROGRESS`;
-        if (this.time - this._lastAlarmTime > 1.8) {
-          HolographicAudio.playAlarm();
-          this._lastAlarmTime = this.time;
-        }
-      } else {
-        this.alert = null;
-      }
-    } else if (constructName.includes("drone")) {
-      // Aerodynamic Lift & Drag Solver
-      const liftN = (120 * s).toFixed(1);
-      const cd = (0.038 * (1 + 0.4 * s)).toFixed(3);
-      const rpm = Math.round(8400 * s);
-      const powerW = Math.round(1450 * s);
-
-      this.telemetry = {
-        primaryLabel: "AERODYNAMIC LIFT",
-        primaryVal: `${liftN} N (RPM: ${rpm})`,
-        secondaryLabel: "DRAG COEFFICIENT",
-        secondaryVal: `Cd: ${cd}`,
-        tertiaryLabel: "POWER DRAW",
-        tertiaryVal: `${powerW} W (Efficiency: ${(92 - s * 4).toFixed(1)}%)`,
-        formula: "Fd = ½ ρ v² Cd A   |   L = ½ ρ v² Cl A",
-        nominal: s <= 1.7
-      };
-      this.alert = s > 1.7 ? `⚠️ ROTOR STALL WARNING: AERODYNAMIC SEPARATION DETECTED` : null;
     } else {
-      // Cybernetic Neural Grid
-      const nodes = Math.round(256 * s);
-      const syncGhz = (4.8 * s).toFixed(2);
-      const coherence = (99.2 - s * 2.1).toFixed(1);
+      // Dynamic Generative Construct & Real-World Pneumatic Web Shooter Solver
+      const phys = (this.activeManifest && this.activeManifest.physics) ? this.activeManifest.physics : null;
+      const basePsi = 3400;
+      const currentPsi = Math.round(basePsi * s + Math.sin(this.time * 5) * 25);
+      const viscosityCP = Math.round(480 - (s - 1.0) * 60 + Math.cos(this.time * 3) * 8);
+      const nozzleVel = (142 * Math.sqrt(s)).toFixed(1);
+      const burstPsi = 4800;
+      const safetyFactor = (burstPsi / Math.max(1, currentPsi)).toFixed(2);
 
       this.telemetry = {
-        primaryLabel: "ACTIVE SYNAPSES",
-        primaryVal: `${nodes} Nodes`,
-        secondaryLabel: "CLOCK FREQUENCY",
-        secondaryVal: `${syncGhz} GHz`,
-        tertiaryLabel: "QUANTUM COHERENCE",
-        tertiaryVal: `${coherence}%`,
-        formula: "I_syn = ∑ w_ij · S_j(t)   |   τ_m (dV/dt) = -(V - V_rest) + R·I",
-        nominal: coherence >= 88.0
+        primaryLabel: (phys && phys.primaryLabel) || "CHAMBER PRESSURE",
+        primaryVal: (phys && phys.primaryVal) ? `${currentPsi} PSI (${(currentPsi*0.0689).toFixed(0)} Bar)` : `${currentPsi} PSI`,
+        secondaryLabel: (phys && phys.secondaryLabel) || "SHEAR VISCOSITY",
+        secondaryVal: (phys && phys.secondaryVal) ? `${viscosityCP} cP` : `${viscosityCP} cP`,
+        tertiaryLabel: (phys && phys.tertiaryLabel) || "NOZZLE VELOCITY",
+        tertiaryVal: (phys && phys.tertiaryVal) ? `${nozzleVel} m/s (SF: ${safetyFactor})` : `${nozzleVel} m/s`,
+        formula: (phys && phys.formula) || "ΔP = f·(L/D)·(ρv²/2)  |  F_shear = μ·(dv/dy)  |  σ_yield = 450 MPa",
+        nominal: safetyFactor >= 1.0 && currentPsi < 4500
       };
-      this.alert = coherence < 88.0 ? `⚠️ DECOHERENCE WARNING: QUANTUM NODE INTERFERENCE DETECTED` : null;
+
+      if (currentPsi >= 4400 || safetyFactor < 1.0) {
+        this.alert = `⚠️ CHAMBER OVERPRESSURE: ${currentPsi} PSI EXCEEDS SAFE BURST RATING (SF: ${safetyFactor})`;
+        if (this.time - this._lastAlarmTime > 1.8) {
+          HolographicAudio.playAlarm();
+          this._lastAlarmTime = this.time;
+        }
+      } else {
+        this.alert = null;
+      }
     }
   }
 
@@ -350,238 +291,190 @@ export class BlueprintBuilder {
     return { group, parts, pSystem, name: "arc_reactor" };
   }
 
-  // ── FLIGHT STABILIZATION THRUSTER ──
-  static buildThruster() {
+  // ── DYNAMIC GENERATIVE BLUEPRINT COMPILER ──
+  static buildFromManifest(manifest) {
     const group = new THREE.Group();
     group.name = "construct_root";
     const parts = [];
 
-    // 1. Convergent-Divergent Bell Nozzle Shell
-    const nozzleGeo = new THREE.CylinderGeometry(1.2, 2.5, 4.0, 24, 6, true);
-    const nozzleMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff, wireframe: true, transparent: true, opacity: 0.8 });
-    const nozzleMesh = new THREE.Mesh(nozzleGeo, nozzleMat);
-    nozzleMesh.userData = { home: new THREE.Vector3(0, -0.5, 0), explodeDir: new THREE.Vector3(0, -3.5, 0), label: "[TH-01] Convergent-Divergent Nozzle · Carbon-Carbon", intensity: 1.1 };
-    group.add(nozzleMesh);
-    parts.push(nozzleMesh);
+    const partsList = (manifest && manifest.parts) ? manifest.parts : [];
+    partsList.forEach((pDef, idx) => {
+      let geo;
+      const gType = (pDef.geo || "box").toLowerCase();
+      const args = Array.isArray(pDef.args) ? pDef.args : [1, 1, 1];
 
-    // 2. High-Pressure Turbine Rotor with 12 Blades
-    const turbineGroup = new THREE.Group();
-    const shaftGeo = new THREE.CylinderGeometry(0.35, 0.35, 3.2, 16);
-    const shaft = new THREE.Mesh(shaftGeo, new THREE.MeshBasicMaterial({ color: 0xffb300, wireframe: true }));
-    turbineGroup.add(shaft);
-    for (let i = 0; i < 12; i++) {
-      const angle = (i / 12) * Math.PI * 2;
-      const bladeGeo = new THREE.BoxGeometry(0.1, 0.85, 0.03);
-      const blade = new THREE.Mesh(bladeGeo, new THREE.MeshBasicMaterial({ color: 0x00e5ff }));
-      blade.position.set(Math.cos(angle) * 0.55, 0, Math.sin(angle) * 0.55);
-      blade.rotation.y = -angle + 0.35;
-      turbineGroup.add(blade);
-    }
-    turbineGroup.userData = { home: new THREE.Vector3(0, 1.2, 0), explodeDir: new THREE.Vector3(0, 3.8, 0), label: "[TH-02] Cryogenic Turbine Rotor · 64,000 RPM · Inconel 718", intensity: 1.4, rotSpeed: 4.0 };
-    group.add(turbineGroup);
-    parts.push(turbineGroup);
+      try {
+        if (gType === "box") {
+          geo = new THREE.BoxGeometry(...args);
+        } else if (gType === "cylinder") {
+          geo = new THREE.CylinderGeometry(...args);
+        } else if (gType === "torus") {
+          geo = new THREE.TorusGeometry(...args);
+        } else if (gType === "cone") {
+          geo = new THREE.ConeGeometry(...args);
+        } else if (gType === "capsule") {
+          geo = new THREE.CapsuleGeometry(...args);
+        } else if (gType === "sphere") {
+          geo = new THREE.SphereGeometry(...args);
+        } else if (gType === "ring") {
+          geo = new THREE.RingGeometry(...args);
+        } else {
+          geo = new THREE.BoxGeometry(1, 1, 1);
+        }
+      } catch (e) {
+        geo = new THREE.BoxGeometry(1, 1, 1);
+      }
 
-    // 3. Fuel Injector Manifold & Gimbal Ring
-    const manifoldGeo = new THREE.TorusGeometry(1.6, 0.16, 12, 24);
-    const manifold = new THREE.Mesh(manifoldGeo, new THREE.MeshBasicMaterial({ color: 0xffb300, wireframe: true }));
-    manifold.rotation.x = Math.PI / 2;
-    manifold.position.y = 1.0;
-    manifold.userData = { home: new THREE.Vector3(0, 1.0, 0), explodeDir: new THREE.Vector3(0, 2.0, 0), label: "[TH-03] Multi-Port Cryo Injector · 1850 PSI", intensity: 1.2 };
-    group.add(manifold);
-    parts.push(manifold);
-
-    // 4. Vector Gimbal Actuator Ring
-    const gimbalGeo = new THREE.TorusGeometry(2.7, 0.12, 12, 32);
-    const gimbal = new THREE.Mesh(gimbalGeo, new THREE.MeshBasicMaterial({ color: 0x00e5ff, wireframe: true }));
-    gimbal.rotation.x = Math.PI / 2;
-    gimbal.position.y = 0.2;
-    gimbal.userData = { home: new THREE.Vector3(0, 0.2, 0), explodeDir: new THREE.Vector3(2.5, 0, 0), label: "[TH-04] Gimbal Actuator · ±18° Vectoring", intensity: 0.8 };
-    group.add(gimbal);
-    parts.push(gimbal);
-
-    // 5. Mach Shock Diamonds
-    const shockGroup = new THREE.Group();
-    for (let i = 0; i < 4; i++) {
-      const diamondGeo = new THREE.OctahedronGeometry(0.4 - i * 0.06, 0);
-      const diamond = new THREE.Mesh(diamondGeo, new THREE.MeshBasicMaterial({ color: 0xff2a55, wireframe: true }));
-      diamond.position.y = -2.6 - i * 0.7;
-      shockGroup.add(diamond);
-    }
-    group.add(shockGroup);
-
-    return { group, parts, name: "thruster" };
-  }
-
-  // ── QUANTUM PARTICLE ACCELERATOR ──
-  static buildAccelerator() {
-    const group = new THREE.Group();
-    group.name = "construct_root";
-    const parts = [];
-
-    // 1. Relativistic Beam Vacuum Pipe
-    const pipeGeo = new THREE.TorusGeometry(3.6, 0.3, 20, 64);
-    const pipeMesh = new THREE.Mesh(pipeGeo, new THREE.MeshBasicMaterial({ color: 0x00e5ff, wireframe: true, transparent: true, opacity: 0.8 }));
-    pipeMesh.userData = { home: new THREE.Vector3(), explodeDir: new THREE.Vector3(0, 0, -2.5), label: "[PA-01] Ultra-High Vacuum Beam Pipe · 10⁻¹⁰ Torr", intensity: 0.9 };
-    group.add(pipeMesh);
-    parts.push(pipeMesh);
-
-    // 2. 8 Quadrupole Steering Magnets
-    for (let i = 0; i < 8; i++) {
-      const angle = (i / 8) * Math.PI * 2;
-      const magGeo = new THREE.TorusGeometry(0.7, 0.12, 12, 16);
-      const mag = new THREE.Mesh(magGeo, new THREE.MeshBasicMaterial({ color: 0xffb300, wireframe: true }));
-      mag.position.set(Math.cos(angle) * 3.6, Math.sin(angle) * 3.6, 0);
-      mag.rotation.z = angle + Math.PI / 2;
-      const expDir = new THREE.Vector3(Math.cos(angle) * 2.2, Math.sin(angle) * 2.2, 0);
-      mag.userData = { home: mag.position.clone(), explodeDir: expDir, label: `[PA-02] Quadrupole Focus Station #${i+1} · 8.4 T`, intensity: 1.3 };
-      group.add(mag);
-      parts.push(mag);
-    }
-
-    // 3. Central Collision Detector Chamber
-    const detGeo = new THREE.SphereGeometry(1.4, 16, 16);
-    const det = new THREE.Mesh(detGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.7 }));
-    det.userData = { home: new THREE.Vector3(), explodeDir: new THREE.Vector3(0, 0, 3.8), label: "[PA-03] Particle Collision Calorimeter · Silicon Tracker", intensity: 1.5 };
-    group.add(det);
-    parts.push(det);
-
-    // 4. Counter-rotating relativistic particle beams
-    const pCount = 200;
-    const b1Pos = new Float32Array(pCount * 3);
-    const b2Pos = new Float32Array(pCount * 3);
-    for (let i = 0; i < pCount; i++) {
-      const a1 = (i / pCount) * Math.PI * 2;
-      b1Pos[i*3] = Math.cos(a1) * 3.6;
-      b1Pos[i*3+1] = Math.sin(a1) * 3.6;
-      b1Pos[i*3+2] = (Math.random() - 0.5) * 0.15;
-
-      const a2 = (i / pCount) * Math.PI * 2;
-      b2Pos[i*3] = Math.cos(a2) * 3.6;
-      b2Pos[i*3+1] = Math.sin(a2) * 3.6;
-      b2Pos[i*3+2] = (Math.random() - 0.5) * 0.15;
-    }
-    const b1Geo = new THREE.BufferGeometry(); b1Geo.setAttribute("position", new THREE.BufferAttribute(b1Pos, 3));
-    const b2Geo = new THREE.BufferGeometry(); b2Geo.setAttribute("position", new THREE.BufferAttribute(b2Pos, 3));
-    const b1 = new THREE.Points(b1Geo, new THREE.PointsMaterial({ color: 0x00e5ff, size: 0.12 }));
-    const b2 = new THREE.Points(b2Geo, new THREE.PointsMaterial({ color: 0xff2a55, size: 0.12 }));
-    b1.userData = { rotSpeed: 3.5 };
-    b2.userData = { rotSpeed: -3.5 };
-    group.add(b1, b2);
-
-    return { group, parts, name: "accelerator" };
-  }
-
-  // ── AERODYNAMIC DRONE AIRFRAME ──
-  static buildDroneAirframe() {
-    const group = new THREE.Group();
-    group.name = "construct_root";
-    const parts = [];
-
-    // 1. Central Carbon Monocoque Core
-    const bodyGeo = new THREE.CylinderGeometry(1.0, 0.8, 0.45, 8);
-    const body = new THREE.Mesh(bodyGeo, new THREE.MeshBasicMaterial({ color: 0x00e5ff, wireframe: true }));
-    body.userData = { home: new THREE.Vector3(), explodeDir: new THREE.Vector3(0, 2.2, 0), label: "[DR-01] Carbon Monocoque Chassis · Toray T800", intensity: 0.9 };
-    group.add(body);
-    parts.push(body);
-
-    // 2. 4 Tubular Carbon Motor Arms & Propellers
-    const armPositions = [
-      { x: 2.2, z: 2.2, angle: Math.PI / 4 },
-      { x: -2.2, z: 2.2, angle: -Math.PI / 4 },
-      { x: -2.2, z: -2.2, angle: -3 * Math.PI / 4 },
-      { x: 2.2, z: -2.2, angle: 3 * Math.PI / 4 },
-    ];
-
-    armPositions.forEach((pos, idx) => {
-      const armGroup = new THREE.Group();
-      // Arm tube
-      const tubeGeo = new THREE.CylinderGeometry(0.08, 0.08, 2.8, 8);
-      const tube = new THREE.Mesh(tubeGeo, new THREE.MeshBasicMaterial({ color: 0xffb300, wireframe: true }));
-      tube.rotation.z = Math.PI / 2;
-      tube.rotation.y = pos.angle;
-      tube.position.set(pos.x / 2, 0, pos.z / 2);
-      armGroup.add(tube);
-
-      // Motor Nacelle
-      const motorGeo = new THREE.CylinderGeometry(0.3, 0.3, 0.5, 12);
-      const motor = new THREE.Mesh(motorGeo, new THREE.MeshBasicMaterial({ color: 0x00e5ff }));
-      motor.position.set(pos.x, 0.2, pos.z);
-      armGroup.add(motor);
-
-      // Propeller Disc
-      const propGeo = new THREE.RingGeometry(0.2, 1.2, 24);
-      const prop = new THREE.Mesh(propGeo, new THREE.MeshBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.4, side: THREE.DoubleSide }));
-      prop.rotation.x = Math.PI / 2;
-      prop.position.set(pos.x, 0.48, pos.z);
-      prop.userData = { rotSpeed: idx % 2 === 0 ? 12 : -12 };
-      armGroup.add(prop);
-
-      const expDir = new THREE.Vector3(pos.x * 1.4, 0, pos.z * 1.4);
-      armGroup.userData = { home: new THREE.Vector3(), explodeDir: expDir, label: `[DR-02] Brushless Drive Unit #${idx+1} · 1800 KV`, intensity: 1.2 };
-      group.add(armGroup);
-      parts.push(armGroup);
-    });
-
-    // 3. Forward Multispectral Sensor Pod
-    const podGeo = new THREE.SphereGeometry(0.42, 12, 12);
-    const pod = new THREE.Mesh(podGeo, new THREE.MeshBasicMaterial({ color: 0xff2a55, wireframe: true }));
-    pod.position.set(0, -0.2, 1.1);
-    pod.userData = { home: new THREE.Vector3(0, -0.2, 1.1), explodeDir: new THREE.Vector3(0, 0, 2.8), label: "[DR-04] Multispectral LIDAR Pod · 360° Mapping", intensity: 1.4 };
-    group.add(pod);
-    parts.push(pod);
-
-    return { group, parts, name: "drone" };
-  }
-
-  // ── CYBERNETIC NEURAL CIRCUIT GRID ──
-  static buildNeuralGrid() {
-    const group = new THREE.Group();
-    group.name = "construct_root";
-    const parts = [];
-
-    const nodeCount = 48;
-    const nodes = [];
-    const nodePositions = [];
-
-    for (let i = 0; i < nodeCount; i++) {
-      const u = Math.random();
-      const v = Math.random();
-      const theta = u * 2.0 * Math.PI;
-      const phi = Math.acos(2.0 * v - 1.0);
-      const r = 1.6 + Math.random() * 1.8;
-      const pos = new THREE.Vector3(
-        r * Math.sin(phi) * Math.cos(theta),
-        r * Math.sin(phi) * Math.sin(theta),
-        r * Math.cos(phi)
-      );
-      nodePositions.push(pos);
-
-      const nodeGeo = new THREE.SphereGeometry(0.12, 8, 8);
-      const nodeMat = new THREE.MeshBasicMaterial({ color: i % 3 === 0 ? 0xffb300 : 0x00e5ff });
-      const nodeMesh = new THREE.Mesh(nodeGeo, nodeMat);
-      nodeMesh.position.copy(pos);
-      nodeMesh.userData = { home: pos.clone(), explodeDir: pos.clone().multiplyScalar(1.6), label: `[NC-${i+1}] Neuromorphic Core #${i+1}`, intensity: 1.0 };
-      group.add(nodeMesh);
-      parts.push(nodeMesh);
-      nodes.push(nodeMesh);
-    }
-
-    // Connect nodes with laser waveguides
-    const linePositions = [];
-    for (let i = 0; i < nodeCount; i++) {
-      for (let j = i + 1; j < nodeCount; j++) {
-        if (nodePositions[i].distanceTo(nodePositions[j]) < 1.6) {
-          linePositions.push(nodePositions[i].x, nodePositions[i].y, nodePositions[i].z);
-          linePositions.push(nodePositions[j].x, nodePositions[j].y, nodePositions[j].z);
+      const matDef = pDef.mat || {};
+      let colorVal = 0x00e5ff;
+      if (matDef.color) {
+        if (typeof matDef.color === "string") {
+          colorVal = parseInt(matDef.color.replace("#", ""), 16);
+        } else if (typeof matDef.color === "number") {
+          colorVal = matDef.color;
         }
       }
-    }
-    const lineGeo = new THREE.BufferGeometry();
-    lineGeo.setAttribute("position", new THREE.Float32BufferAttribute(linePositions, 3));
-    const lines = new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.35 }));
-    group.add(lines);
 
-    return { group, parts, name: "neural_grid" };
+      const mat = new THREE.MeshBasicMaterial({
+        color: isNaN(colorVal) ? 0x00e5ff : colorVal,
+        wireframe: matDef.wireframe !== false,
+        transparent: true,
+        opacity: matDef.opacity != null ? matDef.opacity : 0.85,
+        side: THREE.DoubleSide
+      });
+
+      const mesh = new THREE.Mesh(geo, mat);
+      if (Array.isArray(pDef.pos)) mesh.position.set(...pDef.pos);
+      if (Array.isArray(pDef.rot)) mesh.rotation.set(...pDef.rot);
+      if (Array.isArray(pDef.scale)) mesh.scale.set(...pDef.scale);
+
+      const homePos = mesh.position.clone();
+      const expDir = Array.isArray(pDef.explodeDir) ? new THREE.Vector3(...pDef.explodeDir) : new THREE.Vector3(0, 1.5, 0);
+
+      mesh.userData = {
+        id: pDef.id || `part_${idx}`,
+        home: homePos,
+        explodeDir: expDir,
+        label: pDef.callout || pDef.name || `Sub-Assembly #${idx+1}`,
+        intensity: pDef.intensity || 1.0,
+        rotSpeed: pDef.rotSpeed || 0
+      };
+
+      group.add(mesh);
+      parts.push(mesh);
+    });
+
+    return { group, parts, name: (manifest && manifest.id) || "custom_construct", manifest };
+  }
+
+  // ── REAL-WORLD SCIENCE PNEUMATIC WEB SHOOTER MK I ──
+  static buildWebShooter() {
+    return this.buildFromManifest({
+      id: "web_shooter",
+      name: "Pneumatic Web Shooter Mk I",
+      description: "Wrist-mounted high-pressure fluid expulsion mechanism based on real-world pneumatic engineering",
+      physics: {
+        solver: "fluid_dynamics",
+        formula: "ΔP = f·(L/D)·(ρv²/2)  |  F_shear = μ·(dv/dy)  |  σ_yield = 450 MPa",
+        primaryLabel: "CHAMBER PRESSURE",
+        primaryVal: "3,400 PSI",
+        secondaryLabel: "SHEAR VISCOSITY",
+        secondaryVal: "480 cP",
+        tertiaryLabel: "NOZZLE VELOCITY",
+        tertiaryVal: "142 m/s",
+        nominal: true
+      },
+      parts: [
+        {
+          id: "wrist_chassis",
+          name: "Titanium Forearm Gauntlet Chassis",
+          geo: "cylinder",
+          args: [1.2, 1.35, 1.4, 28, 1, true],
+          pos: [0, 0, 0],
+          rot: [0, 0, 0],
+          mat: { wireframe: true, color: "#00e5ff", opacity: 0.85 },
+          explodeDir: [0, 0, -1.8],
+          callout: "[WS-01] Titanium Forearm Gauntlet Chassis · Ti-6Al-4V"
+        },
+        {
+          id: "fluid_res_a",
+          name: "Primary Pressurized Fluid Reservoir",
+          geo: "capsule",
+          args: [0.28, 1.5, 8, 16],
+          pos: [1.15, 0.1, 0],
+          rot: [0, 0, 1.57],
+          mat: { wireframe: true, color: "#00e5ff" },
+          explodeDir: [2.6, 0.4, 0],
+          callout: "[WS-02A] Primary Fluid Reservoir · 300 Bar (4,350 PSI)"
+        },
+        {
+          id: "fluid_res_b",
+          name: "Secondary Pressurized Fluid Reservoir",
+          geo: "capsule",
+          args: [0.28, 1.5, 8, 16],
+          pos: [-1.15, 0.1, 0],
+          rot: [0, 0, 1.57],
+          mat: { wireframe: true, color: "#00e5ff" },
+          explodeDir: [-2.6, 0.4, 0],
+          callout: "[WS-02B] Secondary Fluid Reservoir · 300 Bar (4,350 PSI)"
+        },
+        {
+          id: "solenoid_valve",
+          name: "Piezoelectric Pulse Solenoid Valve",
+          geo: "cylinder",
+          args: [0.38, 0.38, 0.7, 20],
+          pos: [0, 0.7, 0.45],
+          rot: [1.57, 0, 0],
+          mat: { wireframe: true, color: "#ffb300" },
+          explodeDir: [0, 1.8, 1.0],
+          callout: "[WS-03] Piezoelectric Solenoid Valve · 1.2ms Response"
+        },
+        {
+          id: "spinneret_nozzle",
+          name: "Variable Spinneret Dispersion Nozzle",
+          geo: "cone",
+          args: [0.36, 0.85, 20],
+          pos: [0, 1.35, 0.45],
+          rot: [0, 0, 0],
+          mat: { wireframe: true, color: "#00e5ff" },
+          rotSpeed: 6.0,
+          explodeDir: [0, 3.2, 1.0],
+          callout: "[WS-04] Variable Spinneret Nozzle · 142 m/s Exit Velocity"
+        },
+        {
+          id: "palm_trigger",
+          name: "Palm Bio-Electric Pressure Switch",
+          geo: "box",
+          args: [0.45, 0.12, 0.35],
+          pos: [0, -1.2, 0.55],
+          mat: { wireframe: false, color: "#ff1744", opacity: 0.9 },
+          explodeDir: [0, -2.4, 0.6],
+          callout: "[WS-05] Palm Bio-Electric Trigger · 65 PSI Activation"
+        },
+        {
+          id: "feed_tubing",
+          name: "Inconel High-Pressure Manifold Tubing",
+          geo: "torus",
+          args: [0.8, 0.08, 12, 24, 3.1415],
+          pos: [0, 0.2, 0.5],
+          rot: [0, 0, 0],
+          mat: { wireframe: true, color: "#ffb300" },
+          explodeDir: [0, 0, 1.5],
+          callout: "[WS-06] Braided Inconel Feed Line · 450 Bar Burst Rating"
+        },
+        {
+          id: "pressure_gauge",
+          name: "Analog Manifold Pressure Gauge",
+          geo: "cylinder",
+          args: [0.28, 0.28, 0.12, 24],
+          pos: [0.75, 0.6, 0.45],
+          rot: [0.5, -0.4, 0],
+          mat: { wireframe: true, color: "#ffb300" },
+          explodeDir: [1.8, 1.2, 0.8],
+          callout: "[WS-07] Chamber Pressure Gauge · 0-5000 PSI Range"
+        }
+      ]
+    });
   }
 }
 
@@ -672,14 +565,17 @@ export class HolographicStudio {
     `;
 
     this.hudEl.innerHTML = `
-      <!-- TOP BAR: Construct Selector -->
-      <div style="position: absolute; top: 18px; left: 24px; display: flex; gap: 8px; pointer-events: auto; background: rgba(5,25,30,0.7); padding: 8px 16px; border-radius: 12px; border: 1px solid rgba(0,229,255,0.4); backdrop-filter: blur(10px);">
-        <span style="font-weight: 700; color: #00e5ff; letter-spacing: 0.12em; line-height: 32px; margin-right: 8px;">STARK LABS // 3D BLUEPRINT:</span>
-        <button class="holo-btn active" data-construct="arc_reactor">ARC REACTOR</button>
-        <button class="holo-btn" data-construct="thruster">THRUSTER</button>
-        <button class="holo-btn" data-construct="accelerator">ACCELERATOR</button>
-        <button class="holo-btn" data-construct="drone">DRONE FRAME</button>
-        <button class="holo-btn" data-construct="neural_grid">NEURAL GRID</button>
+      <!-- TOP BAR: Construct Selector & Dynamic Voice/Prompt Bar -->
+      <div style="position: absolute; top: 18px; left: 24px; right: 190px; display: flex; align-items: center; gap: 12px; pointer-events: auto;">
+        <div style="display: flex; gap: 8px; background: rgba(5,25,30,0.75); padding: 6px 14px; border-radius: 12px; border: 1px solid rgba(0,229,255,0.4); backdrop-filter: blur(10px);">
+          <button class="holo-btn active" data-construct="arc_reactor">⚛ ARC REACTOR</button>
+          <button class="holo-btn" data-construct="dynamic" id="holo_dynamic_btn">🛠 DYNAMIC: WEB SHOOTER MK I</button>
+        </div>
+
+        <div style="flex: 1; display: flex; gap: 8px; background: rgba(5,25,30,0.75); padding: 6px 14px; border-radius: 12px; border: 1px solid rgba(0,229,255,0.4); backdrop-filter: blur(10px);">
+          <input id="holo_prompt_input" type="text" placeholder="Instruct JARVIS to construct or modify (e.g. 'Build a real life web shooter', 'Add pressure gauge')..." style="flex: 1; background: rgba(0,0,0,0.5); border: 1px solid rgba(0,229,255,0.3); border-radius: 6px; padding: 6px 12px; color: #ffffff; font-family: monospace; font-size: 11px; outline: none;">
+          <button id="holo_submit_btn" style="background: rgba(0,229,255,0.2); border: 1px solid #00e5ff; color: #00e5ff; padding: 6px 14px; border-radius: 6px; font-family: monospace; font-size: 11px; font-weight: 700; cursor: pointer;">⚡ CONSTRUCT / MODIFY</button>
+        </div>
       </div>
 
       <!-- TOP RIGHT: Close Studio Button -->
@@ -786,6 +682,29 @@ export class HolographicStudio {
       HolographicAudio.playServo(this.isExploded ? 1 : -1);
     });
 
+    // Bind Prompt Input Submit
+    const submitPrompt = () => {
+      const input = document.getElementById("holo_prompt_input");
+      const text = input ? input.value.trim() : "";
+      if (!text) return;
+      HolographicAudio.playClick();
+      fetch("/construct_prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: text })
+      }).catch(() => {});
+      input.value = "";
+    };
+
+    const submitBtn = document.getElementById("holo_submit_btn");
+    if (submitBtn) submitBtn.addEventListener("click", submitPrompt);
+    const promptInput = document.getElementById("holo_prompt_input");
+    if (promptInput) {
+      promptInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") submitPrompt();
+      });
+    }
+
     document.getElementById("holo_close_btn").addEventListener("click", () => {
       this.hide();
     });
@@ -826,9 +745,9 @@ export class HolographicStudio {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.type === "RENDER_3D_BLUEPRINT") {
+          if (data.type === "RENDER_3D_BLUEPRINT" || data.type === "DYNAMIC_CONSTRUCT" || data.type === "MODIFY_CONSTRUCT") {
             this.show();
-            this.loadConstruct(data.construct || "arc_reactor", data.simulation || "thermal", data.stress || 1.0, data.exploded || false);
+            this.loadConstruct(data.construct || (data.manifest ? data.manifest.id : "dynamic"), data.simulation || "fluid_dynamics", data.stress || 1.0, data.exploded || false, data.manifest);
           }
         } catch (e) {}
       };
@@ -847,11 +766,12 @@ export class HolographicStudio {
     if (this.container) this.container.style.display = "none";
   }
 
-  static loadConstruct(name = "arc_reactor", simMode = "thermal", stress = 1.0, exploded = false) {
+  static loadConstruct(name = "arc_reactor", simMode = "thermal", stress = 1.0, exploded = false, manifest = null) {
     this.show();
     this.simulator.mode = simMode;
     this.simulator.stressLevel = stress;
     this.isExploded = exploded;
+    HolographicAudio.playServo(1);
 
     // Remove old construct
     if (this.currentConstruct) {
@@ -879,17 +799,33 @@ export class HolographicStudio {
       }
     }
 
-    // Build new 3D model
-    if (name.includes("arc") || name.includes("reactor")) {
+    // Build model: manifest, Arc Reactor, or Web Shooter
+    if (manifest) {
+      this.currentConstruct = BlueprintBuilder.buildFromManifest(manifest);
+      this.activeManifest = manifest;
+      this.simulator.activeManifest = manifest;
+      const dynBtn = document.getElementById("holo_dynamic_btn");
+      if (dynBtn) {
+        dynBtn.innerText = `🛠 ${manifest.name ? manifest.name.toUpperCase() : "DYNAMIC CONSTRUCT"}`;
+        dynBtn.setAttribute("data-construct", manifest.id || "dynamic");
+        dynBtn.classList.add("active");
+        this.hudEl.querySelectorAll(".holo-btn").forEach(b => {
+          if (b !== dynBtn) b.classList.remove("active");
+        });
+      }
+    } else if (name.includes("arc") || name.includes("reactor")) {
       this.currentConstruct = BlueprintBuilder.buildArcReactor();
-    } else if (name.includes("thrust")) {
-      this.currentConstruct = BlueprintBuilder.buildThruster();
-    } else if (name.includes("accelerator") || name.includes("collider")) {
-      this.currentConstruct = BlueprintBuilder.buildAccelerator();
-    } else if (name.includes("drone")) {
-      this.currentConstruct = BlueprintBuilder.buildDroneAirframe();
+      this.activeManifest = null;
+      this.simulator.activeManifest = null;
     } else {
-      this.currentConstruct = BlueprintBuilder.buildNeuralGrid();
+      this.currentConstruct = BlueprintBuilder.buildWebShooter();
+      this.activeManifest = this.currentConstruct.manifest;
+      this.simulator.activeManifest = this.currentConstruct.manifest;
+      const dynBtn = document.getElementById("holo_dynamic_btn");
+      if (dynBtn) {
+        dynBtn.innerText = "🛠 DYNAMIC: WEB SHOOTER MK I";
+        dynBtn.classList.add("active");
+      }
     }
 
     this.scene.add(this.currentConstruct.group);

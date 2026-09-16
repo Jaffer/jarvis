@@ -811,7 +811,273 @@ _bh_state = b"{}"
 _bh_cmds = []
 _BH_ALLOWED = ("add_img", "add_card", "clear", "reset", "hand", "give",
                "yank", "hover", "scroll_note", "widget", "explode", "assemble",
-               "present", "blueprint", "simulate", "stress", "construct")
+               "present", "blueprint", "simulate", "stress", "construct",
+               "dynamic_construct", "modify_construct")
+_global_voice_engine = None
+_active_construct: dict = {}
+
+
+def _get_default_web_shooter_manifest() -> dict:
+    """Returns baseline real-world pneumatic Web Shooter Mk I 3D manifest."""
+    return {
+        "id": "web_shooter",
+        "name": "Pneumatic Web Shooter Mk I",
+        "description": "Wrist-mounted high-pressure fluid expulsion mechanism based on real-world pneumatic engineering",
+        "physics": {
+            "solver": "fluid_dynamics",
+            "formula": "ΔP = f·(L/D)·(ρv²/2)  |  F_shear = μ·(dv/dy)  |  σ_yield = 450 MPa",
+            "primaryLabel": "CHAMBER PRESSURE",
+            "primaryVal": "3,400 PSI",
+            "secondaryLabel": "SHEAR VISCOSITY",
+            "secondaryVal": "480 cP",
+            "tertiaryLabel": "NOZZLE VELOCITY",
+            "tertiaryVal": "142 m/s",
+            "nominal": True
+        },
+        "parts": [
+            {
+                "id": "wrist_chassis",
+                "name": "Titanium Forearm Gauntlet Chassis",
+                "geo": "cylinder",
+                "args": [1.2, 1.35, 1.4, 28, 1, True],
+                "pos": [0, 0, 0],
+                "rot": [0, 0, 0],
+                "mat": {"wireframe": True, "color": "#00e5ff", "opacity": 0.85},
+                "explodeDir": [0, 0, -1.8],
+                "callout": "[WS-01] Titanium Forearm Gauntlet Chassis · Ti-6Al-4V"
+            },
+            {
+                "id": "fluid_res_a",
+                "name": "Primary Pressurized Fluid Reservoir",
+                "geo": "capsule",
+                "args": [0.28, 1.5, 8, 16],
+                "pos": [1.15, 0.1, 0],
+                "rot": [0, 0, 1.57],
+                "mat": {"wireframe": True, "color": "#00e5ff"},
+                "explodeDir": [2.6, 0.4, 0],
+                "callout": "[WS-02A] Primary Fluid Reservoir · 300 Bar (4,350 PSI)"
+            },
+            {
+                "id": "fluid_res_b",
+                "name": "Secondary Pressurized Fluid Reservoir",
+                "geo": "capsule",
+                "args": [0.28, 1.5, 8, 16],
+                "pos": [-1.15, 0.1, 0],
+                "rot": [0, 0, 1.57],
+                "mat": {"wireframe": True, "color": "#00e5ff"},
+                "explodeDir": [-2.6, 0.4, 0],
+                "callout": "[WS-02B] Secondary Fluid Reservoir · 300 Bar (4,350 PSI)"
+            },
+            {
+                "id": "solenoid_valve",
+                "name": "Piezoelectric Pulse Solenoid Valve",
+                "geo": "cylinder",
+                "args": [0.38, 0.38, 0.7, 20],
+                "pos": [0, 0.7, 0.45],
+                "rot": [1.57, 0, 0],
+                "mat": {"wireframe": True, "color": "#ffb300"},
+                "explodeDir": [0, 1.8, 1.0],
+                "callout": "[WS-03] Piezoelectric Solenoid Valve · 1.2ms Response"
+            },
+            {
+                "id": "spinneret_nozzle",
+                "name": "Variable Spinneret Dispersion Nozzle",
+                "geo": "cone",
+                "args": [0.36, 0.85, 20],
+                "pos": [0, 1.35, 0.45],
+                "rot": [0, 0, 0],
+                "mat": {"wireframe": True, "color": "#00e5ff"},
+                "rotSpeed": 6.0,
+                "explodeDir": [0, 3.2, 1.0],
+                "callout": "[WS-04] Variable Spinneret Nozzle · 142 m/s Exit Velocity"
+            },
+            {
+                "id": "palm_trigger",
+                "name": "Palm Bio-Electric Pressure Switch",
+                "geo": "box",
+                "args": [0.45, 0.12, 0.35],
+                "pos": [0, -1.2, 0.55],
+                "mat": {"wireframe": False, "color": "#ff1744", "opacity": 0.9},
+                "explodeDir": [0, -2.4, 0.6],
+                "callout": "[WS-05] Palm Bio-Electric Trigger · 65 PSI Activation"
+            },
+            {
+                "id": "feed_tubing",
+                "name": "Inconel High-Pressure Manifold Tubing",
+                "geo": "torus",
+                "args": [0.8, 0.08, 12, 24, 3.1415],
+                "pos": [0, 0.2, 0.5],
+                "rot": [0, 0, 0],
+                "mat": {"wireframe": True, "color": "#ffb300"},
+                "explodeDir": [0, 0, 1.5],
+                "callout": "[WS-06] Braided Inconel Feed Line · 450 Bar Burst Rating"
+            },
+            {
+                "id": "pressure_gauge",
+                "name": "Analog Manifold Pressure Gauge",
+                "geo": "cylinder",
+                "args": [0.28, 0.28, 0.12, 24],
+                "pos": [0.75, 0.6, 0.45],
+                "rot": [0.5, -0.4, 0],
+                "mat": {"wireframe": True, "color": "#ffb300"},
+                "explodeDir": [1.8, 1.2, 0.8],
+                "callout": "[WS-07] Chamber Pressure Gauge · 0-5000 PSI Range"
+            }
+        ]
+    }
+
+
+def construct_or_modify_3d_object(prompt: str, action: str = "create", modifications: str = "") -> tuple[dict, str]:
+    """Dynamically creates or modifies a 3D mechanical construct based on real-world engineering."""
+    global _active_construct
+    p_lower = (prompt + " " + modifications).lower().replace("_", " ")
+
+    if not _active_construct or action == "create":
+        if any(w in p_lower for w in ["web shooter", "webshooter", "spider", "wrist shooter"]):
+            _active_construct = _get_default_web_shooter_manifest()
+            diagnosis = (
+                "Constructing real-world pneumatic web shooter schematic, sir. "
+                "I've referenced high-pressure fluid expulsion mechanics. "
+                "The dual-canister system operates at 3,400 PSI with a piezoelectric solenoid valve "
+                "and variable spinneret nozzle. Displaying on Barehands Board now."
+            )
+            return _active_construct, diagnosis
+        else:
+            obj_name = prompt.strip().title() or "Mechanical Assembly"
+            _active_construct = {
+                "id": prompt.lower().replace(" ", "_"),
+                "name": obj_name,
+                "description": f"Holographic 3D construct for {obj_name} generated from engineering principles",
+                "physics": {
+                    "solver": "structural",
+                    "formula": "σ_v = √[½((σ₁-σ₂)² + (σ₂-σ₃)² + (σ₃-σ₁)²)] | SF = 1.45",
+                    "primaryLabel": "YIELD STRESS",
+                    "primaryVal": "420 MPa",
+                    "secondaryLabel": "RESONANT FREQUENCY",
+                    "secondaryVal": "1.85 kHz",
+                    "tertiaryLabel": "SAFETY FACTOR",
+                    "tertiaryVal": "1.45 (NOMINAL)",
+                    "nominal": True
+                },
+                "parts": [
+                    {
+                        "id": "main_chassis",
+                        "name": f"{obj_name} Structural Chassis",
+                        "geo": "cylinder",
+                        "args": [1.2, 1.2, 2.0, 24],
+                        "pos": [0, 0, 0],
+                        "rot": [0, 0, 0],
+                        "mat": {"wireframe": True, "color": "#00e5ff"},
+                        "explodeDir": [0, 0, -2.0],
+                        "callout": f"[MC-01] {obj_name} Primary Chassis"
+                    },
+                    {
+                        "id": "actuator_core",
+                        "name": "Central Magnetic Actuator",
+                        "geo": "torus",
+                        "args": [1.8, 0.25, 16, 32],
+                        "pos": [0, 0.4, 0],
+                        "rot": [1.57, 0, 0],
+                        "mat": {"wireframe": True, "color": "#ffb300"},
+                        "explodeDir": [0, 2.5, 0],
+                        "callout": "[MC-02] Magnetic Actuator Core"
+                    },
+                    {
+                        "id": "energy_emitter",
+                        "name": "Pulse Vector Emitter",
+                        "geo": "cone",
+                        "args": [0.6, 1.2, 20],
+                        "pos": [0, 1.6, 0],
+                        "rot": [0, 0, 0],
+                        "mat": {"wireframe": True, "color": "#00e5ff"},
+                        "explodeDir": [0, 3.8, 0],
+                        "callout": "[MC-03] Pulse Vector Emitter"
+                    },
+                    {
+                        "id": "power_capsule",
+                        "name": "High-Density Energy Cell",
+                        "geo": "capsule",
+                        "args": [0.35, 1.2, 8, 16],
+                        "pos": [1.2, -0.2, 0],
+                        "rot": [0, 0, 1.57],
+                        "mat": {"wireframe": True, "color": "#ff1744"},
+                        "explodeDir": [2.8, 0, 0],
+                        "callout": "[MC-04] High-Density Energy Cell"
+                    }
+                ]
+            }
+            diagnosis = f"Synthesizing 3D blueprint for {obj_name}. Real-world structural stress and kinematics mapped. Loaded on Barehands Board."
+            return _active_construct, diagnosis
+
+    # Action is MODIFY:
+    parts = _active_construct.setdefault("parts", [])
+    phys = _active_construct.setdefault("physics", {})
+
+    added_items = []
+    if "laser" in p_lower or "sight" in p_lower:
+        laser_part = {
+            "id": "laser_sight",
+            "name": "Tactical Laser Targeting Diode",
+            "geo": "cylinder",
+            "args": [0.1, 0.1, 0.8, 12],
+            "pos": [0, 1.1, 0.85],
+            "rot": [1.57, 0, 0],
+            "mat": {"wireframe": False, "color": "#ff1744", "opacity": 0.95},
+            "explodeDir": [0, 2.2, 1.8],
+            "callout": "[MOD] 650nm Tactical Target Laser Diode"
+        }
+        parts.append(laser_part)
+        added_items.append("tactical laser sight")
+
+    if "dual" in p_lower or "extra canister" in p_lower or "second canister" in p_lower:
+        extra_can = {
+            "id": "fluid_res_c",
+            "name": "Auxiliary High-Capacity Fluid Reservoir",
+            "geo": "capsule",
+            "args": [0.28, 1.5, 8, 16],
+            "pos": [0, -0.6, -1.15],
+            "rot": [1.57, 0, 0],
+            "mat": {"wireframe": True, "color": "#00e5ff"},
+            "explodeDir": [0, -1.8, -2.2],
+            "callout": "[MOD] Secondary High-Capacity Fluid Reservoir (300 Bar)"
+        }
+        parts.append(extra_can)
+        added_items.append("secondary fluid reservoir")
+
+    if "gauge" in p_lower or "dial" in p_lower:
+        gauge_found = any(p.get("id") == "pressure_gauge" for p in parts)
+        if not gauge_found:
+            gauge_part = {
+                "id": "pressure_gauge",
+                "name": "Analog Manifold Pressure Gauge",
+                "geo": "cylinder",
+                "args": [0.28, 0.28, 0.12, 24],
+                "pos": [0.75, 0.6, 0.45],
+                "rot": [0.5, -0.4, 0],
+                "mat": {"wireframe": True, "color": "#ffb300"},
+                "explodeDir": [1.8, 1.2, 0.8],
+                "callout": "[MOD] Chamber Pressure Gauge (0-5000 PSI)"
+            }
+            parts.append(gauge_part)
+            added_items.append("pressure gauge dial")
+
+    if "pressure" in p_lower or "psi" in p_lower or "boost" in p_lower:
+        phys["primaryVal"] = "4,200 PSI"
+        phys["formula"] = "ΔP = 4,200 PSI (High-Yield Dispersion Overdrive)"
+        added_items.append("pressure boost to 4,200 PSI")
+
+    if "nozzle" in p_lower or "barrel" in p_lower:
+        for p in parts:
+            if "nozzle" in p.get("id", ""):
+                p["args"] = [0.5, 1.1, 24]
+                p["callout"] = "[MOD] High-Dispersion Wide-Bore Nozzle"
+        added_items.append("wide-bore dispersion nozzle")
+
+    if not added_items:
+        added_items.append("component tolerances recalibrated")
+
+    diagnosis = f"Modifications applied to {_active_construct.get('name', 'blueprint')}, sir. Updated: {', '.join(added_items)}."
+    return _active_construct, diagnosis
 
 
 class BarrehandsHandler(SimpleHTTPRequestHandler):
@@ -857,7 +1123,28 @@ class BarrehandsHandler(SimpleHTTPRequestHandler):
                 self.send_response(400)
             self.end_headers()
             return
+        if self.path == "/construct_prompt":
+            try:
+                data = json.loads(body)
+                prompt = data.get("prompt", "")
+                manifest, diagnosis = construct_or_modify_3d_object(prompt)
+                _bh_cmds.append({
+                    "a": "dynamic_construct",
+                    "manifest": manifest,
+                    "simulation": manifest.get("physics", {}).get("solver", "fluid_dynamics")
+                })
+                broadcast_ui_event({"type": "DYNAMIC_CONSTRUCT", "manifest": manifest})
+                global _global_voice_engine
+                if _global_voice_engine:
+                    threading.Thread(target=_global_voice_engine.speak, args=(diagnosis,), daemon=True).start()
+                self._json_response({"status": "ok", "name": manifest.get("name")})
+                return
+            except Exception as e:
+                self.send_response(400)
+                self.end_headers()
+                return
         self.send_response(404)
+
         self.end_headers()
 
     def do_GET(self):
@@ -1247,70 +1534,51 @@ class NeuralBrain:
             except Exception as e:
                 return f"Could not fetch weather for {city}: {e}"
 
-        elif name == "render_3d_blueprint":
-            construct = (args.get("construct") or "arc_reactor").lower().strip()
-            sim_mode = (args.get("simulation") or "thermal").lower().strip()
+        elif name in ("render_3d_blueprint", "construct_3d_object"):
+            construct = (args.get("construct") or args.get("name") or "arc_reactor").lower().strip()
+            action = (args.get("action") or "create").lower().strip()
+            modifications = (args.get("modifications") or args.get("instructions") or "").strip()
+            sim_mode = (args.get("simulation") or "fluid_dynamics").lower().strip()
             stress = float(args.get("stress_level", 1.0))
             exploded = bool(args.get("exploded_view", False))
 
-            cmd = {
-                "a": "blueprint",
-                "construct": construct,
-                "simulation": sim_mode,
-                "stress": stress,
-                "exploded": exploded
-            }
-            _bh_cmds.append(cmd)
-            broadcast_ui_event({"type": "RENDER_3D_BLUEPRINT", "construct": construct, "simulation": sim_mode, "stress": stress, "exploded": exploded})
-            broadcast_ui_event({"type": "STATUS", "status": "HOLOGRAPHIC // BLUEPRINT", "phrase": f"Rendering {construct.upper()}"})
-
-            # Calculate real-world physics values for Jarvis to speak back
-            if "arc" in construct or "reactor" in construct:
+            if construct in ("arc_reactor", "arc", "reactor") and action != "modify":
+                cmd = {
+                    "a": "blueprint",
+                    "construct": "arc_reactor",
+                    "simulation": "thermal",
+                    "stress": stress,
+                    "exploded": exploded
+                }
+                _bh_cmds.append(cmd)
+                broadcast_ui_event({"type": "RENDER_3D_BLUEPRINT", "construct": "arc_reactor", "simulation": "thermal", "stress": stress, "exploded": exploded})
+                broadcast_ui_event({"type": "STATUS", "status": "HOLOGRAPHIC // BLUEPRINT", "phrase": "Rendering ARC REACTOR"})
                 temp_k = int(950 + stress * 380)
-                beta_eff = round(98.5 - stress * 4.2, 1)
                 sf = round(max(0.7, 1.85 / stress), 2)
-                status_str = "NOMINAL" if sf > 1.0 else "CRITICAL"
                 return (
                     f"Holographic 3D Blueprint for Arc Reactor Core active on Barehands Board. "
-                    f"Simulation mode: {sim_mode.upper()} at {int(stress*100)}% load. "
+                    f"Simulation mode: THERMAL at {int(stress*100)}% load. "
                     f"Core Temperature: {temp_k} K (Melting Point: 1668 K). "
-                    f"Magnetic Confinement Beta: {beta_eff}%. "
-                    f"Safety Factor: {sf} ({status_str}). "
+                    f"Magnetic Confinement Beta: 97.4%. Safety Factor: {sf} (NOMINAL). "
                     f"{'Components separated in Exploded View.' if exploded else 'Unified assembly active.'}"
                 )
-            elif "thrust" in construct:
-                thrust_kn = round(42.5 * stress, 1)
-                isp = int(310 + 20 * (1.0 / stress))
-                chamber_psi = int(1850 * stress)
-                return (
-                    f"Flight Stabilization Thruster Blueprint loaded. "
-                    f"Chamber Pressure: {chamber_psi} PSI. Total Vector Thrust: {thrust_kn} kN. "
-                    f"Specific Impulse (Isp): {isp}s. "
-                    f"{'Exploded sub-assembly view displayed.' if exploded else 'Gimbal alignment verified.'}"
-                )
-            elif "accelerator" in construct or "collider" in construct:
-                beam_gev = round(7.0 * stress, 2)
-                lumi = round(1.8 * 1e34 * stress, 1)
-                return (
-                    f"Quantum Particle Accelerator Blueprint loaded on Barehands. "
-                    f"Beam Energy: {beam_gev} TeV. Luminosity: {lumi:e} cm⁻²s⁻¹. "
-                    f"Quadrupole magnet alignment locked."
-                )
-            elif "drone" in construct:
-                lift_n = round(120.0 * stress, 1)
-                drag_cd = round(0.038 * (1.0 + 0.5 * stress), 3)
-                return (
-                    f"Aerodynamic Drone Airframe Blueprint loaded. "
-                    f"Lift Capacity: {lift_n} N. Drag Coefficient (Cd): {drag_cd}. "
-                    f"Carbon-composite structural integrity nominal."
-                )
             else:
-                nodes = int(256 * stress)
-                sync_rate = round(99.1 - stress * 1.5, 1)
-                return (
-                    f"Cybernetic Neural Circuit Grid Blueprint loaded on Barehands. "
-                    f"Active Synaptic Nodes: {nodes}. Sync Frequency: 4.8 GHz ({sync_rate}% coherence)."
-                )
+                # Dynamic Construct / Real-World Web Shooter or Modification
+                query = modifications if action == "modify" else construct
+                manifest, diagnosis = construct_or_modify_3d_object(query, action=action, modifications=modifications)
+                cmd = {
+                    "a": "dynamic_construct",
+                    "manifest": manifest,
+                    "simulation": sim_mode,
+                    "stress": stress,
+                    "exploded": exploded
+                }
+                _bh_cmds.append(cmd)
+                broadcast_ui_event({"type": "DYNAMIC_CONSTRUCT", "manifest": manifest, "stress": stress, "exploded": exploded})
+                broadcast_ui_event({"type": "STATUS", "status": "HOLOGRAPHIC // BLUEPRINT", "phrase": f"Rendering {manifest.get('name', 'CONSTRUCT').upper()}"})
+                bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
+                _open_url_in_chrome(f"http://localhost:{bh_port}/stage.html", new_window=True, label="Barehands Board", fullscreen=True)
+                return diagnosis
 
         elif name == "switch_theme":
             theme = args.get("theme", "ultron").lower()
@@ -1496,27 +1764,34 @@ class NeuralBrain:
                     "type": "function",
                     "function": {
                         "name": "render_3d_blueprint",
-                        "description": "Render interactive 3D holographic blueprints and run real-world science physics simulations on Barehands Board (arc_reactor, thruster, accelerator, drone, neural_grid)",
+                        "description": "Construct, render, or modify interactive 3D holographic blueprints on Barehands Board. Supports the Arc Reactor Core and ANY dynamic real-world engineering construct (e.g. 'web_shooter', pneumatic mechanisms, mechanical assemblies) with real-world physics and live modifications.",
                         "parameters": {
                             "type": "object",
                             "properties": {
                                 "construct": {
                                     "type": "string",
-                                    "enum": ["arc_reactor", "thruster", "accelerator", "drone", "neural_grid"],
-                                    "description": "The 3D engineering construct to display and analyze"
+                                    "description": "Name or type of 3D object to construct (e.g. 'arc_reactor', 'web_shooter', 'exoskeleton', 'laser_cutter')"
+                                },
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["create", "modify", "inspect"],
+                                    "description": "Whether to create a new 3D blueprint or modify the currently active one"
+                                },
+                                "modifications": {
+                                    "type": "string",
+                                    "description": "Specific modifications or additions requested by user (e.g. 'add dual canisters', 'add pressure gauge', 'increase pressure by 20%')"
                                 },
                                 "simulation": {
                                     "type": "string",
-                                    "enum": ["thermal", "stress", "em_field", "aerodynamics"],
-                                    "description": "Real-world physics simulation mode to execute"
+                                    "description": "Physics simulation mode (e.g. 'fluid_dynamics', 'thermal', 'stress', 'pneumatic')"
                                 },
                                 "stress_level": {
                                     "type": "number",
-                                    "description": "Simulation operational load / stress factor (e.g. 0.5 to 2.0, default 1.0)"
+                                    "description": "Simulation load factor (e.g. 0.5 to 2.0)"
                                 },
                                 "exploded_view": {
                                     "type": "boolean",
-                                    "description": "Whether to separate parts into exploded-view sub-assembly inspection"
+                                    "description": "Whether to display in exploded sub-assembly view"
                                 }
                             },
                             "required": ["construct"]
@@ -1776,6 +2051,9 @@ class VoiceEngine:
     Integrated directly into jarvis.py instead of running as a separate process."""
 
     def __init__(self, signal_bus: SignalBus, memory: MemoryManager | None = None, brain: NeuralBrain | None = None, learning_engine: AutonomousLearningEngine | None = None):
+        global _global_voice_engine, _voice_engine
+        _voice_engine = self
+        _global_voice_engine = self
         self.bus = signal_bus
         self.memory = memory
         self.brain = brain
@@ -2025,35 +2303,31 @@ class VoiceEngine:
             )
             return
 
-        # ── 1b. 3D Holographic Blueprints & Constructs ──
+        # ── 1b. 3D Holographic Blueprints & Dynamic Constructs ──
         if any(q in t for q in [
             "blueprint", "construct", "render 3d", "show 3d", "3d model",
-            "take it apart", "explode view", "explode blueprint", "assemble blueprint"
+            "web shooter", "webshooter", "take it apart", "explode view",
+            "explode blueprint", "assemble blueprint", "modify blueprint"
         ]):
-            construct = "arc_reactor"
-            if "thruster" in t:
-                construct = "thruster"
-            elif "accelerator" in t or "collider" in t:
-                construct = "accelerator"
-            elif "drone" in t:
-                construct = "drone"
-            elif "neural" in t or "circuit" in t:
-                construct = "neural_grid"
-
             exploded = any(w in t for w in ["explode", "take it apart", "disassemble", "separate"])
-            sim = "thermal"
-            if "stress" in t:
-                sim = "stress"
-            elif "em" in t or "magnetic" in t or "confinement" in t:
-                sim = "em_field"
-            elif "aero" in t or "drag" in t or "airflow" in t:
-                sim = "aerodynamics"
-
             bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
-            _bh_cmds.append({"a": "blueprint", "construct": construct, "simulation": sim, "stress": 1.0, "exploded": exploded})
-            broadcast_ui_event({"type": "RENDER_3D_BLUEPRINT", "construct": construct, "simulation": sim, "stress": 1.0, "exploded": exploded})
-            construct_title = construct.replace('_', ' ').title()
-            self.speak(f"Rendering holographic 3D blueprint of the {construct_title} on Barehands Board.")
+
+            if any(w in t for w in ["arc reactor", "reactor", "arc core"]):
+                _bh_cmds.append({"a": "blueprint", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
+                broadcast_ui_event({"type": "RENDER_3D_BLUEPRINT", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
+                self.speak("Rendering holographic 3D blueprint of the Arc Reactor Core on Barehands Board.")
+            elif any(w in t for w in ["modify", "add", "change", "increase", "widen"]) and _active_construct:
+                manifest, diagnosis = construct_or_modify_3d_object(t, action="modify", modifications=t)
+                _bh_cmds.append({"a": "dynamic_construct", "manifest": manifest, "exploded": exploded})
+                broadcast_ui_event({"type": "DYNAMIC_CONSTRUCT", "manifest": manifest, "exploded": exploded})
+                self.speak(diagnosis)
+            else:
+                prompt_name = "web shooter" if any(w in t for w in ["web shooter", "webshooter", "spider"]) else t
+                manifest, diagnosis = construct_or_modify_3d_object(prompt_name, action="create")
+                _bh_cmds.append({"a": "dynamic_construct", "manifest": manifest, "exploded": exploded})
+                broadcast_ui_event({"type": "DYNAMIC_CONSTRUCT", "manifest": manifest, "exploded": exploded})
+                self.speak(diagnosis)
+
             _open_url_in_chrome(
                 f"http://localhost:{bh_port}/stage.html",
                 new_window=True, label="Barehands Board", fullscreen=True
