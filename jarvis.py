@@ -811,7 +811,7 @@ _bh_state = b"{}"
 _bh_cmds = []
 _BH_ALLOWED = ("add_img", "add_card", "clear", "reset", "hand", "give",
                "yank", "hover", "scroll_note", "widget", "explode", "assemble",
-               "present")
+               "present", "blueprint", "simulate", "stress", "construct")
 
 
 class BarrehandsHandler(SimpleHTTPRequestHandler):
@@ -1247,6 +1247,71 @@ class NeuralBrain:
             except Exception as e:
                 return f"Could not fetch weather for {city}: {e}"
 
+        elif name == "render_3d_blueprint":
+            construct = (args.get("construct") or "arc_reactor").lower().strip()
+            sim_mode = (args.get("simulation") or "thermal").lower().strip()
+            stress = float(args.get("stress_level", 1.0))
+            exploded = bool(args.get("exploded_view", False))
+
+            cmd = {
+                "a": "blueprint",
+                "construct": construct,
+                "simulation": sim_mode,
+                "stress": stress,
+                "exploded": exploded
+            }
+            _bh_cmds.append(cmd)
+            broadcast_ui_event({"type": "RENDER_3D_BLUEPRINT", "construct": construct, "simulation": sim_mode, "stress": stress, "exploded": exploded})
+            broadcast_ui_event({"type": "STATUS", "status": "HOLOGRAPHIC // BLUEPRINT", "phrase": f"Rendering {construct.upper()}"})
+
+            # Calculate real-world physics values for Jarvis to speak back
+            if "arc" in construct or "reactor" in construct:
+                temp_k = int(950 + stress * 380)
+                beta_eff = round(98.5 - stress * 4.2, 1)
+                sf = round(max(0.7, 1.85 / stress), 2)
+                status_str = "NOMINAL" if sf > 1.0 else "CRITICAL"
+                return (
+                    f"Holographic 3D Blueprint for Arc Reactor Core active on Barehands Board. "
+                    f"Simulation mode: {sim_mode.upper()} at {int(stress*100)}% load. "
+                    f"Core Temperature: {temp_k} K (Melting Point: 1668 K). "
+                    f"Magnetic Confinement Beta: {beta_eff}%. "
+                    f"Safety Factor: {sf} ({status_str}). "
+                    f"{'Components separated in Exploded View.' if exploded else 'Unified assembly active.'}"
+                )
+            elif "thrust" in construct:
+                thrust_kn = round(42.5 * stress, 1)
+                isp = int(310 + 20 * (1.0 / stress))
+                chamber_psi = int(1850 * stress)
+                return (
+                    f"Flight Stabilization Thruster Blueprint loaded. "
+                    f"Chamber Pressure: {chamber_psi} PSI. Total Vector Thrust: {thrust_kn} kN. "
+                    f"Specific Impulse (Isp): {isp}s. "
+                    f"{'Exploded sub-assembly view displayed.' if exploded else 'Gimbal alignment verified.'}"
+                )
+            elif "accelerator" in construct or "collider" in construct:
+                beam_gev = round(7.0 * stress, 2)
+                lumi = round(1.8 * 1e34 * stress, 1)
+                return (
+                    f"Quantum Particle Accelerator Blueprint loaded on Barehands. "
+                    f"Beam Energy: {beam_gev} TeV. Luminosity: {lumi:e} cm⁻²s⁻¹. "
+                    f"Quadrupole magnet alignment locked."
+                )
+            elif "drone" in construct:
+                lift_n = round(120.0 * stress, 1)
+                drag_cd = round(0.038 * (1.0 + 0.5 * stress), 3)
+                return (
+                    f"Aerodynamic Drone Airframe Blueprint loaded. "
+                    f"Lift Capacity: {lift_n} N. Drag Coefficient (Cd): {drag_cd}. "
+                    f"Carbon-composite structural integrity nominal."
+                )
+            else:
+                nodes = int(256 * stress)
+                sync_rate = round(99.1 - stress * 1.5, 1)
+                return (
+                    f"Cybernetic Neural Circuit Grid Blueprint loaded on Barehands. "
+                    f"Active Synaptic Nodes: {nodes}. Sync Frequency: 4.8 GHz ({sync_rate}% coherence)."
+                )
+
         elif name == "switch_theme":
             theme = args.get("theme", "ultron").lower()
             if "arc" in theme or "cyan" in theme or "jarvis" in theme:
@@ -1424,6 +1489,37 @@ class NeuralBrain:
                                 "city": {"type": "string", "description": "City or location name (e.g. 'Hyderabad', 'London', 'Tokyo')"}
                             },
                             "required": ["city"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "render_3d_blueprint",
+                        "description": "Render interactive 3D holographic blueprints and run real-world science physics simulations on Barehands Board (arc_reactor, thruster, accelerator, drone, neural_grid)",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "construct": {
+                                    "type": "string",
+                                    "enum": ["arc_reactor", "thruster", "accelerator", "drone", "neural_grid"],
+                                    "description": "The 3D engineering construct to display and analyze"
+                                },
+                                "simulation": {
+                                    "type": "string",
+                                    "enum": ["thermal", "stress", "em_field", "aerodynamics"],
+                                    "description": "Real-world physics simulation mode to execute"
+                                },
+                                "stress_level": {
+                                    "type": "number",
+                                    "description": "Simulation operational load / stress factor (e.g. 0.5 to 2.0, default 1.0)"
+                                },
+                                "exploded_view": {
+                                    "type": "boolean",
+                                    "description": "Whether to separate parts into exploded-view sub-assembly inspection"
+                                }
+                            },
+                            "required": ["construct"]
                         }
                     }
                 },
@@ -1923,6 +2019,41 @@ class VoiceEngine:
             bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
             self.speak("Opening the Barehands Board, sir.")
             broadcast_ui_event({"type": "NAVIGATE", "url": f"http://localhost:{bh_port}/stage.html", "label": "Barehands Board"})
+            _open_url_in_chrome(
+                f"http://localhost:{bh_port}/stage.html",
+                new_window=True, label="Barehands Board", fullscreen=True
+            )
+            return
+
+        # ── 1b. 3D Holographic Blueprints & Constructs ──
+        if any(q in t for q in [
+            "blueprint", "construct", "render 3d", "show 3d", "3d model",
+            "take it apart", "explode view", "explode blueprint", "assemble blueprint"
+        ]):
+            construct = "arc_reactor"
+            if "thruster" in t:
+                construct = "thruster"
+            elif "accelerator" in t or "collider" in t:
+                construct = "accelerator"
+            elif "drone" in t:
+                construct = "drone"
+            elif "neural" in t or "circuit" in t:
+                construct = "neural_grid"
+
+            exploded = any(w in t for w in ["explode", "take it apart", "disassemble", "separate"])
+            sim = "thermal"
+            if "stress" in t:
+                sim = "stress"
+            elif "em" in t or "magnetic" in t or "confinement" in t:
+                sim = "em_field"
+            elif "aero" in t or "drag" in t or "airflow" in t:
+                sim = "aerodynamics"
+
+            bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
+            _bh_cmds.append({"a": "blueprint", "construct": construct, "simulation": sim, "stress": 1.0, "exploded": exploded})
+            broadcast_ui_event({"type": "RENDER_3D_BLUEPRINT", "construct": construct, "simulation": sim, "stress": 1.0, "exploded": exploded})
+            construct_title = construct.replace('_', ' ').title()
+            self.speak(f"Rendering holographic 3D blueprint of the {construct_title} on Barehands Board.")
             _open_url_in_chrome(
                 f"http://localhost:{bh_port}/stage.html",
                 new_window=True, label="Barehands Board", fullscreen=True

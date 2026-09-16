@@ -247,6 +247,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
   "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
   "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
 </script>
+<script type="module" src="blueprint_studio.js"></script>
 </head>
 <body>
 <!-- Opened by double-clicking the file instead of through the server? Everything
@@ -286,6 +287,9 @@ setTimeout(function () {
 <div id="behind"></div>
 <div id="boot">BAREHANDS<br><span style="color:#a8d8cf;font-size:12px;letter-spacing:0.22em">by jaredrhod</span><br><span style="color:#a8d8cf;font-size:13px">loading hand tracker… allow the camera when asked</span></div>
 <div id="hint">tap the RING = orbs · tap an orb = its tree · TAP a card = open · pinch-drag = move · hold still ~1s = 3D rotate · two hands = scale · TAP an open item = close · CLAP (palms together, fingers up) = ring center-stage · CLAW: flash open, claw, aim, hold the strain 2s, SNAP = force pull · empty pinch dragged sideways = explode scrub · R respawn / C camera / D debug</div>
+<div id="holo_trigger_btn" style="position:fixed; top:16px; right:20px; z-index:4000; background:rgba(5,25,30,0.75); border:1px solid rgba(0,229,255,0.6); border-radius:20px; padding:6px 16px; font-family:'SF Mono',Menlo,monospace; font-size:11px; font-weight:700; color:#00e5ff; letter-spacing:0.12em; cursor:pointer; backdrop-filter:blur(8px); box-shadow:0 0 14px rgba(0,229,255,0.3); transition:all 0.2s; user-select:none;" onclick="if(window.HolographicStudio){ window.HolographicStudio.active ? window.HolographicStudio.hide() : window.HolographicStudio.show(); }">
+  ⚛ 3D HOLOGRAPHIC BLUEPRINT
+</div>
 <div id="debug"></div>
 <div id="toast"></div>
 
@@ -1171,11 +1175,23 @@ function applyCmds(cmds) {
   (cmds || []).forEach(c => {
     if (c.a === "clear") {
       items.forEach(killItem);          // scorched earth — ring included
+      if (window.HolographicStudio && window.HolographicStudio.active) {
+        window.HolographicStudio.hide();
+      }
     } else if (c.a === "reset") {
       // Jared's law (2026-08-13): reset = the GATHER — board swept,
       // THE RING materializes center stage (the arms-together state);
       // clear = literally everything off, the ring included
       loadTree().then(() => spawnStage(0.5, 0.42));
+    } else if (c.a === "blueprint" || c.a === "simulate" || c.a === "stress" || c.a === "construct") {
+      if (window.HolographicStudio) {
+        window.HolographicStudio.loadConstruct(
+          c.construct || "arc_reactor",
+          c.simulation || "thermal",
+          c.stress != null ? c.stress : 1.0,
+          c.exploded != null ? c.exploded : false
+        );
+      }
     } else if (c.a === "explode" || c.a === "assemble") {
       // THE EXPLODE verbs (2026-08-14): title-match first, else the
       // freshest model on the board; assemble snaps the flight home
@@ -1183,6 +1199,9 @@ function applyCmds(cmds) {
       if (!t || t.type !== "model")
         t = items.filter(k => k.type === "model" && k.el.isConnected).pop();
       if (t) { t.ex = c.a === "explode" ? 1 : 0; lastTouchedId = t.id; }
+      if (window.HolographicStudio && window.HolographicStudio.active) {
+        window.HolographicStudio.isExploded = (c.a === "explode");
+      }
     } else if (c.a === "add_img" || c.a === "hand" || c.a === "give") {
       const it = isModelSrc(c.src) ? makeModel(c.src, c.title, c.mode, c.lift)
                                    : makeImage(c.src, c.title);
@@ -2875,6 +2894,9 @@ async function boot() {
       if (now - lastFpsTs > 1000) { fps = frames; frames = 0; lastFpsTs = now; }
     }
     physics(dt);
+    if (window.HolographicStudio && window.HolographicStudio.active && window.HolographicStudio.updateGestures) {
+      window.HolographicStudio.updateGestures(cursors);
+    }
     renderModels();           // the 3D holograms draw their frames
     renderRings();            // the ring draws its frames (both pages)
     pushState(now);           // stream the scene to the OBS render page
