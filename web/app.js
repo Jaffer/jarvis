@@ -26,8 +26,21 @@ const terminalFeedEl = document.getElementById("terminal-feed");
 const terminalStatusEl = document.getElementById("terminal-status");
 const terminalModelEl = document.getElementById("terminal-model");
 
+let lastUserLineText = "";
+let lastUserLineTime = 0;
+
 function addTerminalLine(role, text, isTool = false) {
   if (!terminalFeedEl || !text) return;
+  const now = Date.now();
+  const cleanText = text.trim().toLowerCase();
+  if (role.toLowerCase() === "user") {
+    if (cleanText === lastUserLineText && (now - lastUserLineTime) < 2500) {
+      return; // Suppress duplicate user line within 2.5s
+    }
+    lastUserLineText = cleanText;
+    lastUserLineTime = now;
+  }
+
   const line = document.createElement("div");
   line.className = `terminal-line terminal-${role.toLowerCase()}`;
   if (isTool) line.classList.add("terminal-tool");
@@ -585,26 +598,57 @@ function handleVoiceCommand(rawTranscript) {
     showToast("View Reset", 2000);
     return;
   }
-  if (transcript.includes("switch theme") || transcript.includes("change theme") || transcript.includes("next theme") || transcript.includes("cycle theme")) {
+
+  // Barehands Board Catch-All (handles phonetic variations like 'bear hands', 'bear hands more', etc.)
+  if (transcript.includes("barehand") || transcript.includes("bare hand") || transcript.includes("bear hand") || transcript.includes("barehands") || transcript.includes("bear hands")) {
+    sendWsMessage({ type: "VOICE_COMMAND", transcript: "open barehands board" });
+    showToast("Opening Barehands Board...", 2500);
+    return;
+  }
+
+  // Webcam Gestures Voice Routing (handles 'gesture mode', 'on the gestures mode', 'justice mode', etc.)
+  if (transcript.includes("gesture") || transcript.includes("gestures") || transcript.includes("justice mode") || transcript.includes("hand track")) {
+    const isDisable = transcript.includes("off") || transcript.includes("disable") || transcript.includes("stop") || transcript.includes("close");
+    if (isDisable && cameraRunning) {
+      toggleCamera();
+      showToast("Webcam gestures disabled", 2000);
+    } else if (!isDisable && !cameraRunning) {
+      toggleCamera();
+      showToast("Webcam gestures activated", 2500);
+    } else {
+      showToast(`Gestures are already ${cameraRunning ? 'active' : 'off'}`, 2000);
+    }
+    sendWsMessage({ type: "VOICE_COMMAND", transcript });
+    return;
+  }
+
+  // Flexible HUD Theme Routing
+  if (transcript.includes("theme") || transcript.includes("reactor theme") || transcript.includes("crimson protocol")) {
+    if (transcript.includes("arc") || transcript.includes("cyan") || transcript.includes("blue") || transcript.includes("reactor")) {
+      const label = scene.setColorTheme("arc");
+      if (themeBtn) themeBtn.textContent = "THEME [T]: ARC";
+      showToast(`Theme: ${label}`, 2000);
+      sendWsMessage({ type: "THEME_CHANGE", theme: "arc" });
+      sendWsMessage({ type: "VOICE_COMMAND", transcript: "arc theme" });
+      return;
+    }
+    if (transcript.includes("crimson") || transcript.includes("red") || transcript.includes("mark")) {
+      const label = scene.setColorTheme("crimson");
+      if (themeBtn) themeBtn.textContent = "THEME [T]: CRIMSON";
+      showToast(`Theme: ${label}`, 2000);
+      sendWsMessage({ type: "THEME_CHANGE", theme: "crimson" });
+      sendWsMessage({ type: "VOICE_COMMAND", transcript: "crimson theme" });
+      return;
+    }
+    if (transcript.includes("ultron") || transcript.includes("gold") || transcript.includes("amber") || transcript.includes("yellow")) {
+      const label = scene.setColorTheme("ultron");
+      if (themeBtn) themeBtn.textContent = "THEME [T]: ULTRON";
+      showToast(`Theme: ${label}`, 2000);
+      sendWsMessage({ type: "THEME_CHANGE", theme: "ultron" });
+      sendWsMessage({ type: "VOICE_COMMAND", transcript: "ultron theme" });
+      return;
+    }
     cycleTheme();
-    return;
-  }
-  if (transcript.includes("ultron theme") || transcript.includes("gold theme")) {
-    const label = scene.setColorTheme("ultron");
-    if (themeBtn) themeBtn.textContent = "THEME [T]: ULTRON";
-    showToast(`Theme: ${label}`, 2000);
-    return;
-  }
-  if (transcript.includes("arc theme") || transcript.includes("cyan theme")) {
-    const label = scene.setColorTheme("arc");
-    if (themeBtn) themeBtn.textContent = "THEME [T]: ARC";
-    showToast(`Theme: ${label}`, 2000);
-    return;
-  }
-  if (transcript.includes("crimson theme") || transcript.includes("red theme")) {
-    const label = scene.setColorTheme("crimson");
-    if (themeBtn) themeBtn.textContent = "THEME [T]: CRIMSON";
-    showToast(`Theme: ${label}`, 2000);
     return;
   }
 
@@ -725,6 +769,16 @@ function handleServerEvent(data) {
     case "VOICE_WAVEFORM":
       if (data.samples) {
         scene.feedWaveform(data.samples);
+      }
+      break;
+
+    case "TOGGLE_GESTURES":
+      if (data.action === "enable" && !cameraRunning) {
+        toggleCamera();
+      } else if (data.action === "disable" && cameraRunning) {
+        toggleCamera();
+      } else if (!data.action) {
+        toggleCamera();
       }
       break;
 

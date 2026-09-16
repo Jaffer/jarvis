@@ -53,33 +53,39 @@ export class HandTracker {
   }
 
   async start() {
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 640, height: 480, facingMode: "user" },
-      audio: false,
-    });
-    this.video.srcObject = this.stream;
-    await this.video.play();
-
-    const fileset = await FilesetResolver.forVisionTasks(WASM_CDN);
-    const options = {
-      baseOptions: { modelAssetPath: MODEL_URL, delegate: "GPU" },
-      runningMode: "VIDEO",
-      numHands: 2,
-      minHandDetectionConfidence: 0.6,
-      minHandPresenceConfidence: 0.6,
-      minTrackingConfidence: 0.6,
-    };
     try {
-      this.landmarker = await HandLandmarker.createFromOptions(fileset, options);
-    } catch {
-      this.landmarker = await HandLandmarker.createFromOptions(fileset, {
-        ...options,
-        baseOptions: { ...options.baseOptions, delegate: "CPU" },
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480, facingMode: "user" },
+        audio: false,
       });
-    }
+      this.video.srcObject = this.stream;
+      await this.video.play();
 
-    this.running = true;
-    this.loop();
+      const fileset = await FilesetResolver.forVisionTasks(WASM_CDN);
+      const options = {
+        baseOptions: { modelAssetPath: MODEL_URL, delegate: "GPU" },
+        runningMode: "VIDEO",
+        numHands: 2,
+        minHandDetectionConfidence: 0.6,
+        minHandPresenceConfidence: 0.6,
+        minTrackingConfidence: 0.6,
+      };
+      try {
+        this.landmarker = await HandLandmarker.createFromOptions(fileset, options);
+      } catch {
+        this.landmarker = await HandLandmarker.createFromOptions(fileset, {
+          ...options,
+          baseOptions: { ...options.baseOptions, delegate: "CPU" },
+        });
+      }
+
+      this.running = true;
+      this.loop();
+    } catch (err) {
+      console.warn("HandTracker initialization failure:", err);
+      this.callbacks.onError?.(err.message || "Failed to initialize webcam hand tracking");
+      throw err;
+    }
   }
 
   stop() {

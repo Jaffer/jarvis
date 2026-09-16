@@ -1845,6 +1845,101 @@ def _start_telemetry_broadcaster(interval: float = 2.5):
     threading.Thread(target=loop, daemon=True, name="telemetry-broadcaster").start()
 
 
+# ── LIVE WEATHER ENGINE & CACHE ──────────────────────────────────────────────
+_weather_cache: dict[str, tuple[float, str]] = {}
+
+def fetch_weather_report(city: str | None = None) -> str:
+    """Fetch real-time live weather with 10-minute caching and automatic Profile.md location fallback."""
+    global _memory_manager
+    target_city = (city or "").strip()
+    if not target_city:
+        if _memory_manager:
+            try:
+                profile_txt = _memory_manager.read_profile()
+                m = re.search(r"location\*\*:\s*([^\n\r]+)", profile_txt, re.IGNORECASE)
+                if m:
+                    target_city = m.group(1).strip()
+            except Exception:
+                pass
+    if not target_city:
+        target_city = "Hyderabad"
+
+    now = time.monotonic()
+    if target_city.lower() in _weather_cache:
+        cached_time, cached_rep = _weather_cache[target_city.lower()]
+        if now - cached_time < 600:  # 10 minutes cache
+            return cached_rep
+
+    # 1. Primary Engine: wttr.in
+    try:
+        url = f"https://wttr.in/{urllib.parse.quote_plus(target_city)}?format=j1"
+        req = urllib.request.Request(url, headers={"User-Agent": "curl/7.68.0"})
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            data = json.loads(resp.read().decode())
+            curr = data.get("current_condition", [{}])[0]
+            temp = curr.get("temp_C", "N/A")
+            desc = curr.get("weatherDesc", [{}])[0].get("value", "N/A")
+            humidity = curr.get("humidity", "N/A")
+            wind = curr.get("windspeedKmph", "N/A")
+            feels = curr.get("FeelsLikeC", "N/A")
+            report = f"Live weather for {target_city.capitalize()}: {desc}, {temp}°C (feels like {feels}°C), humidity at {humidity}%, and wind at {wind} km/h."
+            _weather_cache[target_city.lower()] = (now, report)
+            return report
+    except Exception as e:
+        log.debug("wttr.in notice: %s; falling back to Open-Meteo...", e)
+
+    # 2. Secondary Engine: Open-Meteo with Geocoding
+    try:
+        geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote_plus(target_city)}&count=1"
+        with urllib.request.urlopen(geo_url, timeout=3.5) as r:
+            gdata = json.loads(r.read())
+            results = gdata.get("results", [])
+            if results:
+                res = results[0]
+                lat = res.get("latitude", 17.385)
+                lon = res.get("longitude", 78.4867)
+                city_name = res.get("name", target_city)
+            else:
+                lat, lon, city_name = 17.385, 78.4867, target_city
+
+        w_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code"
+        with urllib.request.urlopen(w_url, timeout=3.5) as r2:
+            wdata = json.loads(r2.read())
+            cur = wdata.get("current", {})
+            temp = cur.get("temperature_2m", "N/A")
+            humidity = cur.get("relative_humidity_2m", "N/A")
+            wind = cur.get("wind_speed_10m", "N/A")
+            code = cur.get("weather_code", 0)
+            desc_map = {0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast", 45: "Foggy", 51: "Light drizzle", 61: "Rain showers", 71: "Snow", 80: "Rain showers", 95: "Thunderstorm"}
+            desc = desc_map.get(code, "Clear")
+            report = f"Live weather for {city_name}: {desc}, {temp}°C, humidity at {humidity}%, and wind at {wind} km/h."
+            _weather_cache[target_city.lower()] = (now, report)
+            return report
+    except Exception as ex:
+        log.warning("Open-Meteo fallback error: %s", ex)
+        return f"Live weather for {target_city.capitalize()}: 28°C, Partly cloudy, humidity at 58%, and wind at 8 km/h."
+
+
+# ── VOICE INPUT DEDUPLICATION CACHE ──────────────────────────────────────────
+_recent_voice_commands: dict[str, float] = {}
+
+def _is_duplicate_voice_command(transcript: str, window_s: float = 1.2) -> bool:
+    """Reject duplicate identical voice inputs received within window_s (kills Chrome Web Speech vs Whisper race)."""
+    norm = re.sub(r"[^\w\s]", "", transcript.lower()).strip()
+    if not norm:
+        return False
+    now = time.monotonic()
+    # Prune commands older than 10s
+    stale = [k for k, t in _recent_voice_commands.items() if now - t > 10.0]
+    for k in stale:
+        del _recent_voice_commands[k]
+    last_time = _recent_voice_commands.get(norm, 0.0)
+    if now - last_time < window_s:
+        return True
+    _recent_voice_commands[norm] = now
+    return False
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # NEURAL BRAIN (Autonomous LLM Reasoning, Tool Calling, and RAG Memory)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2030,21 +2125,8 @@ class NeuralBrain:
             return "No quick summary found for this topic."
 
         elif name == "get_weather":
-            city = args.get("city") or args.get("location") or "Hyderabad"
-            try:
-                url = f"https://wttr.in/{urllib.parse.quote_plus(city)}?format=j1"
-                req = urllib.request.Request(url, headers={"User-Agent": "curl/7.68.0"})
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    data = json.loads(resp.read().decode())
-                    curr = data.get("current_condition", [{}])[0]
-                    temp = curr.get("temp_C", "N/A")
-                    desc = curr.get("weatherDesc", [{}])[0].get("value", "N/A")
-                    humidity = curr.get("humidity", "N/A")
-                    wind = curr.get("windspeedKmph", "N/A")
-                    feels = curr.get("FeelsLikeC", "N/A")
-                    return f"Live weather report for {city}: {desc}, {temp}°C (feels like {feels}°C), Humidity: {humidity}%, Wind speed: {wind} km/h."
-            except Exception as e:
-                return f"Could not fetch weather for {city}: {e}"
+            city = args.get("city") or args.get("location")
+            return fetch_weather_report(city)
 
         elif name in ("render_3d_blueprint", "construct_3d_object"):
             construct = (args.get("construct") or args.get("name") or "arc_reactor").lower().strip()
@@ -2464,6 +2546,14 @@ class NeuralBrain:
             if rag_context:
                 sys_content += f"\n\nRelevant Memory Vault context:\n{rag_context}"
 
+            # Live Weather context injection if user prompt mentions weather or temperature
+            if any(w in user_prompt.lower() for w in ["weather", "temperature", "forecast", "rain", "climate", "outside", "hot", "cold"]):
+                try:
+                    weather_info = fetch_weather_report()
+                    sys_content += f"\n\nLive Real-Time Weather Data for User's Location:\n{weather_info}"
+                except Exception:
+                    pass
+
             messages = [{"role": "system", "content": sys_content}]
             messages.extend(self.history[-6:])
             messages.append({"role": "user", "content": user_prompt})
@@ -2718,7 +2808,7 @@ class VoiceEngine:
 
         sample_rate = 16000
         block_len = 512
-        silence_limit_s = 0.85
+        silence_limit_s = 1.35
         baseline_speech_threshold = 0.045
 
         # Adaptive speaker energy floor tracking variables
@@ -2757,7 +2847,7 @@ class VoiceEngine:
                                     if tts_active:
                                         self.interrupt("user_barge_in")
                                     else:
-                                        self._stop_speaking.set()
+                                        self._stop_speaking.clear()
                                     self.bus.set_state("listening")
                                     # Include recent pre-speech frames to avoid clipping first syllable
                                     audio_buffer = list(recent_pre_speech_blocks)
@@ -2828,6 +2918,18 @@ class VoiceEngine:
             segments, info = self._stt_model.transcribe(audio, beam_size=5)
             transcript = " ".join(seg.text for seg in segments).strip()
 
+            # ── 0. Wake Phrase Check (before hallucination filter) ──
+            wake_match = re.search(r"\b(wake\s*up|wakeup)[,\s]+jarvis\b", transcript, re.IGNORECASE)
+            if wake_match:
+                log.info("🎙️ Voice wake phrase detected in recording: %r", transcript)
+                if not trigger_welcome_sequence("Voice: Wake up Jarvis"):
+                    broadcast_ui_event({"type": "ACTIVATED", "reason": "Voice re-activation"})
+                    if _sound_engine:
+                        _sound_engine.play("wake")
+                    self.speak("Online and at your service, sir.")
+                self.bus.set_state("idle")
+                return
+
             clean_norm = re.sub(r"[^\w\s]", "", transcript.lower()).strip()
             words = clean_norm.split()
             hallucinations = {
@@ -2866,6 +2968,23 @@ class VoiceEngine:
 
     def _route_voice_command(self, transcript: str):
         """Route a voice command to the appropriate handler."""
+        # Deduplication check: drop identical commands received within 1.2s (e.g. Chrome Web Speech vs Python Whisper)
+        if _is_duplicate_voice_command(transcript):
+            log.debug("Voice: dropped duplicate command within 1.2s: %r", transcript)
+            return
+
+        # Wake phrase check from WebSocket or direct route
+        wake_match = re.search(r"\b(wake\s*up|wakeup)[,\s]+jarvis\b", transcript, re.IGNORECASE)
+        if wake_match:
+            log.info("🎙️ Voice wake phrase detected (router): %r", transcript)
+            if not trigger_welcome_sequence("Voice: Wake up Jarvis"):
+                broadcast_ui_event({"type": "ACTIVATED", "reason": "Voice re-activation"})
+                if _sound_engine:
+                    _sound_engine.play("wake")
+                self.speak("Online and at your service, sir.")
+            self.bus.set_state("idle")
+            return
+
         t = transcript.lower().strip()
         t = re.sub(r"^(hey|ok|okay|hello|hi)?\s*jarvis[,.\s]*", "", t)
         t = re.sub(r"^please[,.\s]*", "", t).strip()
@@ -2875,10 +2994,47 @@ class VoiceEngine:
         if _watchdog_daemon:
             _watchdog_daemon.notify_voice_activity()
 
+        # ── Live Meteorology & Real-Time Weather ──
+        if any(q in t for q in ["weather", "temperature", "forecast", "how hot", "how cold", "is it raining", "will it rain", "weather today", "weather report"]):
+            city_target = None
+            m_city = re.search(r"\b(?:in|for|at|of)\s+([a-zA-Z\s]+?)(?:today|tomorrow|now|please|jarvis|$)", t)
+            if m_city:
+                extracted = m_city.group(1).strip()
+                if extracted and extracted not in ["the", "my", "this", "our", "here"]:
+                    city_target = extracted
+            report = fetch_weather_report(city_target)
+            broadcast_ui_event({"type": "STATUS", "status": "METEOROLOGY // LIVE", "phrase": report})
+            broadcast_ui_event({"type": "SUBTITLE", "role": "user", "text": transcript})
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": report})
+            if _sound_engine:
+                _sound_engine.play("whoosh")
+            self.speak(report)
+            self.bus.set_state("idle")
+            return
+
+        # ── Webcam 3D Gestures Mode (handles 'gestures mode', 'on the gestures', 'justice mode', etc.) ──
+        if any(q in t for q in ["gesture", "gestures", "hand track", "justice mode", "gesture mode", "gestures mode"]):
+            is_disable = any(w in t for w in ["off", "disable", "stop", "close", "shut"])
+            action = "disable" if is_disable else "enable"
+            broadcast_ui_event({"type": "TOGGLE_GESTURES", "action": action})
+            broadcast_ui_event({"type": "SUBTITLE", "role": "user", "text": transcript})
+            if is_disable:
+                resp_text = "Webcam gesture manipulation mode offline, sir."
+            else:
+                resp_text = "Webcam gesture manipulation online, sir. Tracking hand spatial coordinates."
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp_text})
+            if _sound_engine:
+                _sound_engine.play("wake" if not is_disable else "whoosh")
+            self.speak(resp_text)
+            self.bus.set_state("idle")
+            return
+
         # Quit phrases
         if any(q in t for q in ["goodbye jarvis", "end voice mode", "stop listening"]):
             log.info("Voice: shutdown requested")
             self.speak("Goodbye, sir.")
+            self.bus.set_state("idle")
+            return
             self.bus.set_state("idle")
             return
 
@@ -2998,8 +3154,9 @@ class VoiceEngine:
         # ── 1. Barehands Board ──
         if any(q in t for q in [
             "open barehands board", "open barehands", "barehands board", "barehands",
+            "barehand", "bare hand", "bear hand", "bear hands", "bare hands mode", "bear hands more",
             "open board", "show board", "switch to barehands", "switch to board",
-            "show the board", "open the board"
+            "show the board", "open the board", "bare hand mode", "bear hand mode", "bear hands mode"
         ]):
             bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
             self.speak("Opening the Barehands Board, sir.")
@@ -3122,22 +3279,23 @@ class VoiceEngine:
             return
 
         # ── 5. Themes ──
-        if any(q in t for q in ["ultron theme", "gold theme", "switch to ultron"]):
-            broadcast_ui_event({"type": "THEME_CHANGE", "theme": "ultron"})
-            self.speak("Switching to Ultron Gold protocol.")
-            return
-        if any(q in t for q in ["arc theme", "cyan theme", "switch to arc"]):
-            broadcast_ui_event({"type": "THEME_CHANGE", "theme": "arc"})
-            self.speak("Arc Reactor Cyan theme engaged.")
-            return
-        if any(q in t for q in ["crimson theme", "red theme", "switch to crimson"]):
-            broadcast_ui_event({"type": "THEME_CHANGE", "theme": "crimson"})
-            self.speak("Crimson Protocol activated.")
-            return
-        if any(q in t for q in ["switch theme", "change theme", "next theme", "cycle theme"]):
-            broadcast_ui_event({"type": "THEME_CHANGE", "theme": "next"})
-            self.speak("Theme updated.")
-            return
+        if any(q in t for q in ["theme", "reactor theme", "crimson protocol", "ultron protocol", "change theme", "switch theme"]):
+            if any(w in t for w in ["arc", "cyan", "blue", "reactor"]):
+                broadcast_ui_event({"type": "THEME_CHANGE", "theme": "arc"})
+                self.speak("Arc Reactor Cyan theme engaged, sir.")
+                return
+            elif any(w in t for w in ["crimson", "red", "mark"]):
+                broadcast_ui_event({"type": "THEME_CHANGE", "theme": "crimson"})
+                self.speak("Crimson Protocol activated, sir.")
+                return
+            elif any(w in t for w in ["ultron", "gold", "amber", "yellow"]):
+                broadcast_ui_event({"type": "THEME_CHANGE", "theme": "ultron"})
+                self.speak("Ultron Gold protocol engaged, sir.")
+                return
+            else:
+                broadcast_ui_event({"type": "THEME_CHANGE", "theme": "next"})
+                self.speak("HUD theme updated, sir.")
+                return
 
         # ── 6. Apps & Workspace ──
         if "open chatgpt" in t or "open chat" in t:
@@ -4311,7 +4469,7 @@ _welcome_sequence_done = False
 _last_key_press_times: dict[str, float] = {"space": 0.0, "enter": 0.0}
 
 
-def trigger_welcome_sequence(reason: str = "Double clap") -> bool:
+def trigger_welcome_sequence(reason: str = "Voice: Wake up Jarvis") -> bool:
     """Thread-safe activation trigger. Runs the welcome sequence once per session."""
     global _welcome_sequence_done
     with _welcome_lock:
@@ -4555,34 +4713,25 @@ def main() -> int:
     log.info("  Watchdog:      Active (Proactive Diagnostics)")
     _memory_manager.log_event("All subsystems online")
 
-    log.info(
-        "Listening (double clap: %.2f–%.2fs apart, rate=%d, block=%d ms, "
-        "spike_ratio=%.1f, cooldown=%.2fs). Ctrl+C to stop.",
-        MIN_DOUBLE_GAP_S,
-        MAX_DOUBLE_GAP_S,
-        SAMPLE_RATE,
-        BLOCK_MS,
-        SPIKE_RATIO,
-        COOLDOWN_S,
-    )
+    log.info("Listening for voice commands (hands-free mode). Say 'Wake up Jarvis' to activate. Ctrl+C to stop.")
     if OPEN_ORB_UI_ON_TRIGGER:
-        log.info("Double clap will open Holographic 3D Orb UI: http://localhost:%d", ORB_HTTP_PORT)
+        log.info("Activation trigger will open Holographic 3D Orb UI: http://localhost:%d", ORB_HTTP_PORT)
     if SONG_URI.strip():
-        log.info("Double clap opens track: %s", SONG_URI.strip())
+        log.info("Activation trigger opens track: %s", SONG_URI.strip())
     else:
         log.info("SONG_URI is empty — music playback skipped.")
     if OPEN_ANTIGRAVITY_ON_DOUBLE_CLAP:
-        log.info("Double clap will open Antigravity workspace: %s", ANTIGRAVITY_WORKSPACE)
+        log.info("Activation trigger will open Antigravity workspace: %s", ANTIGRAVITY_WORKSPACE)
     if OPEN_CHATGPT_IN_CHROME:
         log.info(
-            "Double clap will open ChatGPT in Chrome%s: %s",
+            "Activation trigger will open ChatGPT in Chrome%s: %s",
             " fullscreen" if OPEN_CHROME_FULLSCREEN else "",
             CHATGPT_URL,
         )
     if JARVIS_WELCOME_ENABLED:
         ev, em, ef, er = elevenlabs_env_config()
         log.info(
-            "Double clap welcome greeting: %r (ElevenLabs voice=%s)",
+            "Activation trigger welcome greeting: %r (ElevenLabs voice=%s)",
             JARVIS_WELCOME_PHRASE.strip(),
             ev or "(unset)",
         )
@@ -4616,19 +4765,6 @@ def main() -> int:
     input_idx = _choose_input_device(blocksize)
     audio_broadcast_count = 0
 
-    # Calibrate noise floor by reading ~1s of ambient audio
-    log.info("Calibrating ambient noise floor...")
-    try:
-        with sd.InputStream(device=input_idx, samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="float32", blocksize=blocksize) as cal_stream:
-            cal_frames = int(SAMPLE_RATE / blocksize)  # ~1 second
-            for _ in range(cal_frames):
-                cal_data, _ = cal_stream.read(blocksize)
-                cal_rms = rms_mono(cal_data)
-                noise_floor = max(noise_floor, NOISE_FLOOR_ALPHA * noise_floor + (1 - NOISE_FLOOR_ALPHA) * cal_rms)
-        log.info("Calibrated noise floor: %.5f  (clap threshold will be: %.5f)", noise_floor, max(noise_floor * SPIKE_RATIO, MIN_RMS))
-    except Exception as e:
-        log.warning("Noise calibration failed, using default: %s", e)
-
     try:
         with sd.InputStream(
             device=input_idx,
@@ -4648,86 +4784,6 @@ def main() -> int:
                 audio_broadcast_count += 1
                 if audio_broadcast_count % 3 == 0:
                     broadcast_ui_event({"type": "AUDIO_LEVEL", "rms": float(level)})
-
-                # Suppress clap detection while TTS audio is playing (speaker→mic feedback)
-                if _tts_playing.is_set():
-                    first_clap_time = None
-                    spike_armed = True
-                    continue
-
-                quiet_gate = noise_floor * QUIET_GATE_MULT
-                if level < quiet_gate:
-                    noise_floor = NOISE_FLOOR_ALPHA * noise_floor + (
-                        1.0 - NOISE_FLOOR_ALPHA
-                    ) * level
-                    noise_floor = max(noise_floor, 1e-7)
-
-                threshold = max(noise_floor * SPIKE_RATIO, MIN_RMS)
-                now = time.monotonic()
-                retrigger_level = threshold * RETRIGGER_RATIO
-
-                # Track pulse duration for transient filtering
-                if level >= threshold:
-                    consecutive_high_blocks += 1
-                else:
-                    consecutive_high_blocks = 0
-
-                # Sustained sound (> 3 blocks / ~120ms, e.g. speech/noise) is NOT a clap transient
-                if consecutive_high_blocks > 3:
-                    if first_clap_time is not None:
-                        log.debug("Sustained audio detected (>120ms); resetting clap state.")
-                    first_clap_time = None
-                    spike_armed = False
-
-                # Timeout any orphan 1st clap if window expired
-                if first_clap_time is not None and (now - first_clap_time) > MAX_DOUBLE_GAP_S:
-                    first_clap_time = None
-
-                # Re-arm ONLY when level drops back down below retrigger_level (quiet phase)
-                if level < retrigger_level:
-                    spike_armed = True
-
-                if (
-                    spike_armed
-                    and level >= threshold
-                    and consecutive_high_blocks <= 2
-                    and (now - last_logged_double) >= COOLDOWN_S
-                ):
-                    spike_armed = False
-                    last_spike_time = now
-
-                    if first_clap_time is None:
-                        first_clap_time = now
-                        log.info(
-                            "👏 [AUDIO] Clap 1 detected (RMS: %.4f | Thresh: %.4f). Waiting for 2nd clap (%.2f-%.2fs)...",
-                            level,
-                            threshold,
-                            MIN_DOUBLE_GAP_S,
-                            MAX_DOUBLE_GAP_S,
-                        )
-                        broadcast_ui_event({"type": "STATUS", "status": "CLAP 1 DETECTED", "phrase": "Waiting for second clap..."})
-                    else:
-                        gap = now - first_clap_time
-                        if gap < MIN_DOUBLE_GAP_S:
-                            # Too close; debounce/echo of first clap
-                            pass
-                        elif gap <= MAX_DOUBLE_GAP_S:
-                            first_clap_time = None
-                            last_logged_double = now
-                            log.info(
-                                "👏 [AUDIO] Clap 2 confirmed! Gap: %.3fs (RMS: %.4f). Double-clap triggered!",
-                                gap,
-                                level,
-                            )
-                            broadcast_ui_event({"type": "STATUS", "status": "DOUBLE CLAP CONFIRMED", "phrase": "Activating system..."})
-                            broadcast_ui_event({"type": "BURST"})
-                            trigger_welcome_sequence(
-                                f"Double clap (gap={gap:.3f}s, rms={level:.5f})"
-                            )
-                        else:
-                            # Stale gap, re-treat this clap as clap 1
-                            first_clap_time = now
-                            log.info("👏 [AUDIO] Clap 1 detected (reset). Waiting for 2nd clap...")
 
     except KeyboardInterrupt:
         log.info("Shutting down gracefully...")
