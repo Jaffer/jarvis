@@ -1157,6 +1157,23 @@ class NeuralBrain:
                 return f"Search error: {e}"
             return "No quick summary found for this topic."
 
+        elif name == "get_weather":
+            city = args.get("city") or args.get("location") or "Hyderabad"
+            try:
+                url = f"https://wttr.in/{urllib.parse.quote_plus(city)}?format=j1"
+                req = urllib.request.Request(url, headers={"User-Agent": "curl/7.68.0"})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    data = json.loads(resp.read().decode())
+                    curr = data.get("current_condition", [{}])[0]
+                    temp = curr.get("temp_C", "N/A")
+                    desc = curr.get("weatherDesc", [{}])[0].get("value", "N/A")
+                    humidity = curr.get("humidity", "N/A")
+                    wind = curr.get("windspeedKmph", "N/A")
+                    feels = curr.get("FeelsLikeC", "N/A")
+                    return f"Live weather report for {city}: {desc}, {temp}°C (feels like {feels}°C), Humidity: {humidity}%, Wind speed: {wind} km/h."
+            except Exception as e:
+                return f"Could not fetch weather for {city}: {e}"
+
         elif name == "switch_theme":
             theme = args.get("theme", "ultron").lower()
             if "arc" in theme or "cyan" in theme or "jarvis" in theme:
@@ -1320,6 +1337,20 @@ class NeuralBrain:
                                 "query": {"type": "string", "description": "Search query"}
                             },
                             "required": ["query"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Fetch real-time live weather report and forecast for any city or location in the world",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "city": {"type": "string", "description": "City or location name (e.g. 'Hyderabad', 'London', 'Tokyo')"}
+                            },
+                            "required": ["city"]
                         }
                     }
                 },
