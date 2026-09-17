@@ -638,6 +638,181 @@
       to { opacity: 1; transform: translateY(0); }
     }
 
+    /* Subordinate Bot Fleet Dock */
+    .fleet-dock {
+      position: fixed;
+      top: 84px;
+      right: 28px;
+      width: 290px;
+      background: rgba(8, 14, 26, 0.82);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border: 1px solid rgba(0, 229, 255, 0.35);
+      border-radius: 10px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.65), inset 0 0 16px rgba(0, 229, 255, 0.05);
+      z-index: 55;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      font-family: var(--font-mono);
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .fleet-dock.minimized {
+      height: 36px;
+      overflow: hidden;
+      border-color: rgba(255, 255, 255, 0.15);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    }
+    .fleet-dock-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      background: rgba(0, 229, 255, 0.08);
+      border-bottom: 1px solid rgba(0, 229, 255, 0.2);
+      font-size: 10px;
+      letter-spacing: 1.2px;
+      color: #fff;
+      cursor: pointer;
+      user-select: none;
+    }
+    .fleet-dock-title {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-weight: 700;
+      color: #00e5ff;
+      text-shadow: 0 0 8px rgba(0, 229, 255, 0.5);
+    }
+    .fleet-dock-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .fleet-btn-action {
+      background: rgba(0, 229, 255, 0.15);
+      border: 1px solid rgba(0, 229, 255, 0.45);
+      color: #00e5ff;
+      font-family: var(--font-mono);
+      font-size: 8.5px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 4px;
+      cursor: pointer;
+      letter-spacing: 0.8px;
+      transition: all 0.2s ease;
+    }
+    .fleet-btn-action:hover {
+      background: rgba(0, 229, 255, 0.3);
+      box-shadow: 0 0 10px rgba(0, 229, 255, 0.4);
+    }
+    .fleet-pods-container {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px;
+      max-height: 480px;
+      overflow-y: auto;
+    }
+    .fleet-pod {
+      background: rgba(5, 11, 20, 0.7);
+      border: 1px solid var(--pod-border, rgba(255, 255, 255, 0.12));
+      border-radius: 6px;
+      padding: 8px 10px;
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      position: relative;
+    }
+    .fleet-pod:hover {
+      border-color: var(--pod-color, #00e5ff);
+      box-shadow: 0 0 14px var(--pod-glow, rgba(0, 229, 255, 0.25));
+      transform: translateY(-1px);
+    }
+    .fleet-pod.working {
+      border-color: var(--pod-color, #00e5ff);
+      box-shadow: 0 0 18px var(--pod-glow, rgba(0, 229, 255, 0.45)), inset 0 0 10px var(--pod-glow, rgba(0, 229, 255, 0.15));
+      animation: podPulse 1.2s infinite alternate;
+    }
+    @keyframes podPulse {
+      0% { box-shadow: 0 0 8px var(--pod-glow, rgba(0, 229, 255, 0.2)); }
+      100% { box-shadow: 0 0 20px var(--pod-glow, rgba(0, 229, 255, 0.6)); }
+    }
+    .pod-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 4px;
+    }
+    .pod-identity {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .pod-icon {
+      font-size: 13px;
+    }
+    .pod-name {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.8px;
+      color: var(--pod-color, #fff);
+    }
+    .pod-role-tag {
+      font-size: 7.5px;
+      padding: 1px 4px;
+      border-radius: 3px;
+      background: rgba(255, 255, 255, 0.08);
+      color: rgba(255, 255, 255, 0.65);
+      letter-spacing: 0.5px;
+    }
+    .pod-status-badge {
+      font-size: 8px;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: rgba(255, 255, 255, 0.08);
+      color: rgba(255, 255, 255, 0.7);
+      letter-spacing: 0.5px;
+    }
+    .fleet-pod.working .pod-status-badge {
+      background: var(--pod-color, #00e5ff);
+      color: #030810;
+      box-shadow: 0 0 8px var(--pod-color, #00e5ff);
+    }
+    .pod-ticker {
+      font-size: 9.5px;
+      line-height: 1.35;
+      color: rgba(255, 255, 255, 0.75);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 6px;
+    }
+    .pod-bottom {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 8px;
+      color: rgba(255, 255, 255, 0.5);
+    }
+    .pod-run-btn {
+      background: transparent;
+      border: 1px solid var(--pod-color, rgba(255, 255, 255, 0.25));
+      color: var(--pod-color, #fff);
+      font-family: var(--font-mono);
+      font-size: 8px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 3px;
+      cursor: pointer;
+      letter-spacing: 0.5px;
+      transition: all 0.2s ease;
+    }
+    .pod-run-btn:hover {
+      background: var(--pod-color, #00e5ff);
+      color: #030810;
+      box-shadow: 0 0 8px var(--pod-color, #00e5ff);
+    }
+
     /* Holographic Silent Typing Command Modal */
     .cmd-modal {
       position: fixed;
@@ -1283,6 +1458,88 @@
     </div>
   </header>
 
+  <!-- Subordinate AI Bot Fleet Dock -->
+  <aside id="fleet-dock" class="fleet-dock" aria-label="Subordinate Bot Fleet Bay">
+    <div class="fleet-dock-header" id="fleet-dock-header" title="Click to minimize/expand Subordinate Fleet [B]">
+      <div class="fleet-dock-title">
+        <span class="cmd-pulse-dot" style="background:#00e5ff; box-shadow:0 0 8px #00e5ff;"></span>
+        <span id="fleet-dock-heading">SUBORDINATE FLEET // 4 READY</span>
+      </div>
+      <div class="fleet-dock-actions">
+        <button id="btn-fleet-deploy-all" class="fleet-btn-action" title="Deploy all 4 subordinate bots concurrently in parallel">DEPLOY ALL</button>
+      </div>
+    </div>
+    <div class="fleet-pods-container" id="fleet-pods-container">
+      <!-- 1. D.U.M.-E. -->
+      <div class="fleet-pod" id="pod-dum_e" style="--pod-color: #f59e0b; --pod-glow: rgba(245, 158, 11, 0.45); --pod-border: rgba(245, 158, 11, 0.25);">
+        <div class="pod-top">
+          <div class="pod-identity">
+            <span class="pod-icon">🤖</span>
+            <span class="pod-name">D.U.M.-E.</span>
+            <span class="pod-role-tag">MAINTENANCE</span>
+          </div>
+          <span class="pod-status-badge" id="badge-dum_e">STANDBY</span>
+        </div>
+        <div class="pod-ticker" id="ticker-dum_e">Workspace habitat standby • Cache &amp; storage sweep ready</div>
+        <div class="pod-bottom">
+          <span class="pod-metric" id="metric-dum_e">ARM: CALIBRATED</span>
+          <button class="pod-run-btn" data-bot="dum_e" data-task="Sweep compiled cache and audit disk storage">SWEEP</button>
+        </div>
+      </div>
+
+      <!-- 2. F.R.I.D.A.Y. -->
+      <div class="fleet-pod" id="pod-friday" style="--pod-color: #10b981; --pod-glow: rgba(16, 185, 129, 0.45); --pod-border: rgba(16, 185, 129, 0.25);">
+        <div class="pod-top">
+          <div class="pod-identity">
+            <span class="pod-icon">⚡</span>
+            <span class="pod-name">F.R.I.D.A.Y.</span>
+            <span class="pod-role-tag">TACTICAL SENTINEL</span>
+          </div>
+          <span class="pod-status-badge" id="badge-friday">STANDBY</span>
+        </div>
+        <div class="pod-ticker" id="ticker-friday">Tactical vitals nominal • Sentinel &amp; telemetry online</div>
+        <div class="pod-bottom">
+          <span class="pod-metric" id="metric-friday">TELEMETRY: LIVE</span>
+          <button class="pod-run-btn" data-bot="friday" data-task="Audit live CPU RAM vitals, weather, and sentry status">TELEMETRY</button>
+        </div>
+      </div>
+
+      <!-- 3. E.D.I.T.H. -->
+      <div class="fleet-pod" id="pod-edith" style="--pod-color: #38bdf8; --pod-glow: rgba(56, 189, 248, 0.45); --pod-border: rgba(56, 189, 248, 0.25);">
+        <div class="pod-top">
+          <div class="pod-identity">
+            <span class="pod-icon">🛰️</span>
+            <span class="pod-name">E.D.I.T.H.</span>
+            <span class="pod-role-tag">ORBITAL CYBER-INTEL</span>
+          </div>
+          <span class="pod-status-badge" id="badge-edith">STANDBY</span>
+        </div>
+        <div class="pod-ticker" id="ticker-edith">Orbital reconnaissance network linked • Web / GitHub / GDrive</div>
+        <div class="pod-bottom">
+          <span class="pod-metric" id="metric-edith">NETWORK: ORBITAL</span>
+          <button class="pod-run-btn" data-bot="edith" data-task="Execute orbital intelligence reconnaissance sweep">SCOUT</button>
+        </div>
+      </div>
+
+      <!-- 4. V.E.R.O.N.I.C.A. -->
+      <div class="fleet-pod" id="pod-veronica" style="--pod-color: #f43f5e; --pod-glow: rgba(244, 63, 94, 0.45); --pod-border: rgba(244, 63, 94, 0.25);">
+        <div class="pod-top">
+          <div class="pod-identity">
+            <span class="pod-icon">🛡️</span>
+            <span class="pod-name">V.E.R.O.N.I.C.A.</span>
+            <span class="pod-role-tag">HEAVY FORTIFICATION</span>
+          </div>
+          <span class="pod-status-badge" id="badge-veronica">STANDBY</span>
+        </div>
+        <div class="pod-ticker" id="ticker-veronica">Heavy armor diagnostics • AST syntax integrity secured</div>
+        <div class="pod-bottom">
+          <span class="pod-metric" id="metric-veronica">ARMOR: VERIFIED</span>
+          <button class="pod-run-btn" data-bot="veronica" data-task="Validate jarvis.py AST syntax integrity and fortification">AUDIT</button>
+        </div>
+      </div>
+    </div>
+  </aside>
+
   <!-- Cybernetic Subtitle & Dialogue Terminal -->
   <div id="cyber-terminal" class="cyber-terminal">
     <div class="terminal-header">
@@ -1459,6 +1716,7 @@
         <span class="shortcut-item" data-shortcut="f"><span class="key">F</span> fullscreen</span>
       </div>
       <div>
+        <span class="shortcut-item" data-shortcut="b"><span class="key">B</span> fleet</span> &nbsp; 
         <span class="shortcut-item" data-shortcut="p"><span class="key">P</span> persona</span> &nbsp; 
         <span class="shortcut-item" data-shortcut="s"><span class="key">S</span> soundscape</span> &nbsp; 
         <span class="shortcut-item" data-shortcut="m"><span class="key">M</span> mic visualizer</span> &nbsp; 
@@ -1468,6 +1726,7 @@
 
     <div class="action-controls">
       <button id="btn-cmd" class="hud-btn" style="border-color: var(--color-cyan); color: var(--color-cyan);"><span class="key" style="margin-right: 4px;">/</span>TYPE [ENTER]</button>
+      <button id="btn-fleet" class="hud-btn" style="border-color: #38bdf8; color: #38bdf8;">FLEET [B]: 4 READY</button>
       <button id="btn-persona" class="hud-btn" style="border-color: #00e5ff; color: #00e5ff;">PERSONA [P]: STARK LAB (75%)</button>
       <button id="btn-toggle-gesture" class="hud-btn">GESTURES [G]: OFF</button>
       <button id="btn-enroll" class="hud-btn">ENROLL [E]</button>

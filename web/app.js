@@ -37,6 +37,13 @@ const personaBtnApply = document.getElementById("btn-persona-apply");
 const personaBtnReset = document.getElementById("btn-persona-reset");
 const personaCards = document.querySelectorAll(".persona-card");
 
+// Subordinate Fleet Dock references
+const fleetDock = document.getElementById("fleet-dock");
+const fleetDockHeader = document.getElementById("fleet-dock-header");
+const fleetDockHeading = document.getElementById("fleet-dock-heading");
+const btnFleetDeployAll = document.getElementById("btn-fleet-deploy-all");
+const btnFleet = document.getElementById("btn-fleet");
+
 let lastUserLineText = "";
 let lastUserLineTime = 0;
 let lastJarvisLineText = "";
@@ -906,6 +913,14 @@ function handleServerEvent(data) {
       updatePersonaUI(data);
       break;
 
+    case "FLEET_UPDATE":
+      updateFleetStatusUI(data);
+      break;
+
+    case "FLEET_TASK_UPDATE":
+      updateFleetBotTaskUI(data);
+      break;
+
     case "SUBTITLE":
       addTerminalLine(data.role || "jarvis", data.text || "");
       if (terminalStatusEl) {
@@ -1357,6 +1372,137 @@ personaWitSlider?.addEventListener("change", (e) => {
   sendPersonaCalibration(currentPersonaMode, val);
 });
 
+// ── Subordinate Fleet UI Functions ──
+function toggleFleetDock() {
+  if (!fleetDock) return;
+  fleetDock.classList.toggle("minimized");
+  const isMin = fleetDock.classList.contains("minimized");
+  showToast(isMin ? "Subordinate Fleet Bay Minimized" : "Subordinate Fleet Bay Expanded", 2000);
+}
+
+function deployAllFleetBots() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "DISPATCH_PARALLEL_FLEET", assignments: [] }));
+    scene.triggerBurst();
+    soundscape.play("whoosh");
+    showToast("⚡ Subordinate Fleet Deployed in Parallel", 3000);
+    ["dum_e", "friday", "edith", "veronica"].forEach((id) => {
+      const pod = document.getElementById(`pod-${id}`);
+      const badge = document.getElementById(`badge-${id}`);
+      if (pod) pod.classList.add("working");
+      if (badge) badge.textContent = "WORKING";
+    });
+  } else {
+    showToast("WebSocket link offline", 2000);
+  }
+}
+
+function dispatchSingleBot(botId, task) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "DISPATCH_FLEET_TASK", bot_id: botId, task: task }));
+    scene.triggerBurst();
+    soundscape.play("sub_bass_tick");
+    const pod = document.getElementById(`pod-${botId}`);
+    const badge = document.getElementById(`badge-${botId}`);
+    const ticker = document.getElementById(`ticker-${botId}`);
+    if (pod) pod.classList.add("working");
+    if (badge) badge.textContent = "WORKING";
+    if (ticker) ticker.textContent = `Executing: ${task}...`;
+    showToast(`🤖 Deploying ${botId.toUpperCase()}...`, 2000);
+  }
+}
+
+function updateFleetStatusUI(data) {
+  const fleet = data.fleet;
+  if (!fleet || !fleet.bots) return;
+
+  let workingCount = 0;
+  Object.entries(fleet.bots).forEach(([bId, bot]) => {
+    const pod = document.getElementById(`pod-${bId}`);
+    const badge = document.getElementById(`badge-${bId}`);
+    const ticker = document.getElementById(`ticker-${bId}`);
+
+    const isWorking = bot.status === "WORKING";
+    if (isWorking) workingCount++;
+
+    if (pod) {
+      if (isWorking) pod.classList.add("working");
+      else pod.classList.remove("working");
+    }
+
+    if (badge) {
+      badge.textContent = bot.status || "STANDBY";
+    }
+
+    if (ticker) {
+      if (isWorking && bot.active_task) {
+        ticker.textContent = `Active: ${bot.active_task}`;
+      } else if (bot.last_result && bot.last_result.summary) {
+        ticker.textContent = bot.last_result.summary;
+      } else if (bot.last_task) {
+        ticker.textContent = bot.last_task;
+      }
+    }
+  });
+
+  if (fleetDockHeading) {
+    fleetDockHeading.textContent = workingCount > 0 ? `SUBORDINATE FLEET // ${workingCount} ACTIVE` : `SUBORDINATE FLEET // 4 READY`;
+  }
+  if (btnFleet) {
+    btnFleet.textContent = workingCount > 0 ? `FLEET [B]: ${workingCount} ACTIVE` : `FLEET [B]: 4 READY`;
+  }
+}
+
+function updateFleetBotTaskUI(data) {
+  const bId = data.bot_id;
+  const pod = document.getElementById(`pod-${bId}`);
+  const badge = document.getElementById(`badge-${bId}`);
+  const ticker = document.getElementById(`ticker-${bId}`);
+
+  const isWorking = data.status === "WORKING";
+  if (pod) {
+    if (isWorking) pod.classList.add("working");
+    else pod.classList.remove("working");
+  }
+  if (badge) {
+    badge.textContent = data.status || "STANDBY";
+  }
+  if (ticker) {
+    if (isWorking) {
+      ticker.textContent = `Executing: ${data.task}...`;
+    } else if (data.result && data.result.summary) {
+      ticker.textContent = data.result.summary;
+    }
+  }
+
+  if (data.status === "SUCCESS") {
+    scene.triggerBurst();
+    soundscape.play("sub_bass_tick");
+    const botName = data.result?.name || bId.toUpperCase();
+    showToast(`✅ ${botName} completed assignment (${data.duration_s}s)`, 3000);
+    addTerminalLine("jarvis", `[${botName}] ${data.result?.summary || 'Task completed.'}`, true);
+  }
+}
+
+// Subordinate Fleet Click Listeners
+fleetDockHeader?.addEventListener("click", toggleFleetDock);
+btnFleetDeployAll?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  deployAllFleetBots();
+});
+btnFleet?.addEventListener("click", () => {
+  deployAllFleetBots();
+});
+
+document.querySelectorAll(".pod-run-btn").forEach((btn) => {
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const botId = btn.getAttribute("data-bot");
+    const task = btn.getAttribute("data-task") || "Diagnostic sweep";
+    if (botId) dispatchSingleBot(botId, task);
+  });
+});
+
 // Button Events
 gestureBtn?.addEventListener("click", toggleCamera);
 themeBtn?.addEventListener("click", cycleTheme);
@@ -1393,7 +1539,8 @@ document.querySelectorAll(".shortcut-item").forEach((item) => {
     else if (sc === "f") {
       if (!document.fullscreenElement) document.documentElement.requestFullscreen();
       else document.exitFullscreen();
-    } else if (sc === "m") initLocalMic();
+    } else if (sc === "b") toggleFleetDock();
+    else if (sc === "m") initLocalMic();
   });
 });
 
@@ -1463,9 +1610,7 @@ window.addEventListener("keydown", (e) => {
   } else if (key === "m") {
     initLocalMic();
   } else if (key === "b") {
-    scene.loadConstruct();
-    soundscape.play("blueprint_whoosh");
-    showToast("📐 3D Arc Reactor Blueprint Loaded");
+    toggleFleetDock();
   } else if (key === "delete" || key === "backspace") {
     scene.dismissConstruct(false);
     soundscape.play("whoosh");
