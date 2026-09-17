@@ -852,6 +852,19 @@ function handleServerEvent(data) {
       }
       break;
 
+    case "EXTERNAL_CAMERA_ACQUIRED":
+      if (cameraActive) {
+        stopBiometricFrameRelay();
+        tracker.stop();
+        cameraActive = false;
+        gestureBtn.textContent = "GESTURES [G]: OFF";
+        gestureBtn.classList.remove("btn-active");
+        pipContainer.classList.remove("active");
+        statusModeEl.textContent = "STANDBY";
+        showToast("Webcam yielded to Barehands engineering board", 3000);
+      }
+      break;
+
     case "THEME_CHANGE":
       if (data.theme) {
         const label = scene.setColorTheme(data.theme);

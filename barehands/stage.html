@@ -1593,6 +1593,34 @@ function toast(msg, ms = 2500) {
 // camera mounted at the main lens while OBS films with the first — no
 // device contention, ever (Jared's multi-cam question, 2026-08-07).
 let camDevices = [], camIdx = -1;
+let jarvisWs = null;
+
+function acquireJarvisCamera() {
+  return new Promise((resolve) => {
+    try {
+      const wsUrl = `ws://${location.hostname || "localhost"}:8765`;
+      jarvisWs = new WebSocket(wsUrl);
+      jarvisWs.onopen = () => {
+        jarvisWs.send(JSON.stringify({ type: "CAMERA_ACQUIRE" }));
+        setTimeout(resolve, 400);
+      };
+      jarvisWs.onerror = () => resolve();
+      jarvisWs.onclose = () => {};
+      setTimeout(resolve, 600);
+    } catch {
+      resolve();
+    }
+  });
+}
+
+window.addEventListener("beforeunload", () => {
+  if (jarvisWs && jarvisWs.readyState === WebSocket.OPEN) {
+    try {
+      jarvisWs.send(JSON.stringify({ type: "CAMERA_RELEASE" }));
+      jarvisWs.close();
+    } catch {}
+  }
+});
 
 async function startCam(deviceId) {
   if (cam.srcObject) cam.srcObject.getTracks().forEach(t => t.stop());
@@ -1601,24 +1629,31 @@ async function startCam(deviceId) {
   const video = { width: { ideal: IW }, height: { ideal: IH } };
   if (deviceId) video.deviceId = { exact: deviceId };
   let stream = null;
+
+  // Request J.A.R.V.I.S. to yield camera hardware
+  await acquireJarvisCamera();
+
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
   } catch (e) {
-    // THE RESILIENT BOOT (2026-08-13 night — the tracking camera
-    // powered down off the bus and the failed default request bricked
-    // the ENTIRE stage boot): one dead camera must never kill the
-    // show. Fall through every camera the OS still offers and take
-    // the first that opens; only die if NONE do. C still cycles.
-    const devs = (await navigator.mediaDevices.enumerateDevices())
-      .filter(d => d.kind === "videoinput");
-    for (const d of devs) {
+    if (e.name === "NotReadableError" || e.name === "TrackStartError") {
+      await new Promise(r => setTimeout(r, 450));
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { deviceId: { exact: d.deviceId },
-                   width: { ideal: IW }, height: { ideal: IH } },
-          audio: false });
-        break;
-      } catch (e2) {}
+        stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+      } catch (retryErr) {}
+    }
+    if (!stream) {
+      const devs = (await navigator.mediaDevices.enumerateDevices())
+        .filter(d => d.kind === "videoinput");
+      for (const d of devs) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { deviceId: { exact: d.deviceId },
+                     width: { ideal: IW }, height: { ideal: IH } },
+            audio: false });
+          break;
+        } catch (e2) {}
+      }
     }
     if (!stream) throw e;
   }

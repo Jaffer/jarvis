@@ -1205,8 +1205,9 @@ class SignalBus:
                 (self.bh_dir / "wave.json").write_text(
                     json.dumps({"ts": now, "samples": norm})
                 )
-            # Also broadcast to WebSocket for orb visualization
-            broadcast_ui_event({"type": "VOICE_WAVEFORM", "samples": samples})
+            norm_samples = np.clip(raw / 32768.0, -1.0, 1.0).tolist()
+            # Also broadcast to WebSocket for orb visualization (strictly normalized float32)
+            broadcast_ui_event({"type": "VOICE_WAVEFORM", "samples": norm_samples})
         except (OSError, ValueError):
             pass
         self.set_state("speaking")
@@ -2222,8 +2223,11 @@ class NeuralBrain:
                 _bh_cmds.append(cmd)
                 broadcast_ui_event({"type": "DYNAMIC_CONSTRUCT", "manifest": manifest, "stress": stress, "exploded": exploded})
                 broadcast_ui_event({"type": "STATUS", "status": "HOLOGRAPHIC // BLUEPRINT", "phrase": f"Rendering {manifest.get('name', 'CONSTRUCT').upper()}"})
+                if _biometric_sentinel:
+                    _biometric_sentinel.pause_camera()
+                broadcast_ui_event({"type": "EXTERNAL_CAMERA_ACQUIRED", "source": "barehands"})
                 bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
-                _open_url_in_chrome(f"http://localhost:{bh_port}/stage.html", new_window=True, label="Barehands Board", fullscreen=True)
+                _open_url_in_chrome(f"http://localhost:{bh_port}/stage.html", new_window=False, label="Barehands Board", fullscreen=False)
                 return diagnosis
 
         elif name == "switch_theme":
@@ -2241,11 +2245,14 @@ class NeuralBrain:
         elif name == "open_board":
             target = args.get("target", "barehands").lower()
             if "barehands" in target or "board" in target:
+                if _biometric_sentinel:
+                    _biometric_sentinel.pause_camera()
+                broadcast_ui_event({"type": "EXTERNAL_CAMERA_ACQUIRED", "source": "barehands"})
                 bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
-                _open_url_in_chrome(f"http://localhost:{bh_port}/stage.html", new_window=True, label="Barehands Board", fullscreen=True)
+                _open_url_in_chrome(f"http://localhost:{bh_port}/stage.html", new_window=False, label="Barehands Board", fullscreen=False)
                 return "Barehands Board opened."
             elif "orb" in target or "hud" in target:
-                _open_url_in_chrome(f"http://localhost:{ORB_HTTP_PORT}", new_window=True, label="Orb HUD", fullscreen=True)
+                _open_url_in_chrome(f"http://localhost:{ORB_HTTP_PORT}", new_window=False, label="Orb HUD", fullscreen=False)
                 return "Holographic Orb HUD opened."
             elif "workspace" in target or "antigravity" in target:
                 open_antigravity_workspace()
@@ -2308,13 +2315,11 @@ class NeuralBrain:
             return "MCP tool execution failed."
 
         elif name in ("verify_biometrics", "get_security_status"):
-            global _biometric_sentinel
             if _biometric_sentinel:
                 return _biometric_sentinel.get_security_status_summary()
             return "Biometric sentinel is offline."
 
         elif name == "analyze_visual":
-            global _vision_scanner
             prompt = args.get("prompt", "Analyze what you see in front of the camera in detail")
             if _vision_scanner:
                 res = _vision_scanner.analyze(prompt)
@@ -3275,12 +3280,15 @@ class VoiceEngine:
             "open board", "show board", "switch to barehands", "switch to board",
             "show the board", "open the board", "bare hand mode", "bear hand mode", "bear hands mode"
         ]):
+            if _biometric_sentinel:
+                _biometric_sentinel.pause_camera()
+            broadcast_ui_event({"type": "EXTERNAL_CAMERA_ACQUIRED", "source": "barehands"})
             bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
             self.speak("Opening the Barehands Board, sir.")
             broadcast_ui_event({"type": "NAVIGATE", "url": f"http://localhost:{bh_port}/stage.html", "label": "Barehands Board"})
             _open_url_in_chrome(
                 f"http://localhost:{bh_port}/stage.html",
-                new_window=True, label="Barehands Board", fullscreen=True
+                new_window=False, label="Barehands Board", fullscreen=False
             )
             return
 
@@ -3343,9 +3351,12 @@ class VoiceEngine:
                 broadcast_ui_event({"type": "DYNAMIC_CONSTRUCT", "manifest": manifest, "exploded": exploded})
                 self.speak(diagnosis)
 
+            if _biometric_sentinel:
+                _biometric_sentinel.pause_camera()
+            broadcast_ui_event({"type": "EXTERNAL_CAMERA_ACQUIRED", "source": "barehands"})
             _open_url_in_chrome(
                 f"http://localhost:{bh_port}/stage.html",
-                new_window=True, label="Barehands Board", fullscreen=True
+                new_window=False, label="Barehands Board", fullscreen=False
             )
             return
 
@@ -3358,7 +3369,7 @@ class VoiceEngine:
             self.speak("Switching to the Holographic Orb HUD.")
             _open_url_in_chrome(
                 f"http://localhost:{ORB_HTTP_PORT}",
-                new_window=True, label="Orb HUD", fullscreen=True
+                new_window=False, label="Orb HUD", fullscreen=False
             )
             return
 
@@ -3450,7 +3461,6 @@ class VoiceEngine:
             "who am i", "verify identity", "verify my identity", "am i verified",
             "biometric status", "security clearance", "security status"
         ]):
-            global _biometric_sentinel
             if _biometric_sentinel:
                 status_summary = _biometric_sentinel.get_security_status_summary()
                 self.speak(status_summary)
@@ -4457,7 +4467,7 @@ def _chrome_snap_window_to_monitor_win32(
 def _open_url_in_chrome(
     url: str,
     *,
-    new_window: bool = True,
+    new_window: bool = False,
     label: str = "URL",
     window_position: tuple[int, int] | None = None,
     window_size: tuple[int, int] | None = None,
@@ -4546,11 +4556,11 @@ def open_chatgpt_in_chrome() -> None:
         size = None
     _open_url_in_chrome(
         url,
-        new_window=True,
+        new_window=False,
         label="ChatGPT",
         window_position=pos,
         window_size=size,
-        fullscreen=fs,
+        fullscreen=False,
         win32_post_fullscreen_monitor=post_mon,
         user_data_dir=user_data,
     )
@@ -4585,9 +4595,9 @@ def open_orb_ui_in_chrome() -> None:
     url = f"http://localhost:{ORB_HTTP_PORT}"
     _open_url_in_chrome(
         url,
-        new_window=True,
+        new_window=False,
         label="Jarvis Hologram Orb",
-        fullscreen=True,
+        fullscreen=False,
     )
 
 

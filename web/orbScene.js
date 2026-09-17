@@ -1049,7 +1049,8 @@ export function createOrbScene(container) {
   function feedWaveform(samples) {
     if (!samples || samples.length === 0) return;
     for (let i = 0; i < 64 && i < samples.length; i++) {
-      waveformSamples[i] = Math.abs(samples[i]);
+      const val = Math.abs(samples[i] || 0);
+      waveformSamples[i] = val > 1.0 ? Math.min(1.0, val / 32768.0) : val;
     }
     let sum = 0;
     for (let i = 0; i < waveformSamples.length; i++) sum += waveformSamples[i];
@@ -1155,16 +1156,16 @@ export function createOrbScene(container) {
     );
     coreSphereMat.opacity = Math.min(0.45, coreOpacity);
 
-    glowSphere.scale.setScalar(Math.min(1.4, 1 + surge * 0.2 + audioBoost * 0.4 + voiceBoost * 0.25));
-    glowSphereMat.opacity = Math.max(0, (0.03 + surge * 0.04 + audioBoost * 0.1 + voiceBoost * 0.12) * (1 - fadeOut * 0.5));
+    glowSphere.scale.setScalar(Math.min(1.15, 1 + surge * 0.08 + audioBoost * 0.08 + voiceBoost * 0.05));
+    glowSphereMat.opacity = Math.max(0, (0.02 + surge * 0.02 + audioBoost * 0.03 + voiceBoost * 0.02) * (1 - fadeOut * 0.5));
 
-    icoWire.scale.setScalar(Math.min(1.35, 1 + surge * 0.2 + audioBoost * 0.3 + voiceBoost * 0.25));
-    icoWireMat.opacity = Math.min(0.9, 0.5 + surge * 0.2 + audioBoost * 0.2 + voiceBoost * 0.2);
+    icoWire.scale.setScalar(Math.min(1.15, 1 + surge * 0.1 + audioBoost * 0.08 + voiceBoost * 0.05));
+    icoWireMat.opacity = Math.min(0.75, 0.45 + surge * 0.1 + audioBoost * 0.1 + voiceBoost * 0.08);
 
-    // Dynamic Sound Frequency Waveform Modulation on Orb Lines
+    // Dynamic Sound Frequency Waveform Modulation on Orb Lines (Subtle & Movie-Authentic)
     const isVoiceActive = isSpeaking || waveformEnergy > 0.005 || smoothedAudio > 0.02;
     const targetSpeechModAmp = isVoiceActive
-      ? Math.max(0.12, Math.min(0.38, waveformEnergy * 2.2 + smoothedAudio * 1.2 + (isSpeaking ? 0.16 : 0.0)))
+      ? Math.max(0.015, Math.min(0.05, waveformEnergy * 0.35 + smoothedAudio * 0.25 + (isSpeaking ? 0.02 : 0.0)))
       : 0.0;
 
     smoothedModAmp += (targetSpeechModAmp - smoothedModAmp) * 0.2;
@@ -1202,15 +1203,17 @@ export function createOrbScene(container) {
             const pcmIdx = Math.floor((i / segs) * pcmLen) % pcmLen;
             const pcmVal = waveformSamples[pcmIdx] || 0.0;
 
-            // Multi-harmonic audio frequency wave equation
+            // Multi-harmonic subtle audio frequency ripple
             const harmonic =
               0.50 * Math.sin(6 * angle * fMult - 16 * t + pOffset) +
               0.32 * Math.sin(14 * angle * fMult + 24 * t - pOffset) +
               0.18 * Math.sin(28 * angle - 38 * t);
 
-            // Fluctuation displacement: sound frequency wave + PCM audio pulse
-            const deltaR = smoothedModAmp * (harmonic * 0.14 + pcmVal * 0.26);
-            const deltaY = smoothedModAmp * (Math.sin(10 * angle * fMult - 20 * t) * 0.07 + pcmVal * 0.09);
+            // Fluctuation displacement: hard clamped to max +-0.05 units (~2.5% of sphere radius)
+            const rawDeltaR = smoothedModAmp * (harmonic * 0.04 + pcmVal * 0.05);
+            const deltaR = Math.max(-0.05, Math.min(0.05, rawDeltaR));
+            const rawDeltaY = smoothedModAmp * (Math.sin(10 * angle * fMult - 20 * t) * 0.025 + pcmVal * 0.025);
+            const deltaY = Math.max(-0.03, Math.min(0.03, rawDeltaY));
 
             const rCurr = rBase + deltaR;
             const idx = i * 3;
@@ -1238,8 +1241,9 @@ export function createOrbScene(container) {
               0.30 * Math.sin(18 * lat * fMult + 28 * t) +
               0.15 * Math.sin(32 * lat - 42 * t);
 
-            // Envelope tapers smoothly to zero at the poles (cosLat -> 0)
-            const deltaR = smoothedModAmp * (harmonic * 0.16 + pcmVal * 0.28) * cosLat;
+            // Envelope tapers smoothly to zero at poles, hard clamped to +-0.05 units
+            const rawDeltaR = smoothedModAmp * (harmonic * 0.04 + pcmVal * 0.05) * cosLat;
+            const deltaR = Math.max(-0.05, Math.min(0.05, rawDeltaR));
 
             const rCurr = rBase + deltaR;
             const idx = i * 3;
@@ -1309,8 +1313,8 @@ export function createOrbScene(container) {
       });
     }
 
-    // Bloom pulse: capped baseline 1.1, max 1.6 so orb geometry is always crisp & visible
-    bloom.strength = Math.min(1.6, 1.0 + Math.sin(t * 0.8) * 0.15 + audioBoost * 0.35 + voiceBoost * 0.25);
+    // Bloom pulse: strictly capped to max 1.12 to keep all lines crisp and eliminate blinding flares
+    bloom.strength = Math.min(1.12, 0.98 + Math.sin(t * 0.8) * 0.04 + audioBoost * 0.06 + voiceBoost * 0.05);
 
     // Update chromatic aberration tint per theme
     chromaticPass.uniforms.uTime.value = t;
