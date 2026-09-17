@@ -25,6 +25,17 @@ const brainBadgeEl = document.getElementById("brain-badge");
 const terminalFeedEl = document.getElementById("terminal-feed");
 const terminalStatusEl = document.getElementById("terminal-status");
 const terminalModelEl = document.getElementById("terminal-model");
+const personaBadge = document.getElementById("persona-badge");
+const personaStatusItem = document.getElementById("persona-status-item");
+const personaModal = document.getElementById("persona-modal");
+const personaBackdrop = document.getElementById("persona-backdrop");
+const personaWitSlider = document.getElementById("persona-wit-slider");
+const personaWitValue = document.getElementById("persona-wit-value");
+const personaWitDesc = document.getElementById("persona-wit-desc");
+const personaBtn = document.getElementById("btn-persona");
+const personaBtnApply = document.getElementById("btn-persona-apply");
+const personaBtnReset = document.getElementById("btn-persona-reset");
+const personaCards = document.querySelectorAll(".persona-card");
 
 let lastUserLineText = "";
 let lastUserLineTime = 0;
@@ -891,6 +902,10 @@ function handleServerEvent(data) {
       if (brainBadgeEl && data.model) brainBadgeEl.textContent = data.model.toUpperCase();
       break;
 
+    case "PERSONA_UPDATED":
+      updatePersonaUI(data);
+      break;
+
     case "SUBTITLE":
       addTerminalLine(data.role || "jarvis", data.text || "");
       if (terminalStatusEl) {
@@ -1198,6 +1213,150 @@ enrollTriggerBtn?.addEventListener("click", startFaceEnrollment);
 enrollCloseBtn?.addEventListener("click", () => closeEnrollmentModal(true));
 enrollBackdrop?.addEventListener("click", () => closeEnrollmentModal(true));
 
+// ——— DYNAMIC PERSONA & WIT CALIBRATION SYSTEM ———
+let currentPersonaMode = "stark_lab";
+let currentWitLevel = 75;
+
+function openPersonaModal() {
+  if (!personaModal) return;
+  personaModal.classList.remove("hidden");
+  personaModal.style.display = "flex";
+  personaModal.style.opacity = "1";
+  personaModal.style.visibility = "visible";
+  personaModal.style.pointerEvents = "auto";
+  soundscape?.play("whoosh");
+}
+
+function closePersonaModal() {
+  if (!personaModal) return;
+  personaModal.classList.add("hidden");
+  personaModal.style.display = "none";
+  personaModal.style.opacity = "0";
+  personaModal.style.visibility = "hidden";
+  personaModal.style.pointerEvents = "none";
+}
+
+function togglePersonaModal() {
+  if (!personaModal) return;
+  if (personaModal.classList.contains("hidden") || personaModal.style.display === "none") {
+    openPersonaModal();
+  } else {
+    closePersonaModal();
+  }
+}
+
+function getWitDescription(wit) {
+  if (wit < 20) return "Zero small talk. Combat brevity & military-grade situational awareness.";
+  if (wit < 50) return "First-principles physics, mathematical precision, and analytical rigor.";
+  if (wit < 85) return "Sophisticated British poise, intellectual peer to Tony Stark, subtle dry irony.";
+  return "Full theatrical British sarcasm, sharp tongue, playful skepticism, and humorous roasts.";
+}
+
+function updatePersonaUI(data) {
+  if (!data) return;
+  const mode = data.mode || "stark_lab";
+  const wit = typeof data.wit_level === "number" ? data.wit_level : 75;
+  const name = data.name || "Stark Lab";
+  const icon = data.icon || "🔬";
+  const color = data.color || "#00e5ff";
+  const badgeClass = data.badge_class || `badge-persona-${mode}`;
+
+  currentPersonaMode = mode;
+  currentWitLevel = wit;
+
+  // Update header badge
+  if (personaBadge) {
+    personaBadge.textContent = `${icon} WIT: ${wit}% | ${name.toUpperCase()}`;
+    personaBadge.className = `badge ${badgeClass}`;
+  }
+
+  // Update footer button
+  if (personaBtn) {
+    personaBtn.textContent = `PERSONA [P]: ${name.toUpperCase()} (${wit}%)`;
+    personaBtn.style.borderColor = color;
+    personaBtn.style.color = color;
+  }
+
+  // Update modal preset card active state
+  personaCards?.forEach(card => {
+    if (card.getAttribute("data-mode") === mode) {
+      card.classList.add("active");
+    } else {
+      card.classList.remove("active");
+    }
+  });
+
+  // Update modal slider & readouts
+  if (personaWitSlider) {
+    personaWitSlider.value = wit;
+  }
+  if (personaWitValue) {
+    personaWitValue.textContent = `${wit}%`;
+    personaWitValue.style.color = color;
+    personaWitValue.style.textShadow = `0 0 10px ${color}`;
+  }
+  if (personaWitDesc) {
+    personaWitDesc.textContent = getWitDescription(wit);
+  }
+
+  showToast(`🎭 Persona: ${name.toUpperCase()} (${wit}% Wit)`, 2500);
+}
+
+function sendPersonaCalibration(mode, witLevel) {
+  sendWsMessage({
+    type: "CALIBRATE_PERSONA",
+    mode: mode || currentPersonaMode,
+    wit_level: typeof witLevel === "number" ? witLevel : currentWitLevel
+  });
+  soundscape?.play("sub_bass_tick");
+}
+
+personaStatusItem?.addEventListener("click", togglePersonaModal);
+personaBtn?.addEventListener("click", togglePersonaModal);
+personaBackdrop?.addEventListener("click", closePersonaModal);
+personaBtnApply?.addEventListener("click", () => {
+  sendPersonaCalibration(currentPersonaMode, currentWitLevel);
+  closePersonaModal();
+});
+personaBtnReset?.addEventListener("click", () => {
+  sendPersonaCalibration("stark_lab", 75);
+});
+
+personaCards?.forEach(card => {
+  card.addEventListener("click", () => {
+    const mode = card.getAttribute("data-mode");
+    const defaultWit = parseInt(card.getAttribute("data-wit") || "75", 10);
+    currentPersonaMode = mode;
+    currentWitLevel = defaultWit;
+    sendPersonaCalibration(mode, defaultWit);
+  });
+});
+
+personaWitSlider?.addEventListener("input", (e) => {
+  const val = parseInt(e.target.value, 10);
+  currentWitLevel = val;
+  if (personaWitValue) personaWitValue.textContent = `${val}%`;
+  if (personaWitDesc) personaWitDesc.textContent = getWitDescription(val);
+  
+  personaCards?.forEach(card => {
+    const cMode = card.getAttribute("data-mode");
+    if ((val < 20 && cMode === "tactical") ||
+        (val >= 20 && val < 50 && cMode === "engineering") ||
+        (val >= 50 && val < 85 && cMode === "stark_lab") ||
+        (val >= 85 && cMode === "unfiltered")) {
+      card.classList.add("active");
+      currentPersonaMode = cMode;
+    } else {
+      card.classList.remove("active");
+    }
+  });
+});
+
+personaWitSlider?.addEventListener("change", (e) => {
+  const val = parseInt(e.target.value, 10);
+  sendPersonaCalibration(currentPersonaMode, val);
+});
+
 // Button Events
 gestureBtn?.addEventListener("click", toggleCamera);
 themeBtn?.addEventListener("click", cycleTheme);
@@ -1220,6 +1379,7 @@ document.querySelectorAll(".shortcut-item").forEach((item) => {
   item.addEventListener("click", () => {
     const sc = item.getAttribute("data-shortcut");
     if (sc === "cmd") openCmdModal();
+    else if (sc === "p") togglePersonaModal();
     else if (sc === "g") toggleCamera();
     else if (sc === "e") startFaceEnrollment();
     else if (sc === "t") cycleTheme();
@@ -1243,6 +1403,7 @@ window.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       closeCmdModal();
       closeEnrollmentModal(true);
+      closePersonaModal();
     }
     return;
   }
@@ -1251,6 +1412,12 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     closeCmdModal();
     closeEnrollmentModal(true);
+    closePersonaModal();
+    return;
+  }
+
+  if (key === "p") {
+    togglePersonaModal();
     return;
   }
 

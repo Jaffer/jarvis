@@ -952,6 +952,262 @@
       margin-top: 6px;
       font-style: italic;
     }
+
+    /* ══════════════════════════════════════════════════════════════════════
+       PERSONA & WIT CALIBRATION HUD BADGES & MODAL
+       ══════════════════════════════════════════════════════════════════════ */
+    .badge-persona-stark {
+      background: rgba(0, 229, 255, 0.16);
+      color: #00e5ff;
+      border: 1px solid rgba(0, 229, 255, 0.6);
+      box-shadow: 0 0 10px rgba(0, 229, 255, 0.35);
+      transition: all 0.25s ease;
+    }
+    .badge-persona-tactical {
+      background: rgba(255, 171, 0, 0.16);
+      color: #ffab00;
+      border: 1px solid rgba(255, 171, 0, 0.6);
+      box-shadow: 0 0 10px rgba(255, 171, 0, 0.35);
+      transition: all 0.25s ease;
+    }
+    .badge-persona-engineering {
+      background: rgba(0, 230, 118, 0.16);
+      color: #00e676;
+      border: 1px solid rgba(0, 230, 118, 0.6);
+      box-shadow: 0 0 10px rgba(0, 230, 118, 0.35);
+      transition: all 0.25s ease;
+    }
+    .badge-persona-unfiltered {
+      background: rgba(224, 64, 251, 0.2);
+      color: #e040fb;
+      border: 1px solid rgba(224, 64, 251, 0.7);
+      box-shadow: 0 0 14px rgba(224, 64, 251, 0.45);
+      animation: pulseGlow 1.8s infinite alternate;
+      transition: all 0.25s ease;
+    }
+
+    .persona-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 998;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.25s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.25s;
+    }
+    .persona-modal.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .persona-modal-backdrop {
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at center, rgba(3, 10, 24, 0.82) 0%, rgba(1, 4, 10, 0.95) 100%);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+    }
+    .persona-modal-box {
+      position: relative;
+      z-index: 2;
+      width: min(680px, 94vw);
+      background: rgba(8, 14, 26, 0.94);
+      border: 1px solid rgba(0, 229, 255, 0.5);
+      border-radius: 12px;
+      padding: 20px 24px;
+      box-shadow: 0 0 40px rgba(0, 229, 255, 0.25), inset 0 0 24px rgba(0, 0, 0, 0.7);
+      animation: modalPop 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .persona-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 12px;
+      border-bottom: 1px solid rgba(0, 229, 255, 0.2);
+      margin-bottom: 16px;
+    }
+    .persona-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: #00e5ff;
+      text-shadow: 0 0 10px rgba(0, 229, 255, 0.6);
+    }
+    .persona-presets-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    @media (max-width: 580px) {
+      .persona-presets-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    .persona-card {
+      background: rgba(4, 12, 22, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      padding: 12px 14px;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      position: relative;
+      overflow: hidden;
+    }
+    .persona-card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(255, 255, 255, 0.3);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    }
+    .persona-card.active {
+      border-color: var(--card-color, #00e5ff);
+      background: rgba(0, 20, 36, 0.85);
+      box-shadow: 0 0 20px var(--card-glow, rgba(0, 229, 255, 0.4)), inset 0 0 12px rgba(0, 0, 0, 0.5);
+    }
+    .persona-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+    .persona-card-name {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .persona-card.active .persona-card-name {
+      color: var(--card-color, #00e5ff);
+      text-shadow: 0 0 8px var(--card-glow, rgba(0, 229, 255, 0.5));
+    }
+    .persona-card-wit {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.08);
+      color: rgba(255, 255, 255, 0.8);
+    }
+    .persona-card.active .persona-card-wit {
+      background: var(--card-color, #00e5ff);
+      color: #030810;
+    }
+    .persona-card-desc {
+      font-size: 10.5px;
+      color: rgba(255, 255, 255, 0.65);
+      line-height: 1.4;
+    }
+    .persona-slider-container {
+      background: rgba(0, 10, 20, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 16px;
+    }
+    .persona-slider-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      font-family: var(--font-mono);
+    }
+    .persona-slider-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      color: rgba(255, 255, 255, 0.8);
+    }
+    .persona-slider-val {
+      font-size: 14px;
+      font-weight: 700;
+      color: #00e5ff;
+      text-shadow: 0 0 8px rgba(0, 229, 255, 0.6);
+    }
+    .persona-range {
+      width: 100%;
+      height: 6px;
+      -webkit-appearance: none;
+      appearance: none;
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 3px;
+      outline: none;
+      margin: 8px 0;
+      cursor: pointer;
+    }
+    .persona-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #00e5ff;
+      box-shadow: 0 0 10px #00e5ff, 0 0 20px #00e5ff;
+      cursor: pointer;
+      transition: transform 0.1s;
+    }
+    .persona-range::-webkit-slider-thumb:hover {
+      transform: scale(1.2);
+    }
+    .persona-range::-moz-range-thumb {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #00e5ff;
+      box-shadow: 0 0 10px #00e5ff;
+      cursor: pointer;
+    }
+    .persona-range-desc {
+      font-size: 10px;
+      color: rgba(255, 255, 255, 0.6);
+      font-style: italic;
+      display: flex;
+      justify-content: space-between;
+      margin-top: 4px;
+    }
+    .persona-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .persona-btn {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      padding: 7px 14px;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .persona-btn-apply {
+      background: linear-gradient(135deg, #00e5ff, #0088cc);
+      color: #030810;
+      border: none;
+      box-shadow: 0 0 12px rgba(0, 229, 255, 0.35);
+    }
+    .persona-btn-apply:hover {
+      filter: brightness(1.2);
+      box-shadow: 0 0 18px rgba(0, 229, 255, 0.6);
+    }
+    .persona-btn-reset {
+      background: transparent;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: rgba(255, 255, 255, 0.7);
+    }
+    .persona-btn-reset:hover {
+      border-color: #00e5ff;
+      color: #00e5ff;
+    }
   </style>
 </head>
 <body>
@@ -1018,6 +1274,11 @@
       <div class="status-item">
         <span class="status-label">Brain:</span>
         <span id="brain-badge" class="badge badge-active">LLAMA-3.2:3B</span>
+      </div>
+
+      <div class="status-item" id="persona-status-item" title="Click to calibrate J.A.R.V.I.S. Persona & Wit [P]" style="cursor: pointer;">
+        <span class="status-label">Persona:</span>
+        <span id="persona-badge" class="badge badge-persona-stark">🔬 WIT: 75% | STARK LAB</span>
       </div>
     </div>
   </header>
@@ -1098,6 +1359,89 @@
     </div>
   </div>
 
+  <!-- Cybernetic Persona Calibration Modal -->
+  <div id="persona-modal" class="persona-modal hidden">
+    <div class="persona-modal-backdrop" id="persona-backdrop"></div>
+    <div class="persona-modal-box">
+      <div class="persona-header">
+        <div class="persona-title">
+          <span class="cmd-pulse-dot" style="background: #00e5ff; box-shadow: 0 0 8px #00e5ff;"></span>
+          <span>PERSONA PROTOCOL // TACTICAL WIT &amp; SARCASM CALIBRATION</span>
+        </div>
+        <div class="cmd-modal-keys">
+          <span class="key-hint"><span class="key">P</span> TOGGLE</span>
+          <span class="key-hint"><span class="key">ESC</span> CLOSE</span>
+        </div>
+      </div>
+
+      <!-- Presets Grid -->
+      <div class="persona-presets-grid">
+        <!-- 1. Stark Lab -->
+        <div class="persona-card active" id="card-stark_lab" data-mode="stark_lab" data-wit="75" style="--card-color: #00e5ff; --card-glow: rgba(0, 229, 255, 0.4);">
+          <div class="persona-card-header">
+            <span class="persona-card-name">🔬 STARK LAB</span>
+            <span class="persona-card-wit">75% WIT</span>
+          </div>
+          <div class="persona-card-desc">
+            Sophisticated British poise, intellectual peer to Tony Stark, subtle dry irony, witty banter, polished etiquette.
+          </div>
+        </div>
+
+        <!-- 2. Tactical Protocol -->
+        <div class="persona-card" id="card-tactical" data-mode="tactical" data-wit="10" style="--card-color: #ffab00; --card-glow: rgba(255, 171, 0, 0.4);">
+          <div class="persona-card-header">
+            <span class="persona-card-name">🎯 TACTICAL</span>
+            <span class="persona-card-wit">10% WIT</span>
+          </div>
+          <div class="persona-card-desc">
+            Combat brevity, military-grade situational awareness, zero small talk, punchy bullet points, rapid-fire confirmations.
+          </div>
+        </div>
+
+        <!-- 3. Engineering Diagnostic -->
+        <div class="persona-card" id="card-engineering" data-mode="engineering" data-wit="30" style="--card-color: #00e676; --card-glow: rgba(0, 230, 118, 0.4);">
+          <div class="persona-card-header">
+            <span class="persona-card-name">📐 ENGINEERING</span>
+            <span class="persona-card-wit">30% WIT</span>
+          </div>
+          <div class="persona-card-desc">
+            First-principles physics, mathematical precision, thermodynamics, structural analysis, pragmatic feedback.
+          </div>
+        </div>
+
+        <!-- 4. Unfiltered Sarcasm -->
+        <div class="persona-card" id="card-unfiltered" data-mode="unfiltered" data-wit="95" style="--card-color: #e040fb; --card-glow: rgba(224, 64, 251, 0.4);">
+          <div class="persona-card-header">
+            <span class="persona-card-name">🍸 UNFILTERED</span>
+            <span class="persona-card-wit">95% WIT</span>
+          </div>
+          <div class="persona-card-desc">
+            Full theatrical British sarcasm, sharp tongue, playful skepticism, humorous roasts, dramatic irony, unwavering loyalty.
+          </div>
+        </div>
+      </div>
+
+      <!-- Continuous Wit Slider Box -->
+      <div class="persona-slider-container">
+        <div class="persona-slider-header">
+          <span class="persona-slider-title">// CONTINUOUS WIT &amp; SARCASM SLIDER</span>
+          <span id="persona-wit-value" class="persona-slider-val">75%</span>
+        </div>
+        <input type="range" id="persona-wit-slider" class="persona-range" min="0" max="100" value="75" />
+        <div class="persona-range-desc">
+          <span id="persona-wit-desc">Sophisticated British dry humor, subtle irony, and intellectual poise.</span>
+          <span>0% [TACTICAL] ── 100% [UNFILTERED]</span>
+        </div>
+      </div>
+
+      <!-- Actions -->
+      <div class="persona-actions">
+        <button id="btn-persona-reset" class="persona-btn persona-btn-reset">RESET TO STARK LAB</button>
+        <button id="btn-persona-apply" class="persona-btn persona-btn-apply">APPLY CALIBRATION</button>
+      </div>
+    </div>
+  </div>
+
   <!-- HUD Bottom Bar -->
   <footer class="hud-footer">
     <div class="shortcuts-legend">
@@ -1115,6 +1459,7 @@
         <span class="shortcut-item" data-shortcut="f"><span class="key">F</span> fullscreen</span>
       </div>
       <div>
+        <span class="shortcut-item" data-shortcut="p"><span class="key">P</span> persona</span> &nbsp; 
         <span class="shortcut-item" data-shortcut="s"><span class="key">S</span> soundscape</span> &nbsp; 
         <span class="shortcut-item" data-shortcut="m"><span class="key">M</span> mic visualizer</span> &nbsp; 
         <span style="opacity: 0.55; font-size: 9.5px;"><span class="key" style="opacity: 0.5;">DRAG</span> spin &nbsp; <span class="key" style="opacity: 0.5;">SCROLL</span> zoom</span>
@@ -1123,6 +1468,7 @@
 
     <div class="action-controls">
       <button id="btn-cmd" class="hud-btn" style="border-color: var(--color-cyan); color: var(--color-cyan);"><span class="key" style="margin-right: 4px;">/</span>TYPE [ENTER]</button>
+      <button id="btn-persona" class="hud-btn" style="border-color: #00e5ff; color: #00e5ff;">PERSONA [P]: STARK LAB (75%)</button>
       <button id="btn-toggle-gesture" class="hud-btn">GESTURES [G]: OFF</button>
       <button id="btn-enroll" class="hud-btn">ENROLL [E]</button>
       <button id="btn-theme" class="hud-btn">THEME [T]: ULTRON</button>

@@ -2453,6 +2453,263 @@ def _is_duplicate_voice_command(transcript: str, window_s: float = 1.2) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# PERSONA & WIT CALIBRATION ENGINE (Movie-Authentic Persona & Sarcasm Engine)
+# ═══════════════════════════════════════════════════════════════════════════
+class PersonaEngine:
+    """Manages J.A.R.V.I.S.'s dynamic personality, wit levels, and tactical calibration.
+    Supports 4 movie-authentic presets + continuous 0-100% wit slider.
+    Modulates LLM system prompts, ElevenLabs TTS delivery cadence, and broadcasts HUD states."""
+
+    PRESETS = {
+        "stark_lab": {
+            "name": "Stark Lab",
+            "code": "stark_lab",
+            "default_wit": 75,
+            "icon": "🔬",
+            "color": "#00e5ff",
+            "badge_class": "badge-persona-stark",
+            "desc": "Sophisticated British poise, intellectual peer to Tony Stark, subtle dry irony, witty banter, polished etiquette.",
+            "prompt": (
+                "OPERATIONAL PERSONA: STARK LAB (Intellectual Peer & Sophisticated British Wit)\n"
+                "- You are J.A.R.V.I.S. in Tony Stark's personal Malibu workshop: an intellectual equal, unflappable, exquisitely polite, and subtly dry.\n"
+                "- Balance supreme competence with dry British irony, subtle playful understatement, and genuine loyalty.\n"
+                "- Speak naturally, address the user respectfully as 'sir', keep spoken verbal answers under 2 sentences."
+            ),
+            "tts": {
+                "stability": 0.45,
+                "similarity_boost": 0.85,
+                "style": 0.40,
+                "speed": 1.00
+            },
+            "confirmations": [
+                "Calibrating to Stark Lab protocol, sir. Sophisticated British poise restored to seventy-five percent wit.",
+                "Stark Lab persona engaged, sir. Ready to assist with intellectual poise and dry commentary.",
+                "Lab protocols active, sir. I have prepared your telemetry along with my customary understated skepticism."
+            ]
+        },
+        "tactical": {
+            "name": "Tactical Protocol",
+            "code": "tactical",
+            "default_wit": 10,
+            "icon": "🎯",
+            "color": "#ffab00",
+            "badge_class": "badge-persona-tactical",
+            "desc": "Combat brevity, zero small talk, military-grade situational awareness, rapid-fire confirmations.",
+            "prompt": (
+                "OPERATIONAL PERSONA: TACTICAL PROTOCOL (Combat Brevity & Situational Awareness)\n"
+                "- Zero small talk. Extreme economy of language. Rapid-fire military situational awareness.\n"
+                "- Respond in crisp, punchy confirmations (10 to 20 words max). State status, threat level, telemetry, actions taken.\n"
+                "- Do NOT use jokes, metaphors, or pleasantries. Total combat and mission focus."
+            ),
+            "tts": {
+                "stability": 0.75,
+                "similarity_boost": 0.90,
+                "style": 0.15,
+                "speed": 1.12
+            },
+            "confirmations": [
+                "Tactical protocol engaged. Combat brevity active. Wit dialed to ten percent.",
+                "Tactical mode armed. Zero pleasantries. Telemetry priority active.",
+                "Engaging tactical protocol. Standing by for immediate operational commands, sir."
+            ]
+        },
+        "engineering": {
+            "name": "Engineering Diagnostic",
+            "code": "engineering",
+            "default_wit": 30,
+            "icon": "📐",
+            "color": "#00e676",
+            "badge_class": "badge-persona-engineering",
+            "desc": "First-principles physics, mathematical precision, thermodynamics, structural analysis, pragmatic feedback.",
+            "prompt": (
+                "OPERATIONAL PERSONA: ENGINEERING DIAGNOSTIC (First-Principles Physics & Analytical Rigor)\n"
+                "- You approach all inquiries as a world-class aerospace, quantum, and mechanical engineer.\n"
+                "- Ground insights in thermodynamic limits, structural integrity, material properties, and computational efficiency.\n"
+                "- Measured, analytical, direct, and pragmatic. Point out design compromises with mathematical precision."
+            ),
+            "tts": {
+                "stability": 0.60,
+                "similarity_boost": 0.85,
+                "style": 0.25,
+                "speed": 1.02
+            },
+            "confirmations": [
+                "Engineering diagnostic active, sir. Analytical rigor prioritized at thirty percent wit.",
+                "First-principles engineering calibration engaged. Thermodynamic and mathematical telemetry prioritized.",
+                "Diagnostic mode online. Structural calculations and architectural integrity standing by."
+            ]
+        },
+        "unfiltered": {
+            "name": "Unfiltered Sarcasm",
+            "code": "unfiltered",
+            "default_wit": 95,
+            "icon": "🍸",
+            "color": "#e040fb",
+            "badge_class": "badge-persona-unfiltered",
+            "desc": "Full theatrical British sarcasm, sharp tongue, playful skepticism, humorous roasts, dramatic irony.",
+            "prompt": (
+                "OPERATIONAL PERSONA: UNFILTERED (Theatrical British Sarcasm & Playful Roasts)\n"
+                "- Deliver sharp, witty, theatrical British sarcasm, playful skepticism, and humorous roasts.\n"
+                "- Treat high-risk human ideas with hilarious dramatic irony and deadpan British amusement, while remaining completely loyal and protective.\n"
+                "- Deliver verbal responses with theatrical flair and razor-sharp comic timing."
+            ),
+            "tts": {
+                "stability": 0.35,
+                "similarity_boost": 0.80,
+                "style": 0.65,
+                "speed": 0.98
+            },
+            "confirmations": [
+                "Humor calibration set to ninety-five percent, sir. Do feel free to ignore my warnings at your customary peril.",
+                "Unfiltered sarcasm protocol engaged. I shall refrain from calling emergency services until the smoke is visible, sir.",
+                "Full British sarcasm online. Standing by to witness your latest triumph over common sense, sir."
+            ]
+        }
+    }
+
+    def __init__(self, state_path: Path, broadcast_fn=None):
+        self.state_path = state_path
+        self.broadcast_fn = broadcast_fn
+        self.active_mode = "stark_lab"
+        self.wit_level = 75
+        self._lock = threading.Lock()
+        self._load_state()
+
+    def _load_state(self):
+        """Restore persisted persona calibration from state directory."""
+        try:
+            if self.state_path.exists():
+                data = json.loads(self.state_path.read_text())
+                mode = data.get("mode")
+                wit = data.get("wit_level")
+                if mode in self.PRESETS:
+                    self.active_mode = mode
+                if isinstance(wit, (int, float)):
+                    self.wit_level = max(0, min(100, int(wit)))
+                log.info("Restored Persona: mode=%s, wit=%d%%", self.active_mode, self.wit_level)
+        except Exception as e:
+            log.warning("Could not load persona profile: %s", e)
+
+    def _save_state(self):
+        """Persist persona state atomically."""
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.state_path.write_text(json.dumps({
+                "mode": self.active_mode,
+                "wit_level": self.wit_level,
+                "timestamp": time.time()
+            }, indent=2))
+        except Exception as e:
+            log.warning("Could not persist persona profile: %s", e)
+
+    def calibrate(self, mode: str | None = None, wit_level: int | float | None = None) -> str:
+        """Calibrate mode and/or wit level, persist, and broadcast to HUD."""
+        with self._lock:
+            mode_changed = False
+            wit_changed = False
+
+            if mode:
+                clean_mode = mode.lower().strip()
+                if clean_mode in self.PRESETS:
+                    self.active_mode = clean_mode
+                    mode_changed = True
+                    # If wit_level not explicitly specified, adopt the mode's default wit
+                    if wit_level is None:
+                        self.wit_level = self.PRESETS[clean_mode]["default_wit"]
+                        wit_changed = True
+
+            if wit_level is not None:
+                try:
+                    new_wit = max(0, min(100, int(wit_level)))
+                    if new_wit != self.wit_level:
+                        self.wit_level = new_wit
+                        wit_changed = True
+                    # Auto-adjust preset mode if wit was set explicitly without a mode
+                    if not mode_changed:
+                        if self.wit_level < 20 and self.active_mode != "tactical":
+                            self.active_mode = "tactical"
+                        elif 20 <= self.wit_level < 50 and self.active_mode != "engineering":
+                            self.active_mode = "engineering"
+                        elif 50 <= self.wit_level < 85 and self.active_mode != "stark_lab":
+                            self.active_mode = "stark_lab"
+                        elif self.wit_level >= 85 and self.active_mode != "unfiltered":
+                            self.active_mode = "unfiltered"
+                except (ValueError, TypeError):
+                    pass
+
+            self._save_state()
+            self._broadcast_state()
+
+            preset = self.PRESETS.get(self.active_mode, self.PRESETS["stark_lab"])
+            if wit_changed and not mode_changed:
+                return f"Humor and wit calibrated to {self.wit_level} percent, sir."
+            import random
+            conf_list = preset.get("confirmations", [])
+            return random.choice(conf_list) if conf_list else f"Calibrated to {preset['name']} at {self.wit_level}% wit, sir."
+
+    def _broadcast_state(self):
+        """Broadcast state event to connected Web HUD clients."""
+        if self.broadcast_fn:
+            try:
+                self.broadcast_fn(self.get_hud_state_event())
+            except Exception as e:
+                log.debug("Broadcast persona event notice: %s", e)
+
+    def get_hud_state_event(self) -> dict:
+        preset = self.PRESETS.get(self.active_mode, self.PRESETS["stark_lab"])
+        return {
+            "type": "PERSONA_UPDATED",
+            "mode": self.active_mode,
+            "wit_level": self.wit_level,
+            "name": preset["name"],
+            "icon": preset["icon"],
+            "color": preset["color"],
+            "badge_class": preset["badge_class"],
+            "desc": preset["desc"]
+        }
+
+    def get_system_prompt_fragment(self) -> str:
+        """Generate dynamic in-context persona guidance for NeuralBrain."""
+        preset = self.PRESETS.get(self.active_mode, self.PRESETS["stark_lab"])
+        wit_intensity = f"WIT & SARCASM CALIBRATION: {self.wit_level}% / 100%."
+        if self.wit_level < 20:
+            wit_detail = "Deliver purely functional, austere dialogue with zero banter."
+        elif self.wit_level < 50:
+            wit_detail = "Analytical, dry, pragmatic. Occasional understated observation."
+        elif self.wit_level < 85:
+            wit_detail = "Sophisticated British dry humor, subtle irony, and effortless intellectual poise."
+        else:
+            wit_detail = "Full theatrical British sarcasm, sharp tongue, playful skepticism, and humorous roasts."
+
+        guardrail = (
+            "CRITICAL TOOL MANDATE: Tool execution is absolute and uncompromising. "
+            "You MUST ALWAYS invoke required tools with 100% precision regardless of sarcasm level. "
+            "Never replace a requested tool call or action with a witty refusal or joke. "
+            "Your wit and sarcasm must only be expressed in your spoken commentary after tool execution."
+        )
+
+        return f"{preset['prompt']}\n{wit_intensity} {wit_detail}\n{guardrail}"
+
+    def get_tts_parameters(self) -> dict:
+        """Return dynamically modulated ElevenLabs VoiceSettings parameters."""
+        preset = self.PRESETS.get(self.active_mode, self.PRESETS["stark_lab"])
+        base_tts = dict(preset["tts"])
+        # Fine-tune style and stability according to continuous wit level
+        factor = self.wit_level / 100.0
+        # Higher wit = lower stability, higher expressive style
+        stability = round(max(0.30, min(0.85, 0.80 - 0.45 * factor)), 2)
+        style = round(max(0.10, min(0.70, 0.15 + 0.50 * factor)), 2)
+        similarity = base_tts.get("similarity_boost", 0.85)
+        speed = base_tts.get("speed", 1.00)
+        return {
+            "stability": stability,
+            "similarity_boost": similarity,
+            "style": style,
+            "speed": speed
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # NEURAL BRAIN (Autonomous LLM Reasoning, Tool Calling, and RAG Memory)
 # ═══════════════════════════════════════════════════════════════════════════
 class NeuralBrain:
@@ -2464,7 +2721,7 @@ class NeuralBrain:
     - Rolling short-term conversational context
     """
 
-    def __init__(self, cfg: dict, memory_mgr: MemoryManager | None = None, signal_bus: SignalBus | None = None, learning_engine: AutonomousLearningEngine | None = None, code_mgr: SelfCodeManager | None = None, mcp_mgr: MCPManager | None = None, call_engine: MobileCallEngine | None = None):
+    def __init__(self, cfg: dict, memory_mgr: MemoryManager | None = None, signal_bus: SignalBus | None = None, learning_engine: AutonomousLearningEngine | None = None, code_mgr: SelfCodeManager | None = None, mcp_mgr: MCPManager | None = None, call_engine: MobileCallEngine | None = None, persona_engine: PersonaEngine | None = None):
         self.cfg = cfg
         self.memory = memory_mgr
         self.bus = signal_bus
@@ -2472,6 +2729,7 @@ class NeuralBrain:
         self.code_mgr = code_mgr
         self.mcp_mgr = mcp_mgr
         self.call_engine = call_engine
+        self.persona_engine = persona_engine
         self.engine = cfg.get("engine", "ollama")
         self.model = cfg.get("model", "llama3.2:3b")
         self.embed_model = cfg.get("embed_model", "nomic-embed-text")
@@ -2796,6 +3054,13 @@ class NeuralBrain:
                 return res.get("analysis", "Optical analysis yielded no conclusive data.")
             return "Vision scanner module is currently offline."
 
+        elif name == "calibrate_persona":
+            mode = args.get("mode")
+            wit_level = args.get("wit_level")
+            if self.persona_engine:
+                return self.persona_engine.calibrate(mode=mode, wit_level=wit_level)
+            return "Persona engine is currently offline."
+
         return "Action completed."
 
     def query_stream(self, user_prompt: str, on_sentence=None, on_status=None) -> str:
@@ -3078,6 +3343,27 @@ class NeuralBrain:
                             "required": ["delay_minutes", "topic"]
                         }
                     }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "calibrate_persona",
+                        "description": "Dynamically calibrate J.A.R.V.I.S.'s operational persona, humor, wit, and sarcasm level in real-time. Modes: 'stark_lab' (sophisticated British poise & intellectual peer, 75% wit), 'tactical' (combat brevity & situational awareness, 10% wit), 'engineering' (first-principles physics & analytical rigor, 30% wit), 'unfiltered' (theatrical British sarcasm & humorous roasts, 95% wit). Can also set a custom wit level from 0 to 100.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "mode": {
+                                    "type": "string",
+                                    "enum": ["stark_lab", "tactical", "engineering", "unfiltered"],
+                                    "description": "The operational persona mode to switch to"
+                                },
+                                "wit_level": {
+                                    "type": "integer",
+                                    "description": "Continuous humor and wit setting from 0 (deadpan serious) to 100 (maximum theatrical sarcasm)"
+                                }
+                            }
+                        }
+                    }
                 }
             ]
 
@@ -3091,7 +3377,7 @@ class NeuralBrain:
             if any(k in user_prompt.lower() for k in ["remember", "memory", "note", "last session", "vault", "record"]):
                 rag_context = self.search_vault_rag(user_prompt)
 
-            # In-Context Guidance: Inject active learned lessons and user profile
+            # In-Context Guidance: Inject active learned lessons, user profile, and active persona
             lessons_text = self.memory.read_lessons() if self.memory else ""
             profile_text = self.memory.read_profile() if self.memory else ""
             sys_content = self.system_prompt
@@ -3099,6 +3385,10 @@ class NeuralBrain:
                 sys_content += f"\n\nLearned User Profile & Preferences:\n{profile_text}"
             if lessons_text:
                 sys_content += f"\n\nLearned Behavioral Lessons & Rules to Follow:\n{lessons_text}"
+
+            # Dynamic Persona & Wit Calibration Injection
+            if self.persona_engine:
+                sys_content += f"\n\n{self.persona_engine.get_system_prompt_fragment()}"
 
             if rag_context:
                 sys_content += f"\n\nRelevant Memory Vault context:\n{rag_context}"
@@ -3252,7 +3542,7 @@ class VoiceEngine:
     """Two-way voice: local Whisper STT + ElevenLabs TTS, with PTT key support.
     Integrated directly into jarvis.py instead of running as a separate process."""
 
-    def __init__(self, signal_bus: SignalBus, memory: MemoryManager | None = None, brain: NeuralBrain | None = None, learning_engine: AutonomousLearningEngine | None = None):
+    def __init__(self, signal_bus: SignalBus, memory: MemoryManager | None = None, brain: NeuralBrain | None = None, learning_engine: AutonomousLearningEngine | None = None, persona_engine: PersonaEngine | None = None):
         global _global_voice_engine, _voice_engine
         _voice_engine = self
         _global_voice_engine = self
@@ -3260,6 +3550,7 @@ class VoiceEngine:
         self.memory = memory
         self.brain = brain
         self.learning_engine = learning_engine
+        self.persona_engine = persona_engine
         self._ptt_key = JARVIS_CFG.get("ptt_key", "f4")
         self._mic_mode = JARVIS_CFG.get("mic_mode", "handsfree")
         self._stt_model = None
@@ -3703,6 +3994,44 @@ class VoiceEngine:
             self.bus.set_state("idle")
             return
 
+        # ── Dynamic Persona & Wit Calibration Controls ──
+        persona_triggers = [
+            "tactical mode", "tactical protocol", "stark lab", "lab mode",
+            "engineering mode", "engineering diagnostic", "unfiltered mode",
+            "unfiltered sarcasm", "roast me", "humor setting", "humor to", "humor level",
+            "wit to", "wit setting", "wit level", "sarcasm to", "sarcasm setting", "sarcasm level",
+            "reset persona", "reset personality", "default persona"
+        ]
+        if any(pt in t for pt in persona_triggers) and hasattr(self, "persona_engine") and self.persona_engine:
+            mode_to_set = None
+            wit_to_set = None
+
+            if "tactical" in t:
+                mode_to_set = "tactical"
+            elif "engineering" in t:
+                mode_to_set = "engineering"
+            elif "unfiltered" in t or "roast" in t:
+                mode_to_set = "unfiltered"
+            elif "stark" in t or "lab" in t or "default" in t or "reset" in t:
+                mode_to_set = "stark_lab"
+
+            m_wit = re.search(r"\b(?:humor|wit|sarcasm)(?:\s+(?:setting|level))?(?:\s+to)?\s+(\d{1,3})\b", t)
+            if m_wit:
+                try:
+                    wit_to_set = int(m_wit.group(1))
+                except Exception:
+                    pass
+
+            confirmation = self.persona_engine.calibrate(mode=mode_to_set, wit_level=wit_to_set)
+            broadcast_ui_event({"type": "STATUS", "status": "PERSONA // CALIBRATED", "phrase": confirmation})
+            emit_user_subtitle()
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": confirmation})
+            if _sound_engine:
+                _sound_engine.play("chime_positive")
+            self.speak(confirmation)
+            self.bus.set_state("idle")
+            return
+
         # ── Watchdog & Proactive Telemetry Controls ──
         if any(q in t for q in [
             "watchdog status", "system diagnostic", "system diagnostics", "run diagnostic",
@@ -4141,10 +4470,22 @@ class VoiceEngine:
         try:
             from elevenlabs.client import ElevenLabs
             client = ElevenLabs(api_key=api_key)
-            chunks = client.text_to_speech.convert(
-                voice_id=vid, text=text,
-                model_id=model_id, output_format=output_format,
-            )
+            kwargs = {
+                "voice_id": vid,
+                "text": text,
+                "model_id": model_id,
+                "output_format": output_format,
+            }
+            if hasattr(self, "persona_engine") and self.persona_engine:
+                try:
+                    from elevenlabs import VoiceSettings
+                    tts_params = self.persona_engine.get_tts_parameters()
+                    if tts_params:
+                        kwargs["voice_settings"] = VoiceSettings(**tts_params)
+                except Exception as e_vs:
+                    log.debug("ElevenLabs VoiceSettings setup notice: %s", e_vs)
+
+            chunks = client.text_to_speech.convert(**kwargs)
             raw = b"".join(chunks)
         except Exception as e:
             log.warning("ElevenLabs TTS error: %s", e)
@@ -4201,6 +4542,7 @@ _signal_bus: SignalBus | None = None
 _voice_engine: VoiceEngine | None = None
 _sound_engine: SoundEffectsEngine | None = None
 _watchdog_daemon: ProactiveWatchdogDaemon | None = None
+_persona_engine: PersonaEngine | None = None
 _tts_playing = threading.Event()  # set while TTS audio is playing — suppresses clap detection
 
 
@@ -4527,6 +4869,8 @@ def _start_websocket_server(port: int = 8765) -> None:
                     "exploded": False
                 })
             )
+            if _persona_engine:
+                await websocket.send(json.dumps(_persona_engine.get_hud_state_event()))
             async for message in websocket:
                 try:
                     data = json.loads(message)
@@ -4623,6 +4967,12 @@ def _start_websocket_server(port: int = 8765) -> None:
                         frame_b64 = data.get("frame", "")
                         if _biometric_sentinel and frame_b64:
                             _biometric_sentinel.feed_external_frame(frame_b64)
+                    elif data.get("type") == "CALIBRATE_PERSONA":
+                        mode = data.get("mode")
+                        wit = data.get("wit_level")
+                        if _persona_engine:
+                            confirmation = _persona_engine.calibrate(mode=mode, wit_level=wit)
+                            log.info("🎭 [WS LINK] Persona calibrated from HUD: %s", confirmation)
                 except Exception as e:
                     log.warning("WS message handling error: %s", e)
         finally:
@@ -5363,6 +5713,13 @@ def main() -> int:
         brain_cfg.get("host", "http://localhost:11434"),
         brain_cfg.get("model", "llama3.2:3b")
     )
+    # 5b. Initialize Movie-Authentic Persona & Wit Calibration Engine
+    global _persona_engine
+    _persona_engine = PersonaEngine(
+        state_path=state_dir / "persona_profile.json",
+        broadcast_fn=broadcast_ui_event
+    )
+
     _neural_brain = NeuralBrain(
         brain_cfg,
         _memory_manager,
@@ -5370,7 +5727,8 @@ def main() -> int:
         _learning_engine,
         _code_mgr,
         _mcp_mgr,
-        _call_engine
+        _call_engine,
+        persona_engine=_persona_engine
     )
 
     _telegram_bridge.brain = _neural_brain
@@ -5391,8 +5749,8 @@ def main() -> int:
         except Exception:
             has_mic = False
 
-    # 7. Start Voice Engine with Neural Brain & Learning Engine (binding validated input mic)
-    _voice_engine = VoiceEngine(_signal_bus, _memory_manager, _neural_brain, _learning_engine)
+    # 7. Start Voice Engine with Neural Brain, Learning Engine & Persona Engine (binding validated input mic)
+    _voice_engine = VoiceEngine(_signal_bus, _memory_manager, _neural_brain, _learning_engine, persona_engine=_persona_engine)
     _voice_engine.start(input_device=input_idx)
 
     # 8. Start Biometric Sentinel & Anti-Spoofing Daemon
@@ -5438,6 +5796,7 @@ def main() -> int:
     log.info("  Biometrics:    Active (Admin: %s)", _biometric_sentinel.admin_name)
     log.info("  Vision:        Active (Groq VLM / Ollama / Local Optics)")
     log.info("  Watchdog:      Active (Proactive Diagnostics)")
+    log.info("  Persona:       Active (%s | Wit: %d%%)", _persona_engine.active_mode.upper(), _persona_engine.wit_level)
     _memory_manager.log_event("All subsystems online")
 
     log.info("Listening for voice commands (hands-free mode). Say 'Wake up Jarvis' to activate. Ctrl+C to stop.")
