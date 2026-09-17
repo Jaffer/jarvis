@@ -4,7 +4,9 @@
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-gdrive"],
       "env": {
-        "GOOGLE_APPLICATION_CREDENTIALS": "./credentials.json"
+        "GOOGLE_APPLICATION_CREDENTIALS": "./credentials.json",
+        "GDRIVE_OAUTH_PATH": "./credentials.json",
+        "GDRIVE_CREDENTIALS_PATH": "./.gdrive-server-credentials.json"
       }
     },
     "github": {
@@ -16,10 +18,11 @@
     },
     "spotify": {
       "command": "npx",
-      "args": ["-y", "spotify-mcp-server"],
+      "args": ["-y", "@darrenjaws/spotify-mcp"],
       "env": {
         "SPOTIFY_CLIENT_ID": "$SPOTIFY_CLIENT_ID",
-        "SPOTIFY_CLIENT_SECRET": "$SPOTIFY_CLIENT_SECRET"
+        "SPOTIFY_CLIENT_SECRET": "$SPOTIFY_CLIENT_SECRET",
+        "SPOTIFY_REDIRECT_URI": "$SPOTIFY_REDIRECT_URI"
       }
     },
     "puppeteer": {

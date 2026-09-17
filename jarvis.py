@@ -41,6 +41,7 @@ from __future__ import annotations
 
 from typing import Any, Optional, Dict, List, Tuple, Callable
 import asyncio
+import atexit
 import functools
 import hashlib
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -49,6 +50,7 @@ import logging
 import os
 import queue
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -626,66 +628,342 @@ class SelfCodeManager:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# MODEL CONTEXT PROTOCOL (MCP) MANAGER
+# MODEL CONTEXT PROTOCOL (MCP) ENGINE (JSON-RPC 2.0)
 # ═══════════════════════════════════════════════════════════════════════════
+class MCPSession:
+    """Encapsulates a persistent JSON-RPC 2.0 stdio session with an MCP server."""
+
+    def __init__(self, name: str, cfg: dict, cwd: Path):
+        self.name = name
+        self.cfg = cfg
+        self.cwd = cwd
+        self.proc: subprocess.Popen | None = None
+        self._next_id = 1
+        self.tools: list[dict] = []
+        self.initialized = False
+        self._lock = threading.RLock()
+
+    def _get_id(self) -> int:
+        self._next_id += 1
+        return self._next_id
+
+    def start(self, timeout: float = 8.0) -> bool:
+        with self._lock:
+            if self.proc and self.proc.poll() is None:
+                return True
+
+            cmd = [self.cfg["command"]] + self.cfg.get("args", [])
+            env = dict(os.environ)
+            if "env" in self.cfg:
+                for k, v in self.cfg["env"].items():
+                    if isinstance(v, str) and v.startswith("$"):
+                        v = os.environ.get(v[1:], v)
+                    env[k] = str(v)
+
+            try:
+                self.proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=str(self.cwd),
+                    env=env,
+                    bufsize=1
+                )
+                # Handshake: initialize
+                init_id = self._get_id()
+                req = {
+                    "jsonrpc": "2.0",
+                    "id": init_id,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "jarvis-mcp", "version": "2.0"}
+                    }
+                }
+                resp = self._send_raw_request_locked(req, timeout=timeout)
+                if not resp or "result" not in resp:
+                    self._close_locked()
+                    return False
+
+                # Handshake: notifications/initialized
+                self._send_notification_locked("notifications/initialized")
+                self.initialized = True
+
+                # Discover tools
+                list_id = self._get_id()
+                tools_resp = self._send_raw_request_locked(
+                    {"jsonrpc": "2.0", "id": list_id, "method": "tools/list", "params": {}},
+                    timeout=5.0
+                )
+                if tools_resp and "result" in tools_resp:
+                    self.tools = tools_resp["result"].get("tools", [])
+                log.info("MCP session '%s' connected (%d tools).", self.name, len(self.tools))
+                return True
+            except Exception as e:
+                log.warning("MCP session '%s' failed to start: %s", self.name, e)
+                self._close_locked()
+                return False
+
+    def _send_notification_locked(self, method: str, params: dict | None = None):
+        if not self.proc or self.proc.poll() is not None:
+            return
+        payload = {"jsonrpc": "2.0", "method": method}
+        if params:
+            payload["params"] = params
+        try:
+            self.proc.stdin.write(json.dumps(payload) + "\n")
+            self.proc.stdin.flush()
+        except Exception:
+            pass
+
+    def _send_raw_request_locked(self, payload: dict, timeout: float = 10.0) -> dict | None:
+        if not self.proc or self.proc.poll() is not None:
+            return None
+        target_id = payload.get("id")
+        try:
+            line_out = json.dumps(payload) + "\n"
+            self.proc.stdin.write(line_out)
+            self.proc.stdin.flush()
+        except Exception:
+            return None
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            remain = max(0.1, deadline - time.time())
+            r, _, _ = select.select([self.proc.stdout], [], [], remain)
+            if not r:
+                break
+            line = self.proc.stdout.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+                if isinstance(msg, dict) and msg.get("id") == target_id:
+                    return msg
+            except json.JSONDecodeError:
+                continue
+        return None
+
+    def call_tool(self, tool_name: str, arguments: dict, timeout: float = 15.0) -> str:
+        with self._lock:
+            if not self.initialized:
+                if not self.start(timeout=6.0):
+                    return f"MCP server '{self.name}' failed to start or initialize."
+
+            call_id = self._get_id()
+            payload = {
+                "jsonrpc": "2.0",
+                "id": call_id,
+                "method": "tools/call",
+                "params": {
+                    "name": tool_name,
+                    "arguments": arguments or {}
+                }
+            }
+            resp = self._send_raw_request_locked(payload, timeout=timeout)
+            if not resp:
+                return f"MCP [{self.name}] tool '{tool_name}' timed out or failed to respond."
+            if "error" in resp:
+                err = resp["error"]
+                return f"MCP [{self.name}] Error ({err.get('code', -1)}): {err.get('message', 'Unknown error')}"
+
+            res = resp.get("result", {})
+            content_items = res.get("content", [])
+            out_texts = []
+            for c in content_items:
+                if isinstance(c, dict) and "text" in c:
+                    out_texts.append(c["text"])
+            if out_texts:
+                return "\n".join(out_texts)
+            return json.dumps(res, indent=2)
+
+    def smart_query(self, query: str, timeout: float = 15.0) -> str:
+        """Route natural language or JSON queries to the appropriate MCP tool."""
+        q_strip = query.strip()
+        # Case 1: JSON payload specifying tool and args
+        if q_strip.startswith("{") and q_strip.endswith("}"):
+            try:
+                parsed = json.loads(q_strip)
+                if "tool" in parsed:
+                    return self.call_tool(parsed["tool"], parsed.get("arguments", {}), timeout=timeout)
+            except Exception:
+                pass
+
+        # Case 2: Heuristic routing per server
+        if self.name == "filesystem":
+            if any(k in q_strip.lower() for k in ["list", "dir", "ls", "files"]):
+                path = q_strip.split()[-1] if "/" in q_strip else str(self.cwd)
+                return self.call_tool("list_directory", {"path": path}, timeout=timeout)
+            elif any(k in q_strip.lower() for k in ["read", "cat", "view", "show"]):
+                m = re.search(r'[\w\-\./]+\.\w+', q_strip)
+                target = m.group(0) if m else "README.md"
+                return self.call_tool("read_text_file", {"path": str(self.cwd / target)}, timeout=timeout)
+
+        elif self.name == "spotify":
+            ql = q_strip.lower()
+            if "pause" in ql or "stop" in ql:
+                return self.call_tool("spotify_pause", {}, timeout=timeout)
+            elif "next" in ql or "skip" in ql:
+                return self.call_tool("spotify_next", {}, timeout=timeout)
+            elif "prev" in ql or "back" in ql:
+                return self.call_tool("spotify_previous", {}, timeout=timeout)
+            elif "status" in ql or "now playing" in ql or "what" in ql:
+                return self.call_tool("spotify_get_playback_state", {}, timeout=timeout)
+            elif "search" in ql or "play" in ql:
+                search_term = re.sub(r'^(search|play|find)\s+', '', q_strip, flags=re.I)
+                return self.call_tool("spotify_search", {"query": search_term, "types": ["track"]}, timeout=timeout)
+
+        elif self.name == "github":
+            return self.call_tool("search_repositories", {"query": q_strip}, timeout=timeout)
+
+        elif self.name == "puppeteer":
+            m = re.search(r'https?://[^\s]+', q_strip)
+            if m:
+                return self.call_tool("puppeteer_navigate", {"url": m.group(0)}, timeout=timeout)
+
+        elif self.name == "memory":
+            return self.call_tool("read_graph", {}, timeout=timeout)
+
+        elif self.name == "google_workspace":
+            return self.call_tool("search", {"query": q_strip}, timeout=timeout)
+
+        # Fallback to the first available tool with query param
+        if self.tools:
+            first_tool = self.tools[0]["name"]
+            return self.call_tool(first_tool, {"query": query}, timeout=timeout)
+
+        return f"MCP [{self.name}]: No suitable tool found for query '{query}'."
+
+    def _close_locked(self):
+        if self.proc:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+            self.proc = None
+        self.initialized = False
+
+    def close(self):
+        with self._lock:
+            self._close_locked()
+
+
 class MCPManager:
-    """Manages connections to external Model Context Protocol (MCP) servers.
-    Parses mcp_config.json and exposes external tools to JARVIS."""
+    """Manages connections to external Model Context Protocol (MCP) servers via JSON-RPC 2.0.
+    Parses mcp_config.json, dynamically discovers tools, and provides robust stdio dispatch."""
 
     def __init__(self, config_path: Path):
         self.config_path = config_path
+        self.cwd = config_path.parent
         self.servers: dict = {}
+        self.sessions: dict[str, MCPSession] = {}
         self.load_config()
+        atexit.register(self.shutdown)
 
     def load_config(self):
         if self.config_path.exists():
             try:
                 data = json.loads(self.config_path.read_text())
                 self.servers = data.get("mcpServers", {})
-                log.info("MCP Config loaded: %d server(s) configured.", len(self.servers))
+                for name, cfg in self.servers.items():
+                    if cfg.get("enabled", True):
+                        self.sessions[name] = MCPSession(name, cfg, self.cwd)
+                log.info("MCP Config loaded: %d server(s) configured.", len(self.sessions))
             except Exception as e:
                 log.warning("MCP Config load error: %s", e)
 
+    def warm_up_async(self):
+        """Asynchronously initialize servers in background so startup remains instantaneous."""
+        def _warm():
+            for name, session in self.sessions.items():
+                try:
+                    session.start(timeout=6.0)
+                except Exception as ex:
+                    log.debug("MCP warmup exception for '%s': %s", name, ex)
+        threading.Thread(target=_warm, daemon=True, name="MCPWarmupThread").start()
+
     def list_tools(self) -> list[dict]:
+        """Exposes MCP tools to J.A.R.V.I.S.'s LLM tool registry."""
         tools = []
-        for name, cfg in self.servers.items():
-            if cfg.get("enabled", True):
+        for name, session in self.sessions.items():
+            # 1. Always provide the resilient query tool
+            tools.append({
+                "name": f"mcp_{name}_query",
+                "description": f"Query external MCP server '{name}'. Send natural language or JSON command.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": f"Operation or natural query for {name} MCP server"}
+                    },
+                    "required": ["query"]
+                }
+            })
+            # 2. Expose discovered native tools if available
+            for t in session.tools:
+                t_name = t.get("name")
+                desc = t.get("description", f"{name} {t_name}")
+                schema = t.get("inputSchema", {"type": "object", "properties": {}})
                 tools.append({
-                    "name": f"mcp_{name}_query",
-                    "description": f"Query external MCP server '{name}' ({cfg.get('command', 'service')})",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "Query or operation string for MCP server"}
-                        },
-                        "required": ["query"]
-                    }
+                    "name": f"mcp_{name}_{t_name}",
+                    "description": f"[{name.upper()} MCP] {desc[:200]}",
+                    "parameters": schema
                 })
         return tools
 
     def execute_tool(self, server_name: str, query: str) -> str:
-        cfg = self.servers.get(server_name)
-        if not cfg or not cfg.get("enabled", True):
-            return f"MCP server '{server_name}' is not configured or disabled."
+        session = self.sessions.get(server_name)
+        if not session:
+            return f"MCP server '{server_name}' is not configured."
+        return session.smart_query(query)
 
-        cmd = cfg.get("command")
-        args = cfg.get("args", [])
-        if not cmd:
-            return f"No command configured for MCP server '{server_name}'."
+    def execute_mcp_tool(self, server_name: str, tool_name: str, arguments: dict) -> str:
+        session = self.sessions.get(server_name)
+        if not session:
+            return f"MCP server '{server_name}' is not configured."
+        return session.call_tool(tool_name, arguments)
 
-        try:
-            full_cmd = [cmd] + args
-            env_vars = dict(os.environ)
-            if "env" in cfg:
-                for k, v in cfg["env"].items():
-                    if isinstance(v, str) and v.startswith("$"):
-                        v = os.environ.get(v[1:], v)
-                    env_vars[k] = str(v)
-            proc = subprocess.run(full_cmd, input=query.encode(), capture_output=True, timeout=10, env=env_vars)
-            out = proc.stdout.decode().strip() or proc.stderr.decode().strip()
-            return f"MCP [{server_name}] Output:\n{out[:500]}"
-        except Exception as e:
-            return f"MCP server '{server_name}' execution error: {e}"
+    def dispatch_tool_call(self, name: str, args: dict) -> str:
+        """Route tool calls matching mcp_* to the right server and tool action."""
+        if not name.startswith("mcp_"):
+            return f"Invalid MCP tool name: {name}"
+
+        suffix = name[4:]  # strip 'mcp_'
+        target_server = None
+        tool_action = None
+
+        # Sort server names by length descending to match google_workspace correctly
+        for sname in sorted(self.sessions.keys(), key=len, reverse=True):
+            if suffix == sname:
+                target_server = sname
+                tool_action = "query"
+                break
+            elif suffix.startswith(sname + "_"):
+                target_server = sname
+                tool_action = suffix[len(sname) + 1:]
+                break
+
+        if not target_server:
+            return f"Could not determine MCP server from tool '{name}'."
+
+        if tool_action == "query":
+            query = args.get("query", "")
+            return self.execute_tool(target_server, query)
+        else:
+            return self.execute_mcp_tool(target_server, tool_action, args)
+
+    def shutdown(self):
+        for session in self.sessions.values():
+            session.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2503,13 +2781,8 @@ class NeuralBrain:
                 return self.call_engine.schedule_call(delay, topic)
             return "Mobile call engine offline."
 
-        elif name.startswith("mcp_"):
-            parts = name.split("_")
-            if len(parts) >= 3 and self.mcp_mgr:
-                server_name = parts[1]
-                query = args.get("query", "")
-                return self.mcp_mgr.execute_tool(server_name, query)
-            return "MCP tool execution failed."
+        elif name.startswith("mcp_") and self.mcp_mgr:
+            return self.mcp_mgr.dispatch_tool_call(name, args)
 
         elif name in ("verify_biometrics", "get_security_status"):
             if _biometric_sentinel:
@@ -5066,8 +5339,19 @@ def main() -> int:
 
     # 5. Initialize Self-Code Manager, MCP Manager, Telegram Bridge, and Mobile Call Engine
     brain_cfg = JARVIS_CFG.get("brain", {})
+    # Ensure Google Drive OAuth token file exists in cloud/deployment environments
+    gdrive_creds_env = os.environ.get("GDRIVE_CREDENTIALS_CONTENT", "").strip()
+    gdrive_file = base_dir / ".gdrive-server-credentials.json"
+    if gdrive_creds_env and not gdrive_file.exists():
+        try:
+            gdrive_file.write_text(gdrive_creds_env)
+            log.info("Provisioned .gdrive-server-credentials.json from environment.")
+        except Exception as e:
+            log.warning("Could not write gdrive credentials: %s", e)
+
     _code_mgr = SelfCodeManager(base_dir, _memory_manager)
     _mcp_mgr = MCPManager(base_dir / "mcp_config.json")
+    _mcp_mgr.warm_up_async()
     
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     telegram_chat_id = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
