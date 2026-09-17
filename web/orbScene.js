@@ -163,6 +163,63 @@ export function createOrbScene(container) {
     return new THREE.BufferGeometry().setFromPoints(pts);
   }
 
+  // Dynamic sound frequency waveform lines
+  const dynamicWaveformLines = [];
+
+  function createDynamicLatRing(radius, lat, segs = 160, lineIndex = 0) {
+    const pts = [];
+    const baseCoords = new Float32Array((segs + 1) * 3);
+    for (let i = 0; i <= segs; i++) {
+      const a = (i / segs) * Math.PI * 2;
+      const x = radius * Math.cos(lat) * Math.cos(a);
+      const y = radius * Math.sin(lat);
+      const z = radius * Math.cos(lat) * Math.sin(a);
+      pts.push(new THREE.Vector3(x, y, z));
+      baseCoords[i * 3] = x;
+      baseCoords[i * 3 + 1] = y;
+      baseCoords[i * 3 + 2] = z;
+    }
+    const geom = new THREE.BufferGeometry().setFromPoints(pts);
+    geom.userData = {
+      type: 'latRing',
+      radius,
+      lat,
+      segs,
+      lineIndex,
+      baseCoords,
+      phaseOffset: (lineIndex * 0.45) % (Math.PI * 2),
+      freqMult: 1.0 + (lineIndex % 5) * 0.35,
+    };
+    return geom;
+  }
+
+  function createDynamicMeridian(radius, lon, segs = 120, lineIndex = 0) {
+    const pts = [];
+    const baseCoords = new Float32Array((segs + 1) * 3);
+    for (let i = 0; i <= segs; i++) {
+      const lat = (i / segs) * Math.PI - Math.PI / 2;
+      const x = radius * Math.cos(lat) * Math.cos(lon);
+      const y = radius * Math.sin(lat);
+      const z = radius * Math.cos(lat) * Math.sin(lon);
+      pts.push(new THREE.Vector3(x, y, z));
+      baseCoords[i * 3] = x;
+      baseCoords[i * 3 + 1] = y;
+      baseCoords[i * 3 + 2] = z;
+    }
+    const geom = new THREE.BufferGeometry().setFromPoints(pts);
+    geom.userData = {
+      type: 'meridian',
+      radius,
+      lon,
+      segs,
+      lineIndex,
+      baseCoords,
+      phaseOffset: (lineIndex * 0.52) % (Math.PI * 2),
+      freqMult: 1.0 + (lineIndex % 4) * 0.45,
+    };
+    return geom;
+  }
+
   // ═══════════════════════════════════════════════
   // LAYER 1: OUTER SHELL
   // ═══════════════════════════════════════════════
@@ -186,6 +243,7 @@ export function createOrbScene(container) {
 
   const CROSS_LINES = 18;
   const CROSS_SPREAD = 0.25;
+  let crossIdx = 0;
   for (let i = 0; i < 4; i++) {
     const lon = (i / 4) * Math.PI * 2;
     for (let j = 0; j < CROSS_LINES; j++) {
@@ -194,7 +252,9 @@ export function createOrbScene(container) {
       const falloff = 1 - Math.abs(t) * 0.7;
       const opacity = 0.85 * falloff;
       const color = Math.abs(t) < 0.3 ? C_BRIGHT : C_MID;
-      outerShell.add(new THREE.Line(meridian(R1, lon + offset, 200), lineMat(color, opacity)));
+      const line = new THREE.Line(createDynamicMeridian(R1, lon + offset, 120, crossIdx++), lineMat(color, opacity));
+      outerShell.add(line);
+      dynamicWaveformLines.push(line);
     }
   }
 
@@ -206,7 +266,9 @@ export function createOrbScene(container) {
     const falloff = 1 - Math.abs(t) * 0.65;
     const opacity = 0.8 * falloff;
     const color = Math.abs(t) < 0.3 ? C_BRIGHT : C_MID;
-    outerShell.add(new THREE.Line(latRing(R1, offset, 200), lineMat(color, opacity)));
+    const line = new THREE.Line(createDynamicLatRing(R1, offset, 160, j), lineMat(color, opacity));
+    outerShell.add(line);
+    dynamicWaveformLines.push(line);
   }
   orbGroup.add(outerShell);
 
@@ -1041,11 +1103,16 @@ export function createOrbScene(container) {
   let flickerTimer = 0;
   let rafId = 0;
   let disposed = false;
+  let smoothedModAmp = 0.0;
+  let wasModulating = false;
 
   function animate() {
     if (disposed) return;
     rafId = requestAnimationFrame(animate);
     const t = clock.getElapsedTime();
+
+    // Natural decay for audio & waveform energy
+    waveformEnergy *= 0.96;
 
     // Decay activation burst
     if (activationBurst > 0) {
@@ -1093,6 +1160,99 @@ export function createOrbScene(container) {
 
     icoWire.scale.setScalar(Math.min(1.35, 1 + surge * 0.2 + audioBoost * 0.3 + voiceBoost * 0.25));
     icoWireMat.opacity = Math.min(0.9, 0.5 + surge * 0.2 + audioBoost * 0.2 + voiceBoost * 0.2);
+
+    // Dynamic Sound Frequency Waveform Modulation on Orb Lines
+    const isVoiceActive = isSpeaking || waveformEnergy > 0.005 || smoothedAudio > 0.02;
+    const targetSpeechModAmp = isVoiceActive
+      ? Math.max(0.12, Math.min(0.38, waveformEnergy * 2.2 + smoothedAudio * 1.2 + (isSpeaking ? 0.16 : 0.0)))
+      : 0.0;
+
+    smoothedModAmp += (targetSpeechModAmp - smoothedModAmp) * 0.2;
+
+    if (smoothedModAmp > 0.001 || wasModulating) {
+      const pcmLen = waveformSamples.length;
+      const isResetting = smoothedModAmp <= 0.001;
+
+      for (let k = 0; k < dynamicWaveformLines.length; k++) {
+        const line = dynamicWaveformLines[k];
+        const geom = line.geometry;
+        const u = geom.userData;
+        const posAttr = geom.attributes.position;
+        const arr = posAttr.array;
+        const base = u.baseCoords;
+        const segs = u.segs;
+
+        if (isResetting) {
+          arr.set(base);
+          posAttr.needsUpdate = true;
+          continue;
+        }
+
+        const pOffset = u.phaseOffset;
+        const fMult = u.freqMult;
+
+        if (u.type === 'latRing') {
+          const lat = u.lat;
+          const rBase = u.radius;
+          const cosLat = Math.cos(lat);
+          const sinLat = Math.sin(lat);
+
+          for (let i = 0; i <= segs; i++) {
+            const angle = (i / segs) * Math.PI * 2;
+            const pcmIdx = Math.floor((i / segs) * pcmLen) % pcmLen;
+            const pcmVal = waveformSamples[pcmIdx] || 0.0;
+
+            // Multi-harmonic audio frequency wave equation
+            const harmonic =
+              0.50 * Math.sin(6 * angle * fMult - 16 * t + pOffset) +
+              0.32 * Math.sin(14 * angle * fMult + 24 * t - pOffset) +
+              0.18 * Math.sin(28 * angle - 38 * t);
+
+            // Fluctuation displacement: sound frequency wave + PCM audio pulse
+            const deltaR = smoothedModAmp * (harmonic * 0.14 + pcmVal * 0.26);
+            const deltaY = smoothedModAmp * (Math.sin(10 * angle * fMult - 20 * t) * 0.07 + pcmVal * 0.09);
+
+            const rCurr = rBase + deltaR;
+            const idx = i * 3;
+            arr[idx] = rCurr * cosLat * Math.cos(angle);
+            arr[idx + 1] = rCurr * sinLat + deltaY;
+            arr[idx + 2] = rCurr * cosLat * Math.sin(angle);
+          }
+          posAttr.needsUpdate = true;
+        } else if (u.type === 'meridian') {
+          const lon = u.lon;
+          const rBase = u.radius;
+          const cosLon = Math.cos(lon);
+          const sinLon = Math.sin(lon);
+
+          for (let i = 0; i <= segs; i++) {
+            const lat = (i / segs) * Math.PI - Math.PI / 2;
+            const cosLat = Math.cos(lat);
+            const sinLat = Math.sin(lat);
+            const pcmIdx = Math.floor((i / segs) * pcmLen) % pcmLen;
+            const pcmVal = waveformSamples[pcmIdx] || 0.0;
+
+            // Multi-harmonic vertical arch waveform
+            const harmonic =
+              0.55 * Math.sin(8 * lat * fMult - 18 * t + pOffset) +
+              0.30 * Math.sin(18 * lat * fMult + 28 * t) +
+              0.15 * Math.sin(32 * lat - 42 * t);
+
+            // Envelope tapers smoothly to zero at the poles (cosLat -> 0)
+            const deltaR = smoothedModAmp * (harmonic * 0.16 + pcmVal * 0.28) * cosLat;
+
+            const rCurr = rBase + deltaR;
+            const idx = i * 3;
+            arr[idx] = rCurr * cosLat * cosLon;
+            arr[idx + 1] = rCurr * sinLat;
+            arr[idx + 2] = rCurr * cosLat * sinLon;
+          }
+          posAttr.needsUpdate = true;
+        }
+      }
+
+      wasModulating = !isResetting;
+    }
 
     // Debris orbits
     debris.forEach((d) => {

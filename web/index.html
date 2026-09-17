@@ -637,6 +637,136 @@
       from { opacity: 0; transform: translateY(4px); }
       to { opacity: 1; transform: translateY(0); }
     }
+
+    /* Holographic Silent Typing Command Modal */
+    .cmd-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 200;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.2s ease, visibility 0.2s ease;
+    }
+    .cmd-modal.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .cmd-modal-backdrop {
+      position: absolute;
+      inset: 0;
+      background: rgba(5, 7, 10, 0.72);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+    .cmd-modal-box {
+      position: relative;
+      z-index: 1;
+      width: min(720px, 92vw);
+      background: rgba(10, 14, 22, 0.88);
+      border: 1px solid var(--color-primary);
+      box-shadow: 0 0 35px var(--color-primary-glow), inset 0 0 20px rgba(0, 0, 0, 0.6);
+      border-radius: 8px;
+      padding: 16px 20px 20px 20px;
+      animation: modalPop 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes modalPop {
+      from { transform: scale(0.94) translateY(10px); opacity: 0; }
+      to { transform: scale(1) translateY(0); opacity: 1; }
+    }
+    .cmd-modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 14px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .cmd-modal-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: var(--color-primary);
+      text-shadow: 0 0 10px var(--color-primary-glow);
+    }
+    .cmd-pulse-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--color-primary);
+      box-shadow: 0 0 8px var(--color-primary);
+      animation: terminal-pulse 1.2s infinite ease-in-out;
+    }
+    .cmd-modal-keys {
+      display: flex;
+      gap: 12px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: rgba(255, 255, 255, 0.6);
+    }
+    .cmd-input-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: rgba(0, 0, 0, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 6px;
+      padding: 6px 10px;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+    .cmd-input-row:focus-within {
+      border-color: var(--color-cyan);
+      box-shadow: 0 0 15px var(--color-cyan-glow);
+    }
+    .cmd-prompt {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--color-cyan);
+      letter-spacing: 1px;
+      flex-shrink: 0;
+      text-shadow: 0 0 8px var(--color-cyan-glow);
+    }
+    #cmd-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: #fff;
+      font-family: var(--font-mono);
+      font-size: 14px;
+      caret-color: var(--color-cyan);
+      letter-spacing: 0.5px;
+    }
+    #cmd-input::placeholder {
+      color: rgba(255, 255, 255, 0.35);
+      font-style: italic;
+      font-size: 12.5px;
+    }
+    .cmd-submit-btn {
+      background: linear-gradient(135deg, var(--color-primary), #dd7700);
+      color: #050608;
+      border: none;
+      border-radius: 4px;
+      padding: 8px 16px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      flex-shrink: 0;
+    }
+    .cmd-submit-btn:hover {
+      filter: brightness(1.2);
+      box-shadow: 0 0 12px var(--color-primary-glow);
+      transform: translateY(-1px);
+    }
   </style>
 </head>
 <body>
@@ -722,10 +852,33 @@
     </div>
   </div>
 
+  <!-- Holographic Silent Typing Command Modal -->
+  <div id="cmd-modal" class="cmd-modal hidden">
+    <div class="cmd-modal-backdrop" id="cmd-backdrop"></div>
+    <div class="cmd-modal-box">
+      <div class="cmd-modal-header">
+        <div class="cmd-modal-title">
+          <span class="cmd-pulse-dot"></span>
+          <span>HOLOGRAPHIC COMMAND INTERFACE // SILENT TRANSMIT</span>
+        </div>
+        <div class="cmd-modal-keys">
+          <span class="key-hint"><span class="key">ENTER</span> TRANSMIT</span>
+          <span class="key-hint"><span class="key">ESC</span> CLOSE</span>
+        </div>
+      </div>
+      <div class="cmd-input-row">
+        <span class="cmd-prompt">// STARK_OS &gt;</span>
+        <input id="cmd-input" type="text" placeholder="Type a command or question for JARVIS (e.g. 'What is the weather today?', 'Open barehands')..." autocomplete="off" spellcheck="false" />
+        <button id="btn-cmd-submit" class="cmd-submit-btn">TRANSMIT</button>
+      </div>
+    </div>
+  </div>
+
   <!-- HUD Bottom Bar -->
   <footer class="hud-footer">
     <div class="shortcuts-legend">
       <div>
+        <span class="shortcut-item" data-shortcut="cmd"><span class="key">/</span> or <span class="key">ENTER</span> type</span> &nbsp; 
         <span class="shortcut-item" data-shortcut="g"><span class="key">G</span> gestures</span> &nbsp; 
         <span class="shortcut-item" data-shortcut="t"><span class="key">T</span> theme</span> &nbsp; 
         <span class="shortcut-item" data-shortcut="v"><span class="key">V</span> voice</span>
@@ -744,6 +897,7 @@
     </div>
 
     <div class="action-controls">
+      <button id="btn-cmd" class="hud-btn" style="border-color: var(--color-cyan); color: var(--color-cyan);"><span class="key" style="margin-right: 4px;">/</span>TYPE [ENTER]</button>
       <button id="btn-toggle-gesture" class="hud-btn">GESTURES [G]: OFF</button>
       <button id="btn-theme" class="hud-btn">THEME [T]: ULTRON</button>
       <button id="btn-soundscape" class="hud-btn btn-active">SOUNDSCAPE [S]: ON</button>

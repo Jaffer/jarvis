@@ -395,11 +395,6 @@ class ProactiveWatchdogDaemon:
                     "phrase": phrase,
                     "timestamp": time.time(),
                 })
-                self.broadcast_fn({
-                    "type": "SUBTITLE",
-                    "role": "jarvis",
-                    "text": phrase,
-                })
             except Exception as e:
                 log.debug("Watchdog UI broadcast notice: %s", e)
 

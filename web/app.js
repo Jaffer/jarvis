@@ -28,17 +28,36 @@ const terminalModelEl = document.getElementById("terminal-model");
 
 let lastUserLineText = "";
 let lastUserLineTime = 0;
+let lastJarvisLineText = "";
+let lastJarvisLineTime = 0;
+
+function normalizeDialogue(t) {
+  return (t || "")
+    .toLowerCase()
+    .replace(/^\[[a-z0-9_\s-]+\]\s*/i, "")
+    .replace(/[^\w\s]/g, "")
+    .trim();
+}
 
 function addTerminalLine(role, text, isTool = false) {
   if (!terminalFeedEl || !text) return;
   const now = Date.now();
-  const cleanText = text.trim().toLowerCase();
-  if (role.toLowerCase() === "user") {
-    if (cleanText === lastUserLineText && (now - lastUserLineTime) < 2500) {
-      return; // Suppress duplicate user line within 2.5s
+  const norm = normalizeDialogue(text);
+  const isUser = role.toLowerCase() === "user";
+
+  if (isUser) {
+    if (norm && norm === lastUserLineText && (now - lastUserLineTime) < 3500) {
+      return; // Suppress duplicate user line within 3.5s
     }
-    lastUserLineText = cleanText;
+    lastUserLineText = norm;
     lastUserLineTime = now;
+  } else {
+    // Suppress duplicate or nested jarvis line within 3.5s
+    if (norm && (norm === lastJarvisLineText || (lastJarvisLineText.length > 5 && lastJarvisLineText.includes(norm)) || (norm.length > 5 && norm.includes(lastJarvisLineText))) && (now - lastJarvisLineTime) < 3500) {
+      return;
+    }
+    lastJarvisLineText = norm;
+    lastJarvisLineTime = now;
   }
 
   const line = document.createElement("div");
@@ -433,10 +452,38 @@ function initTracker() {
   });
 }
 
+let frameRelayTimer = null;
+const relayCanvas = document.createElement("canvas");
+relayCanvas.width = 640;
+relayCanvas.height = 480;
+
+function startBiometricFrameRelay() {
+  if (frameRelayTimer) clearInterval(frameRelayTimer);
+  frameRelayTimer = setInterval(() => {
+    if (!cameraActive || !tracker || !tracker.video || tracker.video.readyState < 2) return;
+    try {
+      const ctx = relayCanvas.getContext("2d");
+      ctx.drawImage(tracker.video, 0, 0, 640, 480);
+      const dataUrl = relayCanvas.toDataURL("image/jpeg", 0.65);
+      sendWsMessage({ type: "OPTICAL_FRAME", frame: dataUrl });
+    } catch (e) {
+      console.debug("Optical frame relay error:", e);
+    }
+  }, 1500);
+}
+
+function stopBiometricFrameRelay() {
+  if (frameRelayTimer) {
+    clearInterval(frameRelayTimer);
+    frameRelayTimer = null;
+  }
+}
+
 async function toggleCamera() {
   if (!tracker) initTracker();
 
   if (cameraActive) {
+    stopBiometricFrameRelay();
     tracker.stop();
     cameraActive = false;
     gestureBtn.textContent = "GESTURES [G]: OFF";
@@ -445,8 +492,14 @@ async function toggleCamera() {
     statusModeEl.textContent = "STANDBY";
     statusHandsEl.textContent = "0 HANDS";
     showToast("Webcam gestures disabled");
+    sendWsMessage({ type: "CAMERA_RELEASE" });
   } else {
-    gestureBtn.textContent = "GESTURES [G]: STARTING...";
+    gestureBtn.textContent = "GESTURES [G]: ACQUIRING...";
+    // 1. Request Python Biometric Sentinel to yield camera hardware
+    sendWsMessage({ type: "CAMERA_ACQUIRE" });
+    // Allow brief moment for PortAudio / OpenCV V4L2 handle release
+    await new Promise((r) => setTimeout(r, 220));
+
     try {
       await tracker.start();
       cameraActive = true;
@@ -454,16 +507,24 @@ async function toggleCamera() {
       gestureBtn.classList.add("btn-active");
       pipContainer.classList.add("active");
       showToast("Webcam gestures active. Pinch to spin, double-pinch to zoom.");
+      startBiometricFrameRelay();
     } catch (err) {
       console.error("Camera access failed:", err);
       gestureBtn.textContent = "GESTURES [G]: FAILED";
       showToast("Camera error: " + err.message);
+      sendWsMessage({ type: "CAMERA_RELEASE" });
       setTimeout(() => {
         gestureBtn.textContent = "GESTURES [G]: OFF";
       }, 3000);
     }
   }
 }
+
+window.addEventListener("beforeunload", () => {
+  if (cameraActive) {
+    sendWsMessage({ type: "CAMERA_RELEASE" });
+  }
+});
 
 // ——— WEB SPEECH API VOICE COMMANDS ———
 let speechRecognition = null;
@@ -933,6 +994,58 @@ async function initLocalMic() {
   }
 }
 
+// ——— HOLOGRAPHIC SILENT TYPING COMMAND MODAL ———
+const cmdModal = document.getElementById("cmd-modal");
+const cmdInput = document.getElementById("cmd-input");
+const cmdBackdrop = document.getElementById("cmd-backdrop");
+const cmdSubmitBtn = document.getElementById("btn-cmd-submit");
+const cmdTriggerBtn = document.getElementById("btn-cmd");
+
+function openCmdModal() {
+  if (!cmdModal || !cmdInput) return;
+  cmdModal.classList.remove("hidden");
+  setTimeout(() => {
+    cmdInput.focus();
+    cmdInput.select();
+  }, 50);
+}
+
+function closeCmdModal() {
+  if (!cmdModal) return;
+  cmdModal.classList.add("hidden");
+  if (cmdInput) cmdInput.blur();
+}
+
+function submitCmd() {
+  if (!cmdInput) return;
+  const text = cmdInput.value.trim();
+  if (!text) {
+    closeCmdModal();
+    return;
+  }
+  closeCmdModal();
+  cmdInput.value = "";
+  addTerminalLine("user", text);
+  showToast(`⌨ "${text}"`, 3000);
+  soundscape.play("thinking");
+  scene.triggerBurst();
+  sendWsMessage({ type: "TEXT_COMMAND", text });
+}
+
+cmdTriggerBtn?.addEventListener("click", openCmdModal);
+cmdBackdrop?.addEventListener("click", closeCmdModal);
+cmdSubmitBtn?.addEventListener("click", submitCmd);
+
+cmdInput?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    submitCmd();
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    closeCmdModal();
+  }
+});
+
 // Button Events
 gestureBtn?.addEventListener("click", toggleCamera);
 themeBtn?.addEventListener("click", cycleTheme);
@@ -954,7 +1067,8 @@ fullscreenBtn?.addEventListener("click", () => {
 document.querySelectorAll(".shortcut-item").forEach((item) => {
   item.addEventListener("click", () => {
     const sc = item.getAttribute("data-shortcut");
-    if (sc === "g") toggleCamera();
+    if (sc === "cmd") openCmdModal();
+    else if (sc === "g") toggleCamera();
     else if (sc === "t") cycleTheme();
     else if (sc === "s") toggleSoundscape();
     else if (sc === "v") toggleVoiceCommands();
@@ -972,8 +1086,17 @@ document.querySelectorAll(".shortcut-item").forEach((item) => {
 
 // Keyboard controls
 window.addEventListener("keydown", (e) => {
-  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") {
+    if (e.key === "Escape") closeCmdModal();
+    return;
+  }
   const key = e.key.toLowerCase();
+
+  if (e.key === "Enter" || e.key === "/" || key === "c") {
+    e.preventDefault();
+    openCmdModal();
+    return;
+  }
 
   if (key === "g") {
     toggleCamera();

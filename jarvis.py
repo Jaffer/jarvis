@@ -39,6 +39,7 @@ Tuning (constants below):
 
 from __future__ import annotations
 
+from typing import Any, Optional, Dict, List, Tuple, Callable
 import asyncio
 import functools
 import hashlib
@@ -851,8 +852,11 @@ class BiometricSentinelDaemon:
         self.last_status = "STANDBY"
         self.last_auth_time = 0.0
         self.last_intruder_alert_ts = 0.0
-        self.intruder_alert_cooldown = 60.0
         self.camera_index = 0
+        self._cap = None
+        self._camera_paused = False
+        self._consecutive_admin_frames = 0
+        self._consecutive_spoof_frames = 0
         self._thread = None
         self._lock = threading.Lock()
         self._latest_frame = None
@@ -958,40 +962,179 @@ class BiometricSentinelDaemon:
                 f"Last optical sensor status: {self.last_status}."
             )
 
+    def pause_camera(self) -> bool:
+        """Yield the camera hardware to the Web HUD for hand gesture tracking."""
+        with self._lock:
+            self._camera_paused = True
+            if self._cap is not None:
+                try:
+                    self._cap.release()
+                    log.info("📷 Biometric Sentinel yielded camera device /dev/video%s to Web HUD", self.camera_index)
+                except Exception as e:
+                    log.debug("Error releasing camera handle: %s", e)
+                self._cap = None
+        return True
+
+    def resume_camera(self) -> bool:
+        """Resume background optical surveillance when Web HUD releases camera."""
+        with self._lock:
+            self._camera_paused = False
+            log.info("📷 Biometric Sentinel resuming local optical sensor capture.")
+        return True
+
+    def feed_external_frame(self, frame_data: Any) -> None:
+        """Process optical video frame forwarded from Web HUD (base64) or direct numpy array."""
+        if frame_data is None or self.face_sentinel is None or cv2 is None:
+            return
+        try:
+            frame = None
+            if isinstance(frame_data, np.ndarray):
+                frame = frame_data
+            elif isinstance(frame_data, str):
+                if not frame_data.strip():
+                    return
+                import base64
+                b64_clean = frame_data.split(",", 1)[1] if "," in frame_data else frame_data
+                raw_bytes = base64.b64decode(b64_clean)
+                nparr = np.frombuffer(raw_bytes, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+            if frame is not None and frame.size > 0:
+                with self._lock:
+                    self._latest_frame = frame.copy()
+                self._process_frame(frame)
+        except Exception as e:
+            log.debug("External frame processing error: %s", e)
+
+    def _process_frame(self, frame: np.ndarray):
+        """Core face recognition and anti-spoofing logic for both local and HUD frames."""
+        if self.face_sentinel is None:
+            return
+        res = self.face_sentinel.evaluate_frame(frame)
+        self.last_status = res.status
+
+        if res.status == "NO_FACE":
+            self._consecutive_admin_frames = 0
+            self._consecutive_spoof_frames = 0
+            return
+
+        elif res.status == "ADMIN_VERIFIED":
+            self._consecutive_spoof_frames = 0
+            self._consecutive_admin_frames += 1
+
+            if self._consecutive_admin_frames >= 2:
+                was_auth = self.authenticated
+                with self._lock:
+                    self.authenticated = True
+                    self.last_auth_time = time.time()
+
+                if not was_auth:
+                    if _sound_engine:
+                        _sound_engine.play("auth_confirmed")
+                    log.info("🛡️ [BIOMETRIC SENTINEL] Admin Verified: %s (Confidence: %.1f%%, Liveness: %.1f%%)",
+                             self.admin_name, res.confidence * 100, res.liveness_score * 100)
+                    broadcast_ui_event({
+                        "type": "SECURITY_STATUS",
+                        "authenticated": True,
+                        "user": self.admin_name,
+                        "threat_level": "NOMINAL",
+                        "liveness_score": round(res.liveness_score, 2),
+                        "confidence": round(res.confidence, 2)
+                    })
+                    broadcast_ui_event({
+                        "type": "SUBTITLE",
+                        "role": "jarvis",
+                        "text": f"Biometric clearance confirmed: {self.admin_name}."
+                    })
+                    if self.voice_engine:
+                        self.voice_engine.speak(f"Biometric clearance confirmed. Welcome, {self.admin_name}.")
+
+        elif res.status == "SPOOF_DETECTED":
+            self._consecutive_admin_frames = 0
+            self._consecutive_spoof_frames += 1
+
+            if self._consecutive_spoof_frames >= 2:
+                with self._lock:
+                    self.authenticated = False
+
+                now = time.time()
+                if now - self.last_intruder_alert_ts > self.intruder_alert_cooldown:
+                    self.last_intruder_alert_ts = now
+                    if _sound_engine:
+                        _sound_engine.play("security_alert")
+                    log.warning("🚨 [SECURITY BREACH] Presentation attack / spoof detected! (%s: %s)",
+                                res.spoof_type, res.details)
+
+                    broadcast_ui_event({
+                        "type": "SECURITY_STATUS",
+                        "authenticated": False,
+                        "threat_level": "SPOOF_DETECTED",
+                        "spoof_type": res.spoof_type,
+                        "details": res.details
+                    })
+                    broadcast_ui_event({
+                        "type": "SUBTITLE",
+                        "role": "jarvis",
+                        "text": f"🚨 Security alert: Presentation attack blocked ({res.spoof_type})."
+                    })
+
+                    # Dispatch Telegram intruder photo alert
+                    try:
+                        ok, enc = cv2.imencode(".jpg", frame)
+                        if ok and self.telegram:
+                            caption = (
+                                f"🚨 *JARVIS INTRUDER / SPOOF ALERT*\n"
+                                f"Threat: Presentation Attack ({res.spoof_type})\n"
+                                f"Analysis: {res.details}\n"
+                                f"Liveness Score: {res.liveness_score:.2f}\n"
+                                f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            )
+                            self.telegram.send_photo(enc.tobytes(), caption=caption)
+                            log.info("Telegram intruder snapshot dispatched successfully.")
+                    except Exception as ex:
+                        log.warning("Could not dispatch intruder snapshot: %s", ex)
+
+                    if self.voice_engine:
+                        self.voice_engine.speak("Security alert. Presentation attack detected. Authorization denied.")
+
+        elif res.status == "GUEST_DETECTED":
+            self._consecutive_admin_frames = 0
+            self._consecutive_spoof_frames = 0
+            with self._lock:
+                self.authenticated = False
+
     def _sentinel_loop(self):
-        """Low-power background loop checking optical feed."""
+        """Low-power background loop checking optical feed with cooperative device sharing."""
         if cv2 is None or self.face_sentinel is None:
             log.info("Biometric Sentinel: OpenCV or FaceSentinel unavailable; optical loop standby.")
             return
 
-        cap = None
-        for dev_idx in (0, 1):
-            try:
-                test_cap = cv2.VideoCapture(dev_idx)
-                if test_cap.isOpened():
-                    cap = test_cap
-                    self.camera_index = dev_idx
-                    log.info("Biometric Sentinel acquired camera device /dev/video%d", dev_idx)
-                    break
-                test_cap.release()
-            except Exception:
+        while self.active:
+            if self._camera_paused:
+                time.sleep(0.5)
                 continue
 
-        if cap is None:
-            log.info("Biometric Sentinel: Optical sensor not accessible. Running in passive standby mode.")
-            while self.active:
-                time.sleep(10)
-            return
+            if self._cap is None:
+                for dev_idx in (self.camera_index, 0, 1):
+                    try:
+                        test_cap = cv2.VideoCapture(dev_idx)
+                        if test_cap.isOpened():
+                            test_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                            test_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                            self._cap = test_cap
+                            self.camera_index = dev_idx
+                            log.info("Biometric Sentinel acquired camera device /dev/video%d", dev_idx)
+                            break
+                        test_cap.release()
+                    except Exception:
+                        continue
 
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                if self._cap is None:
+                    time.sleep(5.0)
+                    continue
 
-        consecutive_admin_frames = 0
-        consecutive_spoof_frames = 0
-
-        while self.active:
             try:
-                ret, frame = cap.read()
+                ret, frame = self._cap.read()
                 if not ret or frame is None:
                     time.sleep(1.0)
                     continue
@@ -999,109 +1142,18 @@ class BiometricSentinelDaemon:
                 with self._lock:
                     self._latest_frame = frame.copy()
 
-                res = self.face_sentinel.evaluate_frame(frame)
-                self.last_status = res.status
-
-                if res.status == "NO_FACE":
-                    consecutive_admin_frames = 0
-                    consecutive_spoof_frames = 0
-                    time.sleep(0.6)
-                    continue
-
-                elif res.status == "ADMIN_VERIFIED":
-                    consecutive_spoof_frames = 0
-                    consecutive_admin_frames += 1
-
-                    if consecutive_admin_frames >= 2:
-                        was_auth = self.authenticated
-                        with self._lock:
-                            self.authenticated = True
-                            self.last_auth_time = time.time()
-
-                        if not was_auth:
-                            if _sound_engine:
-                                _sound_engine.play("auth_confirmed")
-                            log.info("🛡️ [BIOMETRIC SENTINEL] Admin Verified: %s (Confidence: %.1f%%, Liveness: %.1f%%)",
-                                     self.admin_name, res.confidence * 100, res.liveness_score * 100)
-                            broadcast_ui_event({
-                                "type": "SECURITY_STATUS",
-                                "authenticated": True,
-                                "user": self.admin_name,
-                                "threat_level": "NOMINAL",
-                                "liveness_score": round(res.liveness_score, 2),
-                                "confidence": round(res.confidence, 2)
-                            })
-                            broadcast_ui_event({
-                                "type": "SUBTITLE",
-                                "role": "jarvis",
-                                "text": f"Biometric clearance confirmed: {self.admin_name}."
-                            })
-                            if self.voice_engine:
-                                self.voice_engine.speak(f"Biometric clearance confirmed. Welcome, {self.admin_name}.")
-                    time.sleep(0.4)
-
-                elif res.status == "SPOOF_DETECTED":
-                    consecutive_admin_frames = 0
-                    consecutive_spoof_frames += 1
-
-                    if consecutive_spoof_frames >= 2:
-                        with self._lock:
-                            self.authenticated = False
-
-                        now = time.time()
-                        if now - self.last_intruder_alert_ts > self.intruder_alert_cooldown:
-                            self.last_intruder_alert_ts = now
-                            if _sound_engine:
-                                _sound_engine.play("security_alert")
-                            log.warning("🚨 [SECURITY BREACH] Presentation attack / spoof detected! (%s: %s)",
-                                        res.spoof_type, res.details)
-
-                            broadcast_ui_event({
-                                "type": "SECURITY_STATUS",
-                                "authenticated": False,
-                                "threat_level": "SPOOF_DETECTED",
-                                "spoof_type": res.spoof_type,
-                                "details": res.details
-                            })
-                            broadcast_ui_event({
-                                "type": "SUBTITLE",
-                                "role": "jarvis",
-                                "text": f"🚨 Security alert: Presentation attack blocked ({res.spoof_type})."
-                            })
-
-                            # Dispatch Telegram intruder photo alert
-                            try:
-                                ok, enc = cv2.imencode(".jpg", frame)
-                                if ok and self.telegram:
-                                    caption = (
-                                        f"🚨 *JARVIS INTRUDER / SPOOF ALERT*\n"
-                                        f"Threat: Presentation Attack ({res.spoof_type})\n"
-                                        f"Analysis: {res.details}\n"
-                                        f"Liveness Score: {res.liveness_score:.2f}\n"
-                                        f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                                    )
-                                    self.telegram.send_photo(enc.tobytes(), caption=caption)
-                                    log.info("Telegram intruder snapshot dispatched successfully.")
-                            except Exception as ex:
-                                log.warning("Could not dispatch intruder snapshot: %s", ex)
-
-                            if self.voice_engine:
-                                self.voice_engine.speak("Security alert. Presentation attack detected. Authorization denied.")
-                    time.sleep(0.5)
-
-                elif res.status == "GUEST_DETECTED":
-                    consecutive_admin_frames = 0
-                    consecutive_spoof_frames = 0
-                    with self._lock:
-                        self.authenticated = False
-                    time.sleep(0.6)
-
+                self._process_frame(frame)
+                time.sleep(0.4)
             except Exception as e:
                 log.warning("Sentinel loop cycle notice: %s", e)
                 time.sleep(1.0)
 
-        if cap:
-            cap.release()
+        if self._cap:
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+            self._cap = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3011,12 +3063,16 @@ class VoiceEngine:
             log.warning("Transcription error: %s", e)
             self.bus.set_state("idle")
 
-    def _route_voice_command(self, transcript: str):
+    def _route_voice_command(self, transcript: str, origin: str = "mic"):
         """Route a voice command to the appropriate handler."""
         # Deduplication check: drop identical commands received within 1.2s (e.g. Chrome Web Speech vs Python Whisper)
         if _is_duplicate_voice_command(transcript):
             log.debug("Voice: dropped duplicate command within 1.2s: %r", transcript)
             return
+
+        def emit_user_subtitle():
+            if origin != "websocket":
+                broadcast_ui_event({"type": "SUBTITLE", "role": "user", "text": transcript})
 
         # Wake phrase check from WebSocket or direct route
         wake_pattern = re.compile(
@@ -3053,7 +3109,7 @@ class VoiceEngine:
                     city_target = extracted
             report = fetch_weather_report(city_target)
             broadcast_ui_event({"type": "STATUS", "status": "METEOROLOGY // LIVE", "phrase": report})
-            broadcast_ui_event({"type": "SUBTITLE", "role": "user", "text": transcript})
+            emit_user_subtitle()
             broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": report})
             if _sound_engine:
                 _sound_engine.play("whoosh")
@@ -3066,7 +3122,7 @@ class VoiceEngine:
             is_disable = any(w in t for w in ["off", "disable", "stop", "close", "shut"])
             action = "disable" if is_disable else "enable"
             broadcast_ui_event({"type": "TOGGLE_GESTURES", "action": action})
-            broadcast_ui_event({"type": "SUBTITLE", "role": "user", "text": transcript})
+            emit_user_subtitle()
             if is_disable:
                 resp_text = "Webcam gesture manipulation mode offline, sir."
             else:
@@ -3423,7 +3479,7 @@ class VoiceEngine:
             if _sound_engine:
                 _sound_engine.play("thinking")
             broadcast_ui_event({"type": "STATUS", "status": "NEURAL // REASONING", "phrase": transcript})
-            broadcast_ui_event({"type": "SUBTITLE", "role": "user", "text": transcript})
+            emit_user_subtitle()
 
             first_sentence_time: list[float] = []
 
@@ -3471,7 +3527,7 @@ class VoiceEngine:
             return
 
         # Default: echo back or respond
-        broadcast_ui_event({"type": "SUBTITLE", "role": "user", "text": transcript})
+        emit_user_subtitle()
         self.speak(f"I heard: {transcript}")
         self.bus.set_state("idle")
 
@@ -3589,6 +3645,8 @@ class VoiceEngine:
                 while cursor < total_samples and not self._stop_speaking.is_set() and self._active:
                     end = min(cursor + block_size, total_samples)
                     chunk = pcm_f[cursor:end]
+                    if self.bus and len(chunk) > 0:
+                        self.bus.feed_waveform((chunk * 32767.0).astype(np.int16))
                     if len(chunk) < block_size:
                         chunk = np.pad(chunk, (0, block_size - len(chunk)))
                     stream.write(chunk)
@@ -3969,13 +4027,37 @@ def _start_websocket_server(port: int = 8765) -> None:
                             log.info("🎙️ [WS LINK] Incoming Voice Command from HUD: '%s'", transcript)
                             threading.Thread(
                                 target=_voice_engine._route_voice_command,
-                                args=(transcript,),
+                                args=(transcript, "websocket"),
                                 daemon=True,
                             ).start()
+                    elif data.get("type") == "TEXT_COMMAND":
+                        text = data.get("text", "").strip()
+                        if _voice_engine and text:
+                            log.info("⌨️ [WS LINK] Incoming Typed Text Command from HUD: '%s'", text)
+                            threading.Thread(
+                                target=_voice_engine._route_voice_command,
+                                args=(text, "websocket"),
+                                daemon=True,
+                            ).start()
+                    elif data.get("type") == "CAMERA_ACQUIRE":
+                        log.info("📷 [WS LINK] HUD requested camera acquisition for hand tracking")
+                        if _biometric_sentinel:
+                            _biometric_sentinel.pause_camera()
+                        broadcast_ui_event({"type": "CAMERA_YIELDED"})
+                    elif data.get("type") == "CAMERA_RELEASE":
+                        log.info("📷 [WS LINK] HUD released camera")
+                        if _biometric_sentinel:
+                            _biometric_sentinel.resume_camera()
+                    elif data.get("type") == "OPTICAL_FRAME":
+                        frame_b64 = data.get("frame", "")
+                        if _biometric_sentinel and frame_b64:
+                            _biometric_sentinel.feed_external_frame(frame_b64)
                 except Exception as e:
                     log.warning("WS message handling error: %s", e)
         finally:
             _ws_clients.discard(websocket)
+            if _biometric_sentinel and not _ws_clients:
+                _biometric_sentinel.resume_camera()
 
     def _run_loop():
         global _ws_loop
