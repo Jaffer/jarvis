@@ -909,8 +909,10 @@ class MCPManager:
                     log.debug("MCP warmup exception for '%s': %s", name, ex)
         threading.Thread(target=_warm, daemon=True, name="MCPWarmupThread").start()
 
-    def list_tools(self) -> list[dict]:
-        """Exposes MCP tools to J.A.R.V.I.S.'s LLM tool registry in OpenAI Tool format."""
+    def list_tools(self, include_native: bool = False) -> list[dict]:
+        """Exposes MCP tools to J.A.R.V.I.S.'s LLM tool registry in OpenAI Tool format.
+        By default, exposes the 6 concise natural language query tools (mcp_{name}_query)
+        to keep total token payload well within Groq's 8,000 TPM limit (~500 tokens vs 13,000+ tokens)."""
         tools = []
         for name, session in self.sessions.items():
             # 1. Always provide the resilient query tool
@@ -928,19 +930,20 @@ class MCPManager:
                     }
                 }
             })
-            # 2. Expose discovered native tools if available
-            for t in session.tools:
-                t_name = t.get("name")
-                desc = t.get("description", f"{name} {t_name}")
-                schema = t.get("inputSchema", {"type": "object", "properties": {}})
-                tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": f"mcp_{name}_{t_name}",
-                        "description": f"[{name.upper()} MCP] {desc[:200]}",
-                        "parameters": schema
-                    }
-                })
+            # 2. Expose discovered native tools only if explicitly requested
+            if include_native:
+                for t in session.tools:
+                    t_name = t.get("name")
+                    desc = t.get("description", f"{name} {t_name}")
+                    schema = t.get("inputSchema", {"type": "object", "properties": {}})
+                    tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": f"mcp_{name}_{t_name}",
+                            "description": f"[{name.upper()} MCP] {desc[:200]}",
+                            "parameters": schema
+                        }
+                    })
         return tools
 
     def execute_tool(self, server_name: str, query: str) -> str:
@@ -3374,6 +3377,14 @@ class NeuralBrain:
             except Exception as e:
                 log.warning("Groq model %s query notice: %s", m, e)
 
+        # Resilient TPM Overflow Recovery: If tools caused a 413 or failure, retry conversational query without tools
+        if tools:
+            try:
+                log.info("⚡ Groq TPM overflow recovery: retrying prompt without tool schemas...")
+                return self._query_groq(messages, groq_key, tools=None, on_status=on_status)
+            except Exception as e_retry:
+                log.debug("Groq toolless retry notice: %s", e_retry)
+
         return ""
 
     def execute_tool(self, name: str, args: dict) -> str:
@@ -4358,10 +4369,11 @@ class VoiceEngine:
                                 speaker_energy_floor = max(0.02, speaker_energy_floor * 0.92)
                                 current_threshold = max(0.045, ambient_floor * 1.35)
 
-                            # Post-speech echo suppression: reject room reverberations from starting new speech onset
-                            if echo_guard and not in_speech:
+                            # Post-speech echo suppression: reject room reverberations and active speech from starting new speech onset
+                            if (tts_active or echo_guard) and not in_speech:
                                 consecutive_speech_blocks = 0
                                 onset_hangover = 0
+                                recent_pre_speech_blocks.clear()
                                 continue
 
                             is_above = rms > current_threshold
@@ -4441,6 +4453,13 @@ class VoiceEngine:
             return
 
         try:
+            # Discard audio if TTS was actively playing or ended recently (<0.65s echo hangover)
+            now = time.monotonic()
+            if _tts_playing.is_set() or (now - getattr(self, "_last_tts_end_time", 0.0) < 0.65):
+                log.debug("Discarded audio captured during or immediately after TTS playback.")
+                self.bus.set_state("idle")
+                return
+
             # Combine chunks into single array
             audio = np.concatenate(chunks).astype(np.float32) / 32768.0
             if audio.ndim > 1:
