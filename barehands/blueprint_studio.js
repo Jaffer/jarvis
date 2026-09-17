@@ -213,75 +213,207 @@ export class PhysicsSimulator {
 // 3. PROCEDURAL 3D CONSTRUCT BUILDERS
 // ══════════════════════════════════════════════════════════════════════════════
 export class BlueprintBuilder {
-  // ── ARC REACTOR (MARK 42) ──
+  // ── MOVIE-ACCURATE STARK MARK VII ARC REACTOR ──
   static buildArcReactor() {
     const group = new THREE.Group();
     group.name = "construct_root";
     const parts = [];
 
-    // Materials
-    const matCyanWire = new THREE.MeshBasicMaterial({ color: 0x00e5ff, wireframe: true, transparent: true, opacity: 0.85 });
-    const matCyanSolid = new THREE.MeshBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.35 });
-    const matGoldWire = new THREE.MeshBasicMaterial({ color: 0xffb300, wireframe: true, transparent: true, opacity: 0.9 });
-    const matCoreGlow = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95 });
+    // ── High-Tech Stark Alloy & Energy Materials ──
+    const matTitaniumChassis = new THREE.MeshBasicMaterial({ color: 0x37474f, wireframe: false });
+    const matChassisWire = new THREE.MeshBasicMaterial({ color: 0x00e5ff, wireframe: true, transparent: true, opacity: 0.45 });
+    const matCopperCoil = new THREE.MeshBasicMaterial({ color: 0xc87533, wireframe: false });
+    const matCopperWire = new THREE.MeshBasicMaterial({ color: 0xffa040, wireframe: true, transparent: true, opacity: 0.85 });
+    const matAlloyClamp = new THREE.MeshBasicMaterial({ color: 0x90a4ae, wireframe: false });
+    const matStatorPCB = new THREE.MeshBasicMaterial({ color: 0x0a1f22, side: THREE.DoubleSide });
+    const matCyanNeon = new THREE.MeshBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.9 });
+    const matCoreWhiteHot = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.98 });
+    const matFrostedGlass = new THREE.MeshBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.45, side: THREE.DoubleSide });
 
-    // 1. Tokamak Confinement Torus (Outer Shell)
-    const torusGeo = new THREE.TorusGeometry(3.0, 0.45, 20, 48);
-    const torusMesh = new THREE.Mesh(torusGeo, matCyanWire);
-    torusMesh.userData = { home: new THREE.Vector3(), explodeDir: new THREE.Vector3(0, 0, -3.0), label: "[AR-01] Tokamak Plasma Torus · Niobium-Titanium", intensity: 0.8 };
-    group.add(torusMesh);
-    parts.push(torusMesh);
+    // ── Layer 1: Outer Machined Titanium Alloy Chassis Ring ──
+    const outerTorusGeo = new THREE.TorusGeometry(3.15, 0.22, 24, 64);
+    const outerTorus = new THREE.Mesh(outerTorusGeo, matTitaniumChassis);
+    const outerTorusWire = new THREE.Mesh(outerTorusGeo, matChassisWire);
+    outerTorus.add(outerTorusWire);
 
-    // 2. 10 Superconducting Magnetic Solenoids (Arrayed radially)
-    const numCoils = 10;
-    for (let i = 0; i < numCoils; i++) {
-      const angle = (i / numCoils) * Math.PI * 2;
-      const coilGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.4, 16);
-      const coilMesh = new THREE.Mesh(coilGeo, matGoldWire);
-      const cx = Math.cos(angle) * 3.0;
-      const cy = Math.sin(angle) * 3.0;
-      coilMesh.position.set(cx, cy, 0);
-      coilMesh.rotation.z = angle + Math.PI / 2;
-      const radialDir = new THREE.Vector3(Math.cos(angle) * 2.5, Math.sin(angle) * 2.5, 0);
-      coilMesh.userData = { home: coilMesh.position.clone(), explodeDir: radialDir, label: `[AR-03] Solenoid #${i+1} · 12.8 T Confinement`, intensity: 1.2 };
-      group.add(coilMesh);
-      parts.push(coilMesh);
+    const outerCasingGeo = new THREE.CylinderGeometry(3.35, 3.35, 0.35, 64, 1, true);
+    const outerCasing = new THREE.Mesh(outerCasingGeo, new THREE.MeshBasicMaterial({ color: 0x00e5ff, wireframe: true, transparent: true, opacity: 0.4 }));
+    outerTorus.add(outerCasing);
+
+    // 3 Outer Chassis Mounting Lugs
+    for (let l = 0; l < 3; l++) {
+      const lugAng = (l / 3) * Math.PI * 2;
+      const lugGeo = new THREE.BoxGeometry(0.32, 0.6, 0.4);
+      const lugMesh = new THREE.Mesh(lugGeo, matAlloyClamp);
+      lugMesh.position.set(Math.cos(lugAng) * 3.3, Math.sin(lugAng) * 3.3, 0);
+      lugMesh.rotation.z = lugAng + Math.PI / 2;
+      outerTorus.add(lugMesh);
     }
 
-    // 3. Central Vibranium-Palladium Core Lattice
-    const coreGeo = new THREE.IcosahedronGeometry(1.0, 1);
-    const coreMesh = new THREE.Mesh(coreGeo, matCoreGlow);
-    const coreInnerGeo = new THREE.OctahedronGeometry(0.65, 0);
-    const coreInner = new THREE.Mesh(coreInnerGeo, new THREE.MeshBasicMaterial({ color: 0x00e5ff, wireframe: true }));
-    coreMesh.add(coreInner);
-    coreMesh.userData = { home: new THREE.Vector3(), explodeDir: new THREE.Vector3(0, 0, 4.2), label: "[AR-02] Vibranium-Palladium Core Lattice · 14.2 GW Clean Fusion", intensity: 1.5 };
-    group.add(coreMesh);
-    parts.push(coreMesh);
+    outerTorus.userData = {
+      home: new THREE.Vector3(0, 0, 0),
+      explodeDir: new THREE.Vector3(0, 0, -3.2),
+      label: "[AR-01] Machined Titanium Alloy Chassis & Retention Ring",
+      intensity: 0.8
+    };
+    group.add(outerTorus);
+    parts.push(outerTorus);
 
-    // 4. Counter-rotating Plasma Energy Rings
-    const ring1Geo = new THREE.RingGeometry(1.6, 1.75, 32);
-    const ring1 = new THREE.Mesh(ring1Geo, new THREE.MeshBasicMaterial({ color: 0x00e5ff, wireframe: true, side: THREE.DoubleSide }));
-    const ring2Geo = new THREE.RingGeometry(2.1, 2.22, 32);
-    const ring2 = new THREE.Mesh(ring2Geo, new THREE.MeshBasicMaterial({ color: 0xffb300, wireframe: true, side: THREE.DoubleSide }));
-    ring1.userData = { home: new THREE.Vector3(0, 0, 0.1), explodeDir: new THREE.Vector3(0, 0, 2.0), label: "[AR-04] Poloidal Energy Ring A", intensity: 1.0, rotSpeed: 1.5 };
-    ring2.userData = { home: new THREE.Vector3(0, 0, -0.1), explodeDir: new THREE.Vector3(0, 0, -2.0), label: "[AR-05] Poloidal Energy Ring B", intensity: 1.0, rotSpeed: -1.8 };
+    // ── Layer 2: Segmented Stator PCB Baseplate with Backlit Apertures ──
+    const statorGeo = new THREE.RingGeometry(1.65, 3.15, 64);
+    const statorMesh = new THREE.Mesh(statorGeo, matStatorPCB);
+    const statorTracesGeo = new THREE.RingGeometry(2.1, 2.75, 48, 2);
+    const statorTraces = new THREE.Mesh(statorTracesGeo, new THREE.MeshBasicMaterial({ color: 0x00e5ff, wireframe: true, transparent: true, opacity: 0.5 }));
+    statorMesh.add(statorTraces);
+
+    statorMesh.userData = {
+      home: new THREE.Vector3(0, 0, -0.15),
+      explodeDir: new THREE.Vector3(0, 0, -1.8),
+      label: "[AR-02] Segmented Stator PCB & Bus Conduit Sub-Assembly",
+      intensity: 0.9
+    };
+    group.add(statorMesh);
+    parts.push(statorMesh);
+
+    // ── Layer 3: 10 Precision Toroidal Copper Induction Coils ──
+    const numCoils = 10;
+    const coilRadius = 2.45;
+
+    for (let i = 0; i < numCoils; i++) {
+      const angle = (i / numCoils) * Math.PI * 2;
+      const coilGroup = new THREE.Group();
+
+      // Main Copper Core
+      const coreGeo = new THREE.BoxGeometry(0.48, 0.82, 0.58);
+      const coilBody = new THREE.Mesh(coreGeo, matCopperCoil);
+      coilGroup.add(coilBody);
+
+      // Fine Wound Wire Ribs (representing copper winding magnet wire)
+      const wireWrapGeo = new THREE.BoxGeometry(0.51, 0.84, 0.60);
+      const wireWrap = new THREE.Mesh(wireWrapGeo, matCopperWire);
+      coilGroup.add(wireWrap);
+
+      // Triangular Alloy Retention Clamp with Micro-Bolt
+      const clampGeo = new THREE.BoxGeometry(0.24, 0.92, 0.68);
+      const clampMesh = new THREE.Mesh(clampGeo, matAlloyClamp);
+      coilGroup.add(clampMesh);
+
+      // Backlit LED Diffuser Channel
+      const ledGeo = new THREE.BoxGeometry(0.38, 0.7, 0.1);
+      const ledMesh = new THREE.Mesh(ledGeo, matCyanNeon);
+      ledMesh.position.z = -0.32;
+      coilGroup.add(ledMesh);
+
+      // Position radially
+      const cx = Math.cos(angle) * coilRadius;
+      const cy = Math.sin(angle) * coilRadius;
+      coilGroup.position.set(cx, cy, 0);
+      coilGroup.rotation.z = angle + Math.PI / 2;
+
+      // Radial explode vector
+      const radialDir = new THREE.Vector3(Math.cos(angle) * 3.5, Math.sin(angle) * 3.5, 0.2);
+      coilGroup.userData = {
+        home: coilGroup.position.clone(),
+        explodeDir: radialDir,
+        label: `[AR-03] Toroidal Induction Coil #${i+1} · 12.8 T Copper Solenoid`,
+        intensity: 1.2
+      };
+      group.add(coilGroup);
+      parts.push(coilGroup);
+    }
+
+    // ── Layer 4: Laser-Cut Titanium Radial Heat Sink Fins ──
+    const finsGroup = new THREE.Group();
+    const numFins = 20;
+    for (let f = 0; f < numFins; f++) {
+      const fAng = (f / numFins) * Math.PI * 2;
+      const finGeo = new THREE.BoxGeometry(0.06, 0.45, 0.35);
+      const finMesh = new THREE.Mesh(finGeo, matAlloyClamp);
+      finMesh.position.set(Math.cos(fAng) * 1.55, Math.sin(fAng) * 1.55, 0);
+      finMesh.rotation.z = fAng + Math.PI / 2;
+      finsGroup.add(finMesh);
+    }
+    finsGroup.userData = {
+      home: new THREE.Vector3(0, 0, 0),
+      explodeDir: new THREE.Vector3(0, 0, 1.2),
+      label: "[AR-04] Laser-Cut Radial Thermal Heat Sink Array",
+      intensity: 1.0
+    };
+    group.add(finsGroup);
+    parts.push(finsGroup);
+
+    // ── Layer 5: Counter-Rotating Poloidal Magnetic Flux Rings ──
+    const ring1Geo = new THREE.RingGeometry(1.32, 1.48, 48);
+    const ring1 = new THREE.Mesh(ring1Geo, new THREE.MeshBasicMaterial({ color: 0x00f0ff, wireframe: true, side: THREE.DoubleSide }));
+    const ring2Geo = new THREE.RingGeometry(1.82, 1.96, 48);
+    const ring2 = new THREE.Mesh(ring2Geo, new THREE.MeshBasicMaterial({ color: 0x00b0ff, wireframe: true, side: THREE.DoubleSide }));
+    ring1.userData = { home: new THREE.Vector3(0, 0, 0.12), explodeDir: new THREE.Vector3(0, 0, 2.4), label: "[AR-05] Inner Poloidal Flux Guide Ring A", intensity: 1.1, rotSpeed: 1.8 };
+    ring2.userData = { home: new THREE.Vector3(0, 0, -0.12), explodeDir: new THREE.Vector3(0, 0, -2.4), label: "[AR-06] Outer Poloidal Flux Guide Ring B", intensity: 1.1, rotSpeed: -1.4 };
     group.add(ring1);
     group.add(ring2);
     parts.push(ring1, ring2);
 
-    // 5. Ambient Plasma Particle Cloud
-    const particleCount = 350;
+    // ── Layer 6: Central Vibranium-Palladium Fusion Core Capsule ──
+    const coreAssembly = new THREE.Group();
+
+    // Central Bezel Ring
+    const coreBezelGeo = new THREE.TorusGeometry(1.22, 0.08, 16, 48);
+    const coreBezel = new THREE.Mesh(coreBezelGeo, matAlloyClamp);
+    coreAssembly.add(coreBezel);
+
+    // Frosted Lens Disc
+    const lensDiscGeo = new THREE.CircleGeometry(1.18, 48);
+    const lensDisc = new THREE.Mesh(lensDiscGeo, matFrostedGlass);
+    lensDisc.position.z = 0.05;
+    coreAssembly.add(lensDisc);
+
+    // Iconic Triangular Energy Prism Frame
+    const triGroup = new THREE.Group();
+    for (let t = 0; t < 3; t++) {
+      const tAngle = (t / 3) * Math.PI * 2;
+      const barGeo = new THREE.BoxGeometry(0.8, 0.08, 0.15);
+      const bar = new THREE.Mesh(barGeo, matAlloyClamp);
+      bar.position.set(Math.cos(tAngle) * 0.5, Math.sin(tAngle) * 0.5, 0.12);
+      bar.rotation.z = tAngle + Math.PI / 6;
+      triGroup.add(bar);
+    }
+    coreAssembly.add(triGroup);
+
+    // Pure White-Hot Core Fusion Emitter
+    const emitterGeo = new THREE.CylinderGeometry(0.55, 0.55, 0.22, 32);
+    const emitter = new THREE.Mesh(emitterGeo, matCoreWhiteHot);
+    emitter.rotation.x = Math.PI / 2;
+    emitter.position.z = 0.08;
+    coreAssembly.add(emitter);
+
+    // Surrounding Electric Cyan Glow Shell
+    const glowShellGeo = new THREE.SphereGeometry(0.72, 24, 24);
+    const glowShell = new THREE.Mesh(glowShellGeo, new THREE.MeshBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.45, wireframe: true }));
+    coreAssembly.add(glowShell);
+
+    coreAssembly.userData = {
+      home: new THREE.Vector3(0, 0, 0.15),
+      explodeDir: new THREE.Vector3(0, 0, 4.4),
+      label: "[AR-07] Vibranium-Palladium Core Lattice · 14.2 GW Fusion Emitter",
+      intensity: 1.6,
+      isCore: true
+    };
+    group.add(coreAssembly);
+    parts.push(coreAssembly);
+
+    // ── Layer 7: Swirling Plasma Magnetic Flux Particle Swarm ──
+    const particleCount = 450;
     const pGeo = new THREE.BufferGeometry();
     const pPos = new Float32Array(particleCount * 3);
     for (let i = 0; i < particleCount; i++) {
       const theta = Math.random() * Math.PI * 2;
-      const rad = 2.4 + Math.random() * 1.2;
+      const rad = 2.1 + Math.random() * 0.8;
       pPos[i * 3] = Math.cos(theta) * rad;
       pPos[i * 3 + 1] = Math.sin(theta) * rad;
-      pPos[i * 3 + 2] = (Math.random() - 0.5) * 0.8;
+      pPos[i * 3 + 2] = (Math.random() - 0.5) * 0.7;
     }
     pGeo.setAttribute("position", new THREE.BufferAttribute(pPos, 3));
-    const pMat = new THREE.PointsMaterial({ color: 0x00e5ff, size: 0.09, transparent: true, opacity: 0.85 });
+    const pMat = new THREE.PointsMaterial({ color: 0x00f0ff, size: 0.08, transparent: true, opacity: 0.9 });
     const pSystem = new THREE.Points(pGeo, pMat);
     group.add(pSystem);
 
@@ -381,6 +513,33 @@ export class HolographicStudio {
   static calloutsContainer = null;
   static calloutEls = [];
   static active = false;
+  static targetPosition = new THREE.Vector3(0, 0, 0);
+  static targetScale = 1.0;
+  static _dockPosition = "center";
+  static _gestureState = "IDLE";
+  static _pinchDecayFrames = 0;
+  static _prevCursorPos = null;
+  static _prevTwoHandDist = null;
+
+  static dock(mode = "center") {
+    if (!this.currentConstruct || !this.camera) return;
+    this._dockPosition = mode;
+    const vFOV = (this.camera.fov * Math.PI) / 180;
+    const dist = Math.abs(this.camera.position.z - (this.currentConstruct.group ? this.currentConstruct.group.position.z : 0));
+    const visibleHeight = 2 * Math.tan(vFOV / 2) * dist;
+    const visibleWidth = visibleHeight * (window.innerWidth / window.innerHeight);
+
+    if (mode === "left") {
+      this.targetPosition.set(-visibleWidth * 0.30, 0, 0);
+      HolographicAudio.playServo(-1);
+    } else if (mode === "right") {
+      this.targetPosition.set(visibleWidth * 0.30, 0, 0);
+      HolographicAudio.playServo(1);
+    } else {
+      this.targetPosition.set(0, 0, 0);
+      HolographicAudio.playClick();
+    }
+  }
 
   static init() {
     if (this.scene) return;
@@ -513,6 +672,14 @@ export class HolographicStudio {
         <div style="width: 1px; height: 32px; background: rgba(0,229,255,0.3);"></div>
 
         <button id="holo_explode_btn" style="background: rgba(0,229,255,0.15); border: 1px solid #00e5ff; color: #00e5ff; padding: 8px 16px; border-radius: 8px; font-weight: 700; cursor: pointer;">EXPLODED VIEW: OFF</button>
+
+        <div style="width: 1px; height: 32px; background: rgba(0,229,255,0.3);"></div>
+
+        <div style="display: flex; gap: 6px;">
+          <button id="holo_dock_left" class="holo-dock-btn" title="Dock construct to Left of stage [key: [ ]">⇇ DOCK LEFT</button>
+          <button id="holo_center_btn" class="holo-dock-btn" title="Center construct on stage [key: C]">🎯 CENTER</button>
+          <button id="holo_dock_right" class="holo-dock-btn" title="Dock construct to Right of stage [key: ] ]">⇉ DOCK RIGHT</button>
+        </div>
       </div>
     `;
 
@@ -529,6 +696,12 @@ export class HolographicStudio {
         background: rgba(0,229,255,0.35); border-color: #00e5ff; color: #ffffff;
         box-shadow: 0 0 12px rgba(0,229,255,0.5);
       }
+      .holo-dock-btn {
+        background: rgba(0,229,255,0.12); border: 1px solid rgba(0,229,255,0.4); color: #8ff0e4;
+        padding: 6px 12px; border-radius: 6px; font-family: inherit; font-size: 11px; font-weight: 700;
+        letter-spacing: 0.08em; cursor: pointer; transition: all 0.2s;
+      }
+      .holo-dock-btn:hover { background: rgba(0,229,255,0.28); color: #ffffff; box-shadow: 0 0 10px rgba(0,229,255,0.4); }
     `;
     document.head.appendChild(style);
     this.container.appendChild(this.hudEl);
@@ -569,6 +742,10 @@ export class HolographicStudio {
       HolographicAudio.playServo(this.isExploded ? 1 : -1);
     });
 
+    document.getElementById("holo_dock_left")?.addEventListener("click", () => this.dock("left"));
+    document.getElementById("holo_center_btn")?.addEventListener("click", () => this.dock("center"));
+    document.getElementById("holo_dock_right")?.addEventListener("click", () => this.dock("right"));
+
     // Bind Prompt Input Submit
     const submitPrompt = () => {
       const input = document.getElementById("holo_prompt_input");
@@ -599,10 +776,14 @@ export class HolographicStudio {
 
   static _initMouseControls(canvas) {
     let isDragging = false;
+    let dragMode = "rotate"; // "rotate" | "pan"
     let prevX = 0, prevY = 0;
+
+    canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
     canvas.addEventListener("mousedown", (e) => {
       isDragging = true;
+      dragMode = (e.button === 2 || e.shiftKey) ? "pan" : "rotate";
       prevX = e.clientX;
       prevY = e.clientY;
     });
@@ -613,15 +794,30 @@ export class HolographicStudio {
       if (!isDragging || !this.currentConstruct) return;
       const dx = e.clientX - prevX;
       const dy = e.clientY - prevY;
-      this.currentConstruct.group.rotation.y += dx * 0.008;
-      this.currentConstruct.group.rotation.x += dy * 0.008;
       prevX = e.clientX;
       prevY = e.clientY;
+
+      if (dragMode === "pan") {
+        const vFOV = (this.camera.fov * Math.PI) / 180;
+        const dist = Math.abs(this.camera.position.z - (this.currentConstruct.group ? this.currentConstruct.group.position.z : 0));
+        const visibleHeight = 2 * Math.tan(vFOV / 2) * dist;
+        const visibleWidth = visibleHeight * (window.innerWidth / window.innerHeight);
+        this.targetPosition.x += (dx / window.innerWidth) * visibleWidth;
+        this.targetPosition.y -= (dy / window.innerHeight) * visibleHeight;
+      } else {
+        this.currentConstruct.group.rotation.y += dx * 0.008;
+        this.currentConstruct.group.rotation.x += dy * 0.008;
+      }
     });
 
     canvas.addEventListener("wheel", (e) => {
       e.preventDefault();
       this.camera.position.z = Math.max(4.5, Math.min(16.0, this.camera.position.z + e.deltaY * 0.006));
+    });
+
+    canvas.addEventListener("dblclick", () => {
+      this.dock("center");
+      this.targetScale = 1.0;
     });
   }
 
@@ -794,6 +990,14 @@ export class HolographicStudio {
   }
 
   static _renderFrame(dt) {
+    // 0. Smooth translation spring easing towards targetPosition and scale
+    if (this.currentConstruct && this.currentConstruct.group) {
+      this.currentConstruct.group.position.lerp(this.targetPosition, Math.min(1.0, dt * 9.0));
+      const curSc = this.currentConstruct.group.scale.x;
+      const nxtSc = curSc + (this.targetScale - curSc) * Math.min(1.0, dt * 9.0);
+      this.currentConstruct.group.scale.setScalar(nxtSc);
+    }
+
     // 1. Update Physics Solver
     const cName = this.currentConstruct ? this.currentConstruct.name : "arc_reactor";
     this.simulator.update(dt, cName);
@@ -833,10 +1037,16 @@ export class HolographicStudio {
           if (p.rotation) p.rotation.z += p.userData.rotSpeed * dt;
         }
 
-        // Color shifting from Physics Simulator
-        if (p.material && p.userData && p.userData.intensity) {
+        // Color shifting from Physics Simulator (only if explicitly marked for dynamic color shift)
+        if (p.material && p.userData && p.userData.intensity && p.userData.shiftColor) {
           const col = this.simulator.getColor(0x00e5ff, p.userData.intensity);
           if (p.material.color) p.material.color.copy(col);
+        }
+
+        // Core fusion breathing pulse
+        if (p.userData && p.userData.isCore) {
+          const pulse = 1.0 + Math.sin(performance.now() * 0.005) * 0.04;
+          p.scale.set(pulse, pulse, 1.0);
         }
       });
 
@@ -871,43 +1081,83 @@ export class HolographicStudio {
 
   // Multi-Modal Barehands Hand Gesture Tracker Integration
   static updateGestures(cursors) {
-    if (!this.active || !this.currentConstruct) return;
+    if (!this.active || !this.currentConstruct || !this.camera) return;
     if (!cursors) return;
 
     const cursorList = Object.values(cursors).filter(c => c && !c.ghost);
     if (cursorList.length === 0) {
-      this._prevGestureHand = null;
-      this._prevHandDist = null;
+      this._gestureState = "IDLE";
+      this._pinchDecayFrames = 0;
+      this._prevCursorPos = null;
+      this._prevTwoHandDist = null;
       return;
     }
 
+    const vFOV = (this.camera.fov * Math.PI) / 180;
+    const distToConstruct = Math.abs(this.camera.position.z - (this.currentConstruct.group ? this.currentConstruct.group.position.z : 0));
+    const visibleHeight = 2 * Math.tan(vFOV / 2) * distToConstruct;
+    const visibleWidth = visibleHeight * (window.innerWidth / window.innerHeight);
+
     const pinchedHands = cursorList.filter(c => c.pinched);
 
-    if (pinchedHands.length === 1 || cursorList.length === 1) {
-      // 1 Hand (pinched or single tracked cursor) -> Smooth 3D Rotation
-      const h = pinchedHands.length === 1 ? pinchedHands[0] : cursorList[0];
-      if (this._prevGestureHand) {
-        const dx = h.x - this._prevGestureHand.x;
-        const dy = h.y - this._prevGestureHand.y;
-        if (Math.hypot(dx, dy) < 140) {
-          this.currentConstruct.group.rotation.y += dx * 0.007;
-          this.currentConstruct.group.rotation.x += dy * 0.007;
+    if (cursorList.length === 1) {
+      const h = cursorList[0];
+      const isPinched = h.pinched;
+
+      if (isPinched) {
+        this._pinchDecayFrames = 5; // Hysteresis hold
+      } else if (this._pinchDecayFrames > 0) {
+        this._pinchDecayFrames--;
+      }
+
+      const activeDrag = isPinched || this._pinchDecayFrames > 0;
+
+      if (this._prevCursorPos) {
+        const dx = h.x - this._prevCursorPos.x;
+        const dy = h.y - this._prevCursorPos.y;
+
+        if (Math.hypot(dx, dy) < 180) {
+          if (activeDrag) {
+            // ── PINCH-DRAG: 1:1 Camera Frustum Translation (Move construct to side) ──
+            const worldDx = (dx / window.innerWidth) * visibleWidth;
+            const worldDy = -(dy / window.innerHeight) * visibleHeight;
+
+            this.targetPosition.x += worldDx;
+            this.targetPosition.y += worldDy;
+
+            // Soft-clamp within viewport
+            const maxX = visibleWidth * 0.44;
+            const maxY = visibleHeight * 0.42;
+            this.targetPosition.x = Math.max(-maxX, Math.min(maxX, this.targetPosition.x));
+            this.targetPosition.y = Math.max(-maxY, Math.min(maxY, this.targetPosition.y));
+
+            this._gestureState = "DRAG";
+          } else {
+            // ── OPEN-PALM HOVER: 3D Holographic Angular Inspection ──
+            this.currentConstruct.group.rotation.y += dx * 0.007;
+            this.currentConstruct.group.rotation.x += dy * 0.007;
+            this._gestureState = "INSPECT";
+          }
         }
       }
-      this._prevGestureHand = { x: h.x, y: h.y };
-      this._prevHandDist = null;
+      this._prevCursorPos = { x: h.x, y: h.y };
+      this._prevTwoHandDist = null;
+
     } else if (cursorList.length >= 2) {
-      // 2 Hands -> Pull / Spread scrubbing (CAD explode & camera zoom)
+      // ── TWO HANDS: Scale/Depth or Explode Scrub ──
       const [h1, h2] = cursorList;
-      const dist = Math.hypot(h1.x - h2.x, h1.y - h2.y);
-      if (this._prevHandDist != null) {
-        const dDist = dist - this._prevHandDist;
-        if (Math.abs(dDist) < 120) {
+      const currentDist = Math.hypot(h1.x - h2.x, h1.y - h2.y);
+
+      if (this._prevTwoHandDist != null) {
+        const dDist = currentDist - this._prevTwoHandDist;
+        if (Math.abs(dDist) < 150) {
           if (pinchedHands.length >= 2) {
-            // Dual pinch -> Depth Zoom
-            this.camera.position.z = Math.max(4.5, Math.min(16.0, this.camera.position.z - dDist * 0.012));
+            // Two pinched hands: Scale / Camera Depth Zoom
+            this.targetScale = Math.max(0.4, Math.min(2.8, this.targetScale + dDist * 0.004));
+            this.camera.position.z = Math.max(4.5, Math.min(16.0, this.camera.position.z - dDist * 0.01));
+            this._gestureState = "PINCH_SCALE";
           } else {
-            // Dual open hands expand/contract -> Exploded View scrub
+            // Two open hands: Exploded View Scrub
             this.explodeAmount = Math.max(0, Math.min(1.5, this.explodeAmount + dDist * 0.005));
             this.isExploded = this.explodeAmount > 0.25;
             const explodeBtn = document.getElementById("holo_explode_btn");
@@ -915,14 +1165,12 @@ export class HolographicStudio {
               explodeBtn.innerText = `EXPLODED VIEW: ${this.isExploded ? "ON" : "OFF"}`;
               explodeBtn.style.color = this.isExploded ? "#ffb300" : "#00e5ff";
             }
+            this._gestureState = "EXPLODE_SCRUB";
           }
         }
       }
-      this._prevHandDist = dist;
-      this._prevGestureHand = null;
-    } else {
-      this._prevGestureHand = null;
-      this._prevHandDist = null;
+      this._prevTwoHandDist = currentDist;
+      this._prevCursorPos = null;
     }
   }
 }

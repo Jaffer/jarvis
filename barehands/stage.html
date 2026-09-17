@@ -1719,11 +1719,44 @@ async function cycleCam() {
 }
 
 addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+
+  // 3D Holographic Studio spatial positioning shortcuts
+  if (e.key === "[" || e.key === "{") {
+    window.HolographicStudio?.dock("left");
+    toast("Hologram docked LEFT", 1500);
+    return;
+  }
+  if (e.key === "]" || e.key === "}") {
+    window.HolographicStudio?.dock("right");
+    toast("Hologram docked RIGHT", 1500);
+    return;
+  }
+  if (e.key === "x" || e.key === "X") {
+    if (window.HolographicStudio) {
+      window.HolographicStudio.isExploded = !window.HolographicStudio.isExploded;
+      const explodeBtn = document.getElementById("holo_explode_btn");
+      if (explodeBtn) {
+        explodeBtn.innerText = `EXPLODED VIEW: ${window.HolographicStudio.isExploded ? "ON" : "OFF"}`;
+        explodeBtn.style.color = window.HolographicStudio.isExploded ? "#ffb300" : "#00e5ff";
+      }
+      toast(`CAD Exploded View: ${window.HolographicStudio.isExploded ? "ON" : "OFF"}`, 1500);
+    }
+    return;
+  }
+
   // live respawn: re-read the notes AND props trees from disk before
   // redrawing — a freshly dropped file appears on a plain R press
   if (e.key === "r" || e.key === "R") loadTree().then(() => spawnStage());
   if (e.key === "d" || e.key === "D") dbg.style.display = dbg.style.display === "block" ? "none" : "block";
-  if (e.key === "c" || e.key === "C") cycleCam();
+  if (e.key === "c" || e.key === "C") {
+    if (window.HolographicStudio && !e.shiftKey) {
+      window.HolographicStudio.dock("center");
+      toast("Hologram CENTERED", 1500);
+    } else {
+      cycleCam();
+    }
+  }
   if (e.key === "p" || e.key === "P") {
     SAMPLER = { until: performance.now() + 4000, r: [], h8: [], h12: [], h16: [], h20: [], s: [], a: [] };
     toast("OMNI sampler: hold the pose for 4 seconds…", 4000);
