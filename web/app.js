@@ -1,5 +1,5 @@
-import { createOrbScene } from "./orbScene.js";
-import { HandTracker } from "./handTracker.js";
+import { createOrbScene } from "./orbScene.js?v=3.0.0";
+import { HandTracker } from "./handTracker.js?v=3.0.0";
 
 // DOM references
 const container = document.getElementById("canvas-container");
@@ -497,8 +497,8 @@ async function toggleCamera() {
     gestureBtn.textContent = "GESTURES [G]: ACQUIRING...";
     // 1. Request Python Biometric Sentinel to yield camera hardware
     sendWsMessage({ type: "CAMERA_ACQUIRE" });
-    // Allow brief moment for PortAudio / OpenCV V4L2 handle release
-    await new Promise((r) => setTimeout(r, 220));
+    // Allow up to 400ms for OpenCV V4L2 device file descriptor release
+    await new Promise((r) => setTimeout(r, 400));
 
     try {
       await tracker.start();
@@ -511,7 +511,7 @@ async function toggleCamera() {
     } catch (err) {
       console.error("Camera access failed:", err);
       gestureBtn.textContent = "GESTURES [G]: FAILED";
-      showToast("Camera error: " + err.message);
+      showToast("Camera error: " + (err.message || err.name || "Access Denied"));
       sendWsMessage({ type: "CAMERA_RELEASE" });
       setTimeout(() => {
         gestureBtn.textContent = "GESTURES [G]: OFF";
@@ -1004,6 +1004,10 @@ const cmdTriggerBtn = document.getElementById("btn-cmd");
 function openCmdModal() {
   if (!cmdModal || !cmdInput) return;
   cmdModal.classList.remove("hidden");
+  cmdModal.style.display = "flex";
+  cmdModal.style.opacity = "1";
+  cmdModal.style.visibility = "visible";
+  cmdModal.style.pointerEvents = "auto";
   setTimeout(() => {
     cmdInput.focus();
     cmdInput.select();
@@ -1013,6 +1017,10 @@ function openCmdModal() {
 function closeCmdModal() {
   if (!cmdModal) return;
   cmdModal.classList.add("hidden");
+  cmdModal.style.display = "none";
+  cmdModal.style.opacity = "0";
+  cmdModal.style.visibility = "hidden";
+  cmdModal.style.pointerEvents = "none";
   if (cmdInput) cmdInput.blur();
 }
 

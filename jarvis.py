@@ -2777,6 +2777,18 @@ class VoiceEngine:
             threading.Thread(target=self._handsfree_loop, daemon=True, name="voice-handsfree").start()
         log.info("Voice Engine active (PTT key: %s, mode: %s, device: %s)", self._ptt_key, self._mic_mode, input_device)
 
+    def stop(self):
+        """Cleanly stop voice engine threads and close active audio stream."""
+        self._active = False
+        try:
+            stream = getattr(self, "_current_stream", None)
+            if stream is not None:
+                stream.stop()
+                stream.close()
+                self._current_stream = None
+        except Exception:
+            pass
+
     def _load_stt(self):
         """Lazy-load faster-whisper model."""
         if self._stt_model is not None:
@@ -3944,11 +3956,24 @@ def broadcast_ui_event(event_dict: dict) -> None:
         pass
 
 
+class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
+    """HTTP handler that forcefully disables caching so HUD updates immediately apply."""
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+
 def _start_http_server(web_dir: Path, port: int = 5050) -> None:
     """Start local HTTP daemon serving the 3D Hologram HUD."""
     try:
-        handler = functools.partial(SimpleHTTPRequestHandler, directory=str(web_dir))
+        handler = functools.partial(NoCacheHTTPRequestHandler, directory=str(web_dir))
         server = ThreadingHTTPServer(("0.0.0.0", port), handler)
+        server.allow_reuse_address = True
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
         log.info("Holographic 3D Orb UI running at: http://localhost:%d", port)
@@ -4638,7 +4663,9 @@ def _start_global_keyboard_listener() -> bool:
             if key == pynput_keyboard.Key.space:
                 _handle_key_press("space")
             elif key == pynput_keyboard.Key.enter:
-                _handle_key_press("enter")
+                # If Web HUD is actively connected, reserve Enter for HUD typing & command modal
+                if not _ws_clients:
+                    _handle_key_press("enter")
         except Exception:
             pass
 
@@ -4892,6 +4919,16 @@ def main() -> int:
             time.sleep(1.0)
     except KeyboardInterrupt:
         log.info("Shutting down gracefully...")
+        if _voice_engine:
+            try:
+                _voice_engine.stop()
+            except Exception:
+                pass
+        if _biometric_sentinel:
+            try:
+                _biometric_sentinel.stop()
+            except Exception:
+                pass
         if _signal_bus:
             _signal_bus.set_state("idle")
         if _memory_manager:

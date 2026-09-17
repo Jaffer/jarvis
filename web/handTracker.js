@@ -54,10 +54,23 @@ export class HandTracker {
 
   async start() {
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480, facingMode: "user" },
-        audio: false,
-      });
+      try {
+        this.stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480, facingMode: "user" },
+          audio: false,
+        });
+      } catch (mediaErr) {
+        if (mediaErr.name === "NotReadableError" || mediaErr.name === "TrackStartError") {
+          console.warn("Camera device busy (V4L2 releasing), retrying in 400ms...");
+          await new Promise((r) => setTimeout(r, 400));
+          this.stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480, facingMode: "user" },
+            audio: false,
+          });
+        } else {
+          throw mediaErr;
+        }
+      }
       this.video.srcObject = this.stream;
       await this.video.play();
 
