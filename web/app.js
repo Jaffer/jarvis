@@ -547,6 +547,9 @@ window.addEventListener("beforeunload", () => {
 // ——— WEB SPEECH API VOICE COMMANDS ———
 let speechRecognition = null;
 let speechActive = false;
+let isJarvisSpeaking = false;
+let lastJarvisSpeakEndTime = 0;
+let lastJarvisSpokenText = "";
 
 function toggleVoiceCommands() {
   if (speechActive) {
@@ -575,10 +578,37 @@ function startVoiceCommands() {
   const speechBadge = document.getElementById("speech-status");
 
   speechRecognition.onresult = (event) => {
+    const now = Date.now();
+    // Acoustic Echo Gate: drop any speech captured while Jarvis is actively speaking or during 750ms reverb window
+    if (isJarvisSpeaking || (now - lastJarvisSpeakEndTime < 750)) {
+      return;
+    }
+
     for (let i = event.resultIndex; i < event.results.length; i++) {
       const res = event.results[i];
       const rawText = res[0].transcript.trim();
       if (res.isFinal) {
+        // Self-echo filter: check if recognized transcript mirrors Jarvis's recent words
+        const cleanT = rawText.toLowerCase().replace(/[^\w\s]/g, " ").trim();
+        if (lastJarvisSpokenText && (now - lastJarvisSpeakEndTime < 3500) && cleanT.length > 5) {
+          if (lastJarvisSpokenText.includes(cleanT) || cleanT.includes(lastJarvisSpokenText)) {
+            console.log("🎙️ [Acoustic Echo Gate] Dropped self-hearing transcript:", rawText);
+            return;
+          }
+          const wordsT = new Set(cleanT.split(/\s+/).filter(w => w.length > 2));
+          const wordsJ = new Set(lastJarvisSpokenText.split(/\s+/).filter(w => w.length > 2));
+          if (wordsT.size >= 2 && wordsJ.size >= 2) {
+            let intersect = 0;
+            for (const w of wordsT) {
+              if (wordsJ.has(w)) intersect++;
+            }
+            if (intersect / wordsT.size >= 0.6) {
+              console.log("🎙️ [Acoustic Echo Gate] Dropped echo overlap:", rawText);
+              return;
+            }
+          }
+        }
+
         setVoiceState("thinking");
         if (speechBadge) {
           speechBadge.textContent = "VOICE: PROCESSING";
@@ -658,6 +688,11 @@ function stopVoiceCommands() {
 }
 
 function handleVoiceCommand(rawTranscript) {
+  const now = Date.now();
+  if (isJarvisSpeaking || (now - lastJarvisSpeakEndTime < 650)) {
+    console.log("🎙️ [Acoustic Echo Gate] Suppressed command during TTS window:", rawTranscript);
+    return;
+  }
   let transcript = (rawTranscript || "").trim().toLowerCase();
 
   // Strip wake word prefixes if user said "Hey Jarvis", "Jarvis", "Please", etc.
@@ -823,6 +858,10 @@ function handleServerEvent(data) {
       break;
 
     case "SPEAKING":
+      isJarvisSpeaking = !!data.active;
+      if (!data.active) {
+        lastJarvisSpeakEndTime = Date.now();
+      }
       scene.setSpeaking(data.active);
       setVoiceState(data.active ? "speaking" : "idle");
       if (data.active) {
@@ -922,6 +961,9 @@ function handleServerEvent(data) {
       break;
 
     case "SUBTITLE":
+      if (data.role === "jarvis" && data.text) {
+        lastJarvisSpokenText = (data.text || "").toLowerCase().replace(/[^\w\s]/g, " ").trim();
+      }
       addTerminalLine(data.role || "jarvis", data.text || "");
       if (terminalStatusEl) {
         if (data.role === "user") {

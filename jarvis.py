@@ -910,19 +910,22 @@ class MCPManager:
         threading.Thread(target=_warm, daemon=True, name="MCPWarmupThread").start()
 
     def list_tools(self) -> list[dict]:
-        """Exposes MCP tools to J.A.R.V.I.S.'s LLM tool registry."""
+        """Exposes MCP tools to J.A.R.V.I.S.'s LLM tool registry in OpenAI Tool format."""
         tools = []
         for name, session in self.sessions.items():
             # 1. Always provide the resilient query tool
             tools.append({
-                "name": f"mcp_{name}_query",
-                "description": f"Query external MCP server '{name}'. Send natural language or JSON command.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": f"Operation or natural query for {name} MCP server"}
-                    },
-                    "required": ["query"]
+                "type": "function",
+                "function": {
+                    "name": f"mcp_{name}_query",
+                    "description": f"Query external MCP server '{name}'. Send natural language or JSON command.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": f"Operation or natural query for {name} MCP server"}
+                        },
+                        "required": ["query"]
+                    }
                 }
             })
             # 2. Expose discovered native tools if available
@@ -931,9 +934,12 @@ class MCPManager:
                 desc = t.get("description", f"{name} {t_name}")
                 schema = t.get("inputSchema", {"type": "object", "properties": {}})
                 tools.append({
-                    "name": f"mcp_{name}_{t_name}",
-                    "description": f"[{name.upper()} MCP] {desc[:200]}",
-                    "parameters": schema
+                    "type": "function",
+                    "function": {
+                        "name": f"mcp_{name}_{t_name}",
+                        "description": f"[{name.upper()} MCP] {desc[:200]}",
+                        "parameters": schema
+                    }
                 })
         return tools
 
@@ -3358,6 +3364,13 @@ class NeuralBrain:
                     if content:
                         log.info("⚡ Groq Cloud AI response generated via model: %s", m)
                         return content
+            except urllib.error.HTTPError as e:
+                err_body = ""
+                try:
+                    err_body = e.read().decode()
+                except Exception:
+                    pass
+                log.warning("Groq model %s HTTP error %d: %s | Details: %s", m, e.code, e.reason, err_body[:300])
             except Exception as e:
                 log.warning("Groq model %s query notice: %s", m, e)
 
@@ -3939,6 +3952,18 @@ class NeuralBrain:
                 if mcp_tools:
                     tools.extend(mcp_tools)
 
+            # Defensive Normalization: Ensure every tool conforms strictly to OpenAI {"type": "function", "function": {...}}
+            normalized_tools = []
+            for t in tools:
+                if isinstance(t, dict):
+                    if t.get("type") == "function" and "function" in t:
+                        normalized_tools.append(t)
+                    elif "name" in t:
+                        normalized_tools.append({"type": "function", "function": t})
+                    elif "function" in t:
+                        normalized_tools.append({"type": "function", "function": t["function"]})
+            tools = normalized_tools
+
             # RAG context from memory vault
             rag_context = ""
             if any(k in user_prompt.lower() for k in ["remember", "memory", "note", "last session", "vault", "record"]):
@@ -4299,6 +4324,7 @@ class VoiceEngine:
                             peak = float(np.max(np.abs(data)))
                             now = time.monotonic()
                             tts_active = _tts_playing.is_set()
+                            echo_guard = (now - getattr(self, "_last_tts_end_time", 0.0)) < 0.65
 
                             # Stream HUD audio level directly from this single active stream
                             audio_broadcast_count += 1
@@ -4306,7 +4332,7 @@ class VoiceEngine:
                                 broadcast_ui_event({"type": "AUDIO_LEVEL", "rms": float(rms)})
 
                             # Acoustic Double-Clap Wake Detection
-                            if not tts_active and now > clap_cooldown_until:
+                            if not tts_active and not echo_guard and now > clap_cooldown_until:
                                 crest = peak / (rms + 1e-6)
                                 if peak > 0.28 and crest > 3.5 and rms > max(0.055, ambient_floor * 1.7) and not in_speech:
                                     gap = now - last_clap_time
@@ -4322,15 +4348,21 @@ class VoiceEngine:
                                     else:
                                         last_clap_time = now
 
-                            # Dynamic acoustic threshold calculation
-                            if tts_active:
+                            # Dynamic acoustic threshold calculation with Acoustic Echo Guard
+                            if tts_active or echo_guard:
                                 speaker_energy_floor = (1.0 - alpha_speaker) * speaker_energy_floor + alpha_speaker * rms
-                                current_threshold = max(0.12, speaker_energy_floor * 1.65)
+                                current_threshold = max(0.24, speaker_energy_floor * 2.0)
                             else:
                                 if not in_speech and rms < ambient_floor * 1.3:
                                     ambient_floor = (1.0 - alpha_ambient) * ambient_floor + alpha_ambient * rms
                                 speaker_energy_floor = max(0.02, speaker_energy_floor * 0.92)
                                 current_threshold = max(0.045, ambient_floor * 1.35)
+
+                            # Post-speech echo suppression: reject room reverberations from starting new speech onset
+                            if echo_guard and not in_speech:
+                                consecutive_speech_blocks = 0
+                                onset_hangover = 0
+                                continue
 
                             is_above = rms > current_threshold
                             if is_above:
@@ -4499,6 +4531,28 @@ class VoiceEngine:
         if _is_duplicate_voice_command(transcript):
             log.debug("Voice: dropped duplicate command within 1.2s: %r", transcript)
             return
+
+        # Acoustic self-hearing echo filter:
+        # If the transcript echoes what J.A.R.V.I.S. recently spoke within 4.0 seconds, drop it immediately
+        last_spoken = getattr(self, "_last_spoken_text", "")
+        last_tts_end = getattr(self, "_last_tts_end_time", 0.0)
+        time_since_speech = time.monotonic() - last_tts_end
+        if last_spoken and time_since_speech < 4.0:
+            clean_t = re.sub(r"[^\w\s]", "", transcript.lower()).strip()
+            clean_last = re.sub(r"[^\w\s]", "", last_spoken.lower()).strip()
+            if clean_t and clean_last:
+                # Direct substring check
+                if (clean_t in clean_last or clean_last in clean_t) and len(clean_t) > 4:
+                    log.info("🎙️ [ACOUSTIC ECHO SUPPRESSED] Dropped self-hearing transcript (%s): %r", origin, transcript)
+                    return
+                # Word-overlap check (Jaccard similarity > 0.55)
+                words_t = set(w for w in clean_t.split() if len(w) > 2)
+                words_last = set(w for w in clean_last.split() if len(w) > 2)
+                if words_t and words_last:
+                    overlap = len(words_t & words_last) / max(len(words_t), 1)
+                    if overlap >= 0.55:
+                        log.info("🎙️ [ACOUSTIC ECHO SUPPRESSED] Dropped self-hearing transcript by word overlap (%.2f): %r", overlap, transcript)
+                        return
 
         def emit_user_subtitle():
             if origin != "websocket":
@@ -5097,6 +5151,8 @@ class VoiceEngine:
         if self._stop_speaking.is_set():
             return
 
+        self._last_spoken_text = text
+
         api_key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
         if not api_key:
             log.warning("No ELEVENLABS_API_KEY set; TTS skipped.")
@@ -5171,6 +5227,9 @@ class VoiceEngine:
             except Exception as ex2:
                 log.warning("Audio playback error: %s (fallback: %s)", e, ex2)
         finally:
+            # Allow ALSA / PulseAudio hardware DAC buffer to drain cleanly (160ms) before clearing playing state
+            time.sleep(0.16)
+            self._last_tts_end_time = time.monotonic()
             _tts_playing.clear()
             broadcast_ui_event({"type": "SPEAKING", "active": False})
 
