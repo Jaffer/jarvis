@@ -88,9 +88,14 @@ class VisionScanner:
                 log.debug("Acquired frame from Biometric Sentinel buffer (%dx%d)", frame.shape[1], frame.shape[0])
                 return frame
 
+        # If sentinel has camera paused (e.g. Barehands is active), DO NOT touch /dev/video to prevent contention
+        if self.sentinel is not None and getattr(self.sentinel, "_camera_paused", False):
+            log.info("Optical sensor is currently yielded to Barehands/HUD; skipping one-shot capture to avoid device contention.")
+            return None
+
         # 2. Fallback: One-shot direct capture if OpenCV is available
         if cv2 is not None:
-            for dev_idx in (0, 1):
+            for dev_idx in (0,):
                 try:
                     cap = cv2.VideoCapture(dev_idx)
                     if cap.isOpened():

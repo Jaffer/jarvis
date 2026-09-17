@@ -2354,13 +2354,23 @@ async function boot() {
   }
 
   let lastT = performance.now();
+  let lastDetectTs = 0;
 
   function frame(now) {
-    const dt = Math.min((now - lastT) / 1000, 0.05); lastT = now;
-    if (landmarker && cam.currentTime !== lastVideoTs) {
-      lastVideoTs = cam.currentTime;
-      const res = landmarker.detectForVideo(cam, now);
-      const seen = new Set();
+    try {
+      const dt = Math.min((now - lastT) / 1000, 0.05); lastT = now;
+      if (landmarker && cam.currentTime !== lastVideoTs && cam.readyState >= 2) {
+        lastVideoTs = cam.currentTime;
+        let res = null;
+        const detectTs = Math.max(now, (lastDetectTs || 0) + 1);
+        lastDetectTs = detectTs;
+        try {
+          res = landmarker.detectForVideo(cam, detectTs);
+        } catch (lmErr) {
+          // Graceful skip of transient frame/timestamp error
+        }
+        if (res) {
+          const seen = new Set();
       (res.landmarks || []).forEach((lms, i) => {
         seen.add(i);
         const cur = getCursor(i);
@@ -2903,6 +2913,11 @@ async function boot() {
         loadTree().then(() => spawnStage(0.5, 0.42));   // the ring, center
         lastResetT = now; clap.hist.length = 0;
         toast("clap — ring center stage", 900);
+        if (jarvisWs && jarvisWs.readyState === WebSocket.OPEN) {
+          try {
+            jarvisWs.send(JSON.stringify({ type: "CLAP_WAKE", origin: "barehands_visual" }));
+          } catch (e) {}
+        }
       };
       const clapCool = now - lastResetT > 1500 && now - lastClearT > 2500;
       if (cids.length === 2) {
@@ -3002,6 +3017,7 @@ async function boot() {
           }
         }
       }
+      }
 
       frames++;
       if (now - lastFpsTs > 1000) { fps = frames; frames = 0; lastFpsTs = now; }
@@ -3014,7 +3030,11 @@ async function boot() {
     renderModels();           // the 3D holograms draw their frames
     renderRings();            // the ring draws its frames (both pages)
     pushState(now);           // stream the scene to the OBS render page
-    requestAnimationFrame(frame);
+    } catch (err) {
+      console.warn("Barehands frame error guarded:", err);
+    } finally {
+      requestAnimationFrame(frame);
+    }
   }
   requestAnimationFrame(frame);
 }
@@ -3030,7 +3050,7 @@ async function boot() {
 
 let lastPush = 0;
 function pushState(now) {
-  if (now - lastPush < 22) return;
+  if (now - lastPush < 50) return; // Throttled to ~20Hz
   lastPush = now;
   const st = {
     cursors: Object.keys(cursors).sort().map(k => {

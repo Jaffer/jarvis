@@ -120,7 +120,14 @@ except ImportError:
     pynput_keyboard = None
 
 try:
+    os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
+    os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
     import cv2
+    if cv2 is not None:
+        try:
+            cv2.setLogLevel(cv2.LOG_LEVEL_ERROR)
+        except Exception:
+            pass
 except ImportError:
     cv2 = None
 
@@ -1190,6 +1197,7 @@ class BiometricSentinelDaemon:
         self.camera_index = 0
         self._cap = None
         self._camera_paused = False
+        self._barehands_active = False
         self._consecutive_admin_frames = 0
         self._consecutive_spoof_frames = 0
         self._thread = None
@@ -1309,6 +1317,7 @@ class BiometricSentinelDaemon:
         """Yield the camera hardware to the Web HUD for hand gesture tracking."""
         with self._lock:
             self._camera_paused = True
+            self._barehands_active = True
             if self._cap is not None:
                 try:
                     self._cap.release()
@@ -1318,15 +1327,20 @@ class BiometricSentinelDaemon:
                 self._cap = None
         return True
 
-    def resume_camera(self) -> bool:
+    def resume_camera(self, force: bool = False) -> bool:
         """Resume background optical surveillance when Web HUD releases camera."""
         with self._lock:
+            if self._barehands_active and not force:
+                log.debug("Biometric Sentinel: Barehands is active; keeping optical sensor yielded.")
+                return False
+            self._barehands_active = False
             self._camera_paused = False
             log.info("📷 Biometric Sentinel resuming local optical sensor capture.")
         return True
 
     def feed_external_frame(self, frame_data: Any) -> None:
         """Process optical video frame forwarded from Web HUD (base64) or direct numpy array."""
+        self._barehands_active = True
         if frame_data is None or self.face_sentinel is None or cv2 is None:
             return
         try:
@@ -1579,27 +1593,26 @@ class BiometricSentinelDaemon:
             return
 
         while self.active:
-            if self._camera_paused:
+            if self._camera_paused or self._barehands_active:
                 time.sleep(0.5)
                 continue
 
             if self._cap is None:
-                for dev_idx in (self.camera_index, 0, 1):
-                    try:
-                        test_cap = cv2.VideoCapture(dev_idx)
-                        if test_cap.isOpened():
-                            test_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                            test_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                            self._cap = test_cap
-                            self.camera_index = dev_idx
-                            log.info("Biometric Sentinel acquired camera device /dev/video%d", dev_idx)
-                            break
+                try:
+                    test_cap = cv2.VideoCapture(self.camera_index)
+                    if test_cap.isOpened():
+                        test_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                        test_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                        self._cap = test_cap
+                        log.info("Biometric Sentinel acquired camera device /dev/video%d", self.camera_index)
+                    else:
                         test_cap.release()
-                    except Exception:
-                        continue
+                except Exception:
+                    pass
 
                 if self._cap is None:
-                    time.sleep(5.0)
+                    # Camera currently busy or claimed by browser (e.g. Barehands stage) — back off
+                    time.sleep(15.0)
                     continue
 
             try:
@@ -3276,18 +3289,25 @@ class NeuralBrain:
 
     def _query_groq(self, messages: list, groq_key: str, tools: list = None, on_status=None) -> str:
         """24/7 Groq Cloud AI primary engine with dynamic multi-model fallback and autonomous tool execution."""
-        models = ["qwen/qwen3.8-27b", "allam-2-7b", "openai/gpt-oss-20b"]
+        if tools:
+            # Models verified to support OpenAI function calling on Groq
+            models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+        else:
+            models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "allam-2-7b"]
+
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {groq_key}",
             "Content-Type": "application/json",
-            "User-Agent": "Jarvis/1.0 (Linux; x86_64)"
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         for m in models:
             try:
+                # Isolate messages per attempt to avoid mutating state on failed model retries
+                curr_messages = [dict(item) for item in messages]
                 payload = {
                     "model": m,
-                    "messages": messages,
+                    "messages": curr_messages,
                     "temperature": 0.6,
                     "max_tokens": 400
                 }
@@ -3295,14 +3315,14 @@ class NeuralBrain:
                     payload["tools"] = tools
                     payload["tool_choice"] = "auto"
                 req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
-                with urllib.request.urlopen(req, timeout=15) as resp:
+                with urllib.request.urlopen(req, timeout=12) as resp:
                     data = json.loads(resp.read().decode())
                     msg = data.get("choices", [{}])[0].get("message", {})
 
                     # Autonomous tool execution with follow-up synthesis
                     if msg.get("tool_calls"):
                         tool_calls = msg["tool_calls"]
-                        messages.append(msg)
+                        curr_messages.append(msg)
                         for tc in tool_calls:
                             fn = tc.get("function", {})
                             fn_name = fn.get("name")
@@ -3313,7 +3333,7 @@ class NeuralBrain:
                             if on_status:
                                 on_status(f"EXECUTING // {fn_name.upper()}")
                             tool_result = self.execute_tool(fn_name, fn_args)
-                            messages.append({
+                            curr_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc.get("id", "call_1"),
                                 "content": str(tool_result)
@@ -3321,12 +3341,12 @@ class NeuralBrain:
                         # Secondary call for natural spoken synthesis
                         synth_payload = {
                             "model": m,
-                            "messages": messages,
+                            "messages": curr_messages,
                             "temperature": 0.6,
                             "max_tokens": 250
                         }
                         req2 = urllib.request.Request(url, data=json.dumps(synth_payload).encode(), headers=headers)
-                        with urllib.request.urlopen(req2, timeout=15) as resp2:
+                        with urllib.request.urlopen(req2, timeout=12) as resp2:
                             data2 = json.loads(resp2.read().decode())
                             msg2 = data2.get("choices", [{}])[0].get("message", {})
                             synth_content = (msg2.get("content") or "").strip()
@@ -3990,7 +4010,7 @@ class NeuralBrain:
                         data=req_data,
                         headers={"Content-Type": "application/json"}
                     )
-                    with urllib.request.urlopen(req, timeout=60) as r:
+                    with urllib.request.urlopen(req, timeout=7) as r:
                         res = json.loads(r.read())
                         msg = res.get("message", {})
 
@@ -4017,7 +4037,7 @@ class NeuralBrain:
                                 data=req_data2,
                                 headers={"Content-Type": "application/json"}
                             )
-                            with urllib.request.urlopen(req2, timeout=60) as r2:
+                            with urllib.request.urlopen(req2, timeout=7) as r2:
                                 res2 = json.loads(r2.read())
                                 full_response = res2.get("message", {}).get("content", "").strip()
                         else:
@@ -4047,7 +4067,7 @@ class NeuralBrain:
                                             data=req_data2,
                                             headers={"Content-Type": "application/json"}
                                         )
-                                        with urllib.request.urlopen(req2, timeout=60) as r2:
+                                        with urllib.request.urlopen(req2, timeout=7) as r2:
                                             res2 = json.loads(r2.read())
                                             full_response = res2.get("message", {}).get("content", "").strip()
                                 except Exception as parse_err:
@@ -4237,9 +4257,12 @@ class VoiceEngine:
         alpha_speaker = 0.08  # EMA update rate during active TTS playback
         alpha_ambient = 0.03  # EMA update rate for background room drift
         consecutive_speech_blocks = 0
-        min_consecutive_to_trigger = 2  # 2 blocks (~64ms) prevents false acoustic clicks
-        max_utterance_s = 4.5  # Max duration before force-dispatching buffer (prevents infinite lock)
+        min_consecutive_to_trigger = 2  # 2 blocks (~64ms)
+        max_utterance_s = 4.5  # Max duration before force-dispatching buffer
         audio_broadcast_count = 0
+        onset_hangover = 0
+        last_clap_time = 0.0
+        clap_cooldown_until = 0.0
 
         while self._active:
             try:
@@ -4260,8 +4283,8 @@ class VoiceEngine:
                             cal_samples.append(float(np.sqrt(np.mean(d ** 2))))
                         except Exception:
                             pass
-                    ambient_floor = max(0.03, float(np.median(cal_samples))) if cal_samples else 0.05
-                    log.info("🎙️ Acoustic calibration complete: ambient floor = %.4f (threshold = %.4f)", ambient_floor, max(0.07, ambient_floor * 1.70))
+                    ambient_floor = min(0.08, max(0.025, float(np.percentile(cal_samples, 20)))) if cal_samples else 0.04
+                    log.info("🎙️ Acoustic calibration complete: ambient floor = %.4f (threshold = %.4f)", ambient_floor, max(0.045, ambient_floor * 1.35))
 
                     while self._active:
                         audio_buffer = []
@@ -4273,6 +4296,7 @@ class VoiceEngine:
                         while self._active:
                             data, _ = stream.read(block_len)
                             rms = float(np.sqrt(np.mean(data ** 2)))
+                            peak = float(np.max(np.abs(data)))
                             now = time.monotonic()
                             tts_active = _tts_playing.is_set()
 
@@ -4281,29 +4305,53 @@ class VoiceEngine:
                             if audio_broadcast_count % 3 == 0:
                                 broadcast_ui_event({"type": "AUDIO_LEVEL", "rms": float(rms)})
 
+                            # Acoustic Double-Clap Wake Detection
+                            if not tts_active and now > clap_cooldown_until:
+                                crest = peak / (rms + 1e-6)
+                                if peak > 0.28 and crest > 3.5 and rms > max(0.055, ambient_floor * 1.7) and not in_speech:
+                                    gap = now - last_clap_time
+                                    if last_clap_time > 0 and 0.15 <= gap <= 0.85:
+                                        log.info("👏 Acoustic double-clap detected (gap: %.3fs)! Waking up J.A.R.V.I.S.", gap)
+                                        clap_cooldown_until = now + 2.0
+                                        last_clap_time = 0.0
+                                        if not trigger_welcome_sequence("Acoustic: Double clap"):
+                                            broadcast_ui_event({"type": "ACTIVATED", "reason": "Acoustic: Double clap"})
+                                            if _sound_engine:
+                                                _sound_engine.play("wake")
+                                            self.speak("At your command, sir. Ready.")
+                                    else:
+                                        last_clap_time = now
+
                             # Dynamic acoustic threshold calculation
                             if tts_active:
                                 speaker_energy_floor = (1.0 - alpha_speaker) * speaker_energy_floor + alpha_speaker * rms
-                                current_threshold = max(0.14, speaker_energy_floor * 1.85)
+                                current_threshold = max(0.12, speaker_energy_floor * 1.65)
                             else:
-                                if not in_speech and rms < ambient_floor * 1.4:
+                                if not in_speech and rms < ambient_floor * 1.3:
                                     ambient_floor = (1.0 - alpha_ambient) * ambient_floor + alpha_ambient * rms
-                                speaker_energy_floor = max(0.02, speaker_energy_floor * 0.95)
-                                current_threshold = max(0.07, ambient_floor * 1.70)
+                                speaker_energy_floor = max(0.02, speaker_energy_floor * 0.92)
+                                current_threshold = max(0.045, ambient_floor * 1.35)
 
-                            if rms > current_threshold:
+                            is_above = rms > current_threshold
+                            if is_above:
                                 consecutive_speech_blocks += 1
+                                onset_hangover = 2
+                            elif onset_hangover > 0:
+                                onset_hangover -= 1
+                            else:
+                                consecutive_speech_blocks = 0
+
+                            if consecutive_speech_blocks >= min_consecutive_to_trigger or (in_speech and (is_above or onset_hangover > 0)):
                                 if not in_speech:
-                                    if consecutive_speech_blocks >= min_consecutive_to_trigger:
-                                        in_speech = True
-                                        speech_start_time = now
-                                        if tts_active:
-                                            self.interrupt("user_barge_in")
-                                        else:
-                                            self._stop_speaking.clear()
-                                        self.bus.set_state("listening")
-                                        audio_buffer = list(recent_pre_speech_blocks)
-                                        audio_buffer.append((data * 32767.0).astype(np.int16))
+                                    in_speech = True
+                                    speech_start_time = now
+                                    if tts_active:
+                                        self.interrupt("user_barge_in")
+                                    else:
+                                        self._stop_speaking.clear()
+                                    self.bus.set_state("listening")
+                                    audio_buffer = list(recent_pre_speech_blocks)
+                                    audio_buffer.append((data * 32767.0).astype(np.int16))
                                 else:
                                     silence_start = None
                                     audio_buffer.append((data * 32767.0).astype(np.int16))
@@ -4312,7 +4360,6 @@ class VoiceEngine:
                                         in_speech = False
                                         break
                             else:
-                                consecutive_speech_blocks = 0
                                 if in_speech:
                                     audio_buffer.append((data * 32767.0).astype(np.int16))
                                     if silence_start is None:
@@ -4325,7 +4372,7 @@ class VoiceEngine:
                                         break
                                 else:
                                     recent_pre_speech_blocks.append((data * 32767.0).astype(np.int16))
-                                    if len(recent_pre_speech_blocks) > 4:
+                                    if len(recent_pre_speech_blocks) > 5:
                                         recent_pre_speech_blocks.pop(0)
 
                         if audio_buffer and self._active:
@@ -4367,19 +4414,36 @@ class VoiceEngine:
             if audio.ndim > 1:
                 audio = audio[:, 0]
 
-            # Skip audio shorter than 0.6 seconds (transient clicks/pops)
-            if len(audio) < int(16000 * 0.6):
-                log.debug("Audio clip too short (<0.6s); ignoring.")
+            # Skip audio shorter than 0.38 seconds (transient clicks/pops)
+            if len(audio) < int(16000 * 0.38):
+                log.debug("Audio clip too short (<0.38s); ignoring.")
                 self.bus.set_state("idle")
                 return
 
-            # Transcribe
-            segments, info = self._stt_model.transcribe(audio, beam_size=5)
+            # Transcribe with zero temperature, VAD filtering, and anti-hallucination thresholds
+            segments, info = self._stt_model.transcribe(
+                audio,
+                beam_size=5,
+                temperature=0.0,
+                condition_on_previous_text=False,
+                no_speech_threshold=0.55,
+                compression_ratio_threshold=2.2,
+                log_prob_threshold=-0.9,
+                vad_filter=True,
+            )
+
+            # Drop silence / ambient noise when no_speech_prob is high
+            no_speech_prob = getattr(info, "no_speech_prob", 0.0)
+            if no_speech_prob > 0.55:
+                log.info("Ignored background ambient noise (no_speech_prob=%.2f)", no_speech_prob)
+                self.bus.set_state("idle")
+                return
+
             transcript = " ".join(seg.text for seg in segments).strip()
 
             # ── 0. Wake Phrase Check (before hallucination filter) ──
             wake_pattern = re.compile(
-                r"\b(?:(wake\s*up|wakeup)(?:[,\s]+(?:please\s+)?jarvis)?|jarvis[,\s]+(?:please\s+)?(wake\s*up|wakeup))\b",
+                r"\b(?:(wake\s*up|wakeup)(?:[,\s]+(?:please\s+)?jarvis)?|jarvis[,\s]+(?:please\s+)?(wake\s*up|wakeup)|hey\s+jarvis|jarvis)\b",
                 re.IGNORECASE,
             )
             wake_match = wake_pattern.search(transcript)
@@ -4442,7 +4506,7 @@ class VoiceEngine:
 
         # Wake phrase check from WebSocket or direct route
         wake_pattern = re.compile(
-            r"\b(?:(wake\s*up|wakeup)(?:[,\s]+(?:please\s+)?jarvis)?|jarvis[,\s]+(?:please\s+)?(wake\s*up|wakeup))\b",
+            r"\b(?:(wake\s*up|wakeup)(?:[,\s]+(?:please\s+)?jarvis)?|jarvis[,\s]+(?:please\s+)?(wake\s*up|wakeup)|hey\s+jarvis|jarvis)\b",
             re.IGNORECASE,
         )
         wake_match = wake_pattern.search(transcript)
@@ -5551,6 +5615,14 @@ def _start_websocket_server(port: int = 8765) -> None:
                         if _persona_engine:
                             confirmation = _persona_engine.calibrate(mode=mode, wit_level=wit)
                             log.info("🎭 [WS LINK] Persona calibrated from HUD: %s", confirmation)
+                    elif data.get("type") == "CLAP_WAKE":
+                        log.info("👏 [WS LINK] Visual clap wake trigger received from Barehands HUD!")
+                        if not trigger_welcome_sequence("Barehands: Visual Clap Gesture"):
+                            broadcast_ui_event({"type": "ACTIVATED", "reason": "Barehands: Visual Clap Gesture"})
+                            if _sound_engine:
+                                _sound_engine.play("wake")
+                            if _voice_engine:
+                                _voice_engine.speak("Online, sir. Systems receptive.")
                     elif data.get("type") == "DISPATCH_FLEET_TASK":
                         bot_id = data.get("bot_id")
                         task = data.get("task", "Diagnostic sweep")
@@ -5564,8 +5636,11 @@ def _start_websocket_server(port: int = 8765) -> None:
                     log.warning("WS message handling error: %s", e)
         finally:
             _ws_clients.discard(websocket)
-            if _biometric_sentinel and not _ws_clients:
-                _biometric_sentinel.resume_camera()
+            def _delayed_check():
+                time.sleep(3.5)
+                if _biometric_sentinel and not _ws_clients:
+                    _biometric_sentinel.resume_camera(force=False)
+            threading.Thread(target=_delayed_check, daemon=True).start()
 
     def _run_loop():
         global _ws_loop
