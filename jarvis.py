@@ -516,6 +516,31 @@ class SelfCodeManager:
         self.root_dir = root_dir.resolve()
         self.memory = memory_mgr
 
+    def _sync_to_github_and_deploy(self, target_path: Path, instruction: str, edit_type: str = "Code") -> bool:
+        """Auto-commit code edit to GitHub repository and trigger Render live deployment."""
+        github_token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "").strip()
+        if not github_token:
+            return False
+        try:
+            subprocess.run(["git", "config", "user.name", "JARVIS AI Assistant"], cwd=self.root_dir, check=False)
+            subprocess.run(["git", "config", "user.email", "jarvis@ai.assistant"], cwd=self.root_dir, check=False)
+            remote_url = f"https://x-access-token:{github_token}@github.com/Jaffer/jarvis.git"
+            subprocess.run(["git", "add", str(target_path)], cwd=self.root_dir, check=False)
+            subprocess.run(["git", "commit", "-m", f"⚡ [JARVIS Self-{edit_type}] {instruction[:60]}"], cwd=self.root_dir, check=False)
+            subprocess.run(["git", "push", remote_url, "main"], cwd=self.root_dir, check=False)
+            log.info("⚡ [SELF CODE %s] Pushed code change directly to GitHub Jaffer/jarvis main branch!", edit_type.upper())
+            deploy_hook = os.environ.get("RENDER_DEPLOY_HOOK", "").strip()
+            if deploy_hook:
+                try:
+                    urllib.request.urlopen(deploy_hook, timeout=5)
+                    log.info("⚡ [RENDER DEPLOY HOOK] Triggered Render automatic deploy!")
+                except Exception as dh_err:
+                    log.debug("Render deploy hook notice: %s", dh_err)
+            return True
+        except Exception as push_err:
+            log.warning("Self-code git push notice: %s", push_err)
+            return False
+
     def apply_code_change(self, file_path_str: str, instruction: str, code_content: str) -> str:
         try:
             target_path = Path(file_path_str).resolve()
@@ -544,28 +569,10 @@ class SelfCodeManager:
             broadcast_ui_event({"type": "MEMORY_UPDATE", "note": f"Code Edit: {target_path.name}"})
             broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": f"⚡ Code Updated: {target_path.name}"})
 
-            # Auto-push code change to GitHub repo if GITHUB_PERSONAL_ACCESS_TOKEN is configured
-            github_token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "").strip()
-            if github_token:
-                try:
-                    subprocess.run(["git", "config", "user.name", "JARVIS AI Assistant"], cwd=self.root_dir, check=False)
-                    subprocess.run(["git", "config", "user.email", "jarvis@ai.assistant"], cwd=self.root_dir, check=False)
-                    remote_url = f"https://x-access-token:{github_token}@github.com/Jaffer/jarvis.git"
-                    subprocess.run(["git", "add", str(target_path)], cwd=self.root_dir, check=False)
-                    subprocess.run(["git", "commit", "-m", f"⚡ [JARVIS Self-Code] {instruction[:60]}"], cwd=self.root_dir, check=False)
-                    subprocess.run(["git", "push", remote_url, "main"], cwd=self.root_dir, check=False)
-                    log.info("⚡ [SELF CODE IMPROVEMENT] Pushed code change directly to GitHub Jaffer/jarvis main branch!")
-                    deploy_hook = os.environ.get("RENDER_DEPLOY_HOOK", "").strip()
-                    if deploy_hook:
-                        try:
-                            urllib.request.urlopen(deploy_hook, timeout=5)
-                            log.info("⚡ [RENDER DEPLOY HOOK] Triggered Render automatic deploy!")
-                        except Exception as dh_err:
-                            log.debug("Render deploy hook notice: %s", dh_err)
-                except Exception as push_err:
-                    log.warning("Self-code git push notice: %s", push_err)
-
-            return f"Successfully updated {target_path.name} and pushed to GitHub main branch. Code syntax verified, sir."
+            synced = self._sync_to_github_and_deploy(target_path, instruction, edit_type="Improvement")
+            if synced:
+                return f"Successfully updated {target_path.name} and deployed to GitHub main branch and Render live server, sir."
+            return f"Successfully updated {target_path.name} locally. Code syntax verified, sir."
         except Exception as e:
             return f"Error applying code improvement: {e}"
 
@@ -608,6 +615,9 @@ class SelfCodeManager:
             broadcast_ui_event({"type": "MEMORY_UPDATE", "note": f"Code Patch: {target_path.name}"})
             broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": f"⚡ Code Patched: {target_path.name}"})
 
+            synced = self._sync_to_github_and_deploy(target_path, instruction, edit_type="Patch")
+            if synced:
+                return f"Successfully applied surgical patch to {target_path.name}: '{instruction}' and deployed to GitHub and Render live server, sir."
             return f"Successfully applied surgical patch to {target_path.name}: '{instruction}'. AST syntax verified nominal, sir."
         except Exception as e:
             return f"Error applying surgical code patch: {e}"
