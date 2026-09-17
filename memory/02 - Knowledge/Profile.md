@@ -20,3 +20,4 @@
 - **location**: Hyderabad
 - **voice_command_accuracy**: User frequently mispronounces 'bare hands' as 'bear hands' in voice commands.
 - **admin_enrollment_status**: in_progress_75_percent
+- **role**: driver
