@@ -520,9 +520,13 @@ export class HolographicStudio {
   static _pinchDecayFrames = 0;
   static _prevCursorPos = null;
   static _prevTwoHandDist = null;
+  static _isDragging = false;
+  static _dragAnchor = null;
 
   static dock(mode = "center") {
     if (!this.currentConstruct || !this.camera) return;
+    this._isDragging = false;
+    this._dragAnchor = null;
     this._dockPosition = mode;
     const vFOV = (this.camera.fov * Math.PI) / 180;
     const dist = Math.abs(this.camera.position.z - (this.currentConstruct.group ? this.currentConstruct.group.position.z : 0));
@@ -1050,8 +1054,10 @@ export class HolographicStudio {
         }
       });
 
-      // Ambient idle rotation
-      this.currentConstruct.group.rotation.y += dt * 0.25;
+      // Ambient idle rotation (pauses during active drag or inspection)
+      if (!this._isDragging && this._gestureState !== "INSPECT") {
+        this.currentConstruct.group.rotation.y += dt * 0.25;
+      }
 
       // Particle rotations
       if (this.currentConstruct.pSystem) {
@@ -1090,6 +1096,8 @@ export class HolographicStudio {
       this._pinchDecayFrames = 0;
       this._prevCursorPos = null;
       this._prevTwoHandDist = null;
+      this._isDragging = false;
+      this._dragAnchor = null;
       return;
     }
 
@@ -1105,46 +1113,68 @@ export class HolographicStudio {
       const isPinched = h.pinched;
 
       if (isPinched) {
-        this._pinchDecayFrames = 5; // Hysteresis hold
+        this._pinchDecayFrames = 8; // Grace hold for fast movement
       } else if (this._pinchDecayFrames > 0) {
         this._pinchDecayFrames--;
       }
 
       const activeDrag = isPinched || this._pinchDecayFrames > 0;
 
-      if (this._prevCursorPos) {
-        const dx = h.x - this._prevCursorPos.x;
-        const dy = h.y - this._prevCursorPos.y;
+      // Unproject screen coordinates directly to 3D world space at construct depth Z
+      const handWorldX = (h.x / window.innerWidth - 0.5) * visibleWidth;
+      const handWorldY = -(h.y / window.innerHeight - 0.5) * visibleHeight;
 
-        if (Math.hypot(dx, dy) < 180) {
-          if (activeDrag) {
-            // ── PINCH-DRAG: 1:1 Camera Frustum Translation (Move construct to side) ──
-            const worldDx = (dx / window.innerWidth) * visibleWidth;
-            const worldDy = -(dy / window.innerHeight) * visibleHeight;
+      if (activeDrag) {
+        if (!this._isDragging || !this._dragAnchor) {
+          this._isDragging = true;
+          this._dragAnchor = {
+            startHandX: handWorldX,
+            startHandY: handWorldY,
+            startObjX: this.currentConstruct.group.position.x,
+            startObjY: this.currentConstruct.group.position.y
+          };
+          HolographicAudio.playConfirm();
+        }
 
-            this.targetPosition.x += worldDx;
-            this.targetPosition.y += worldDy;
+        // Direct 1:1 World-Space Grab Translation
+        const targetX = this._dragAnchor.startObjX + (handWorldX - this._dragAnchor.startHandX);
+        const targetY = this._dragAnchor.startObjY + (handWorldY - this._dragAnchor.startHandY);
 
-            // Soft-clamp within viewport
-            const maxX = visibleWidth * 0.44;
-            const maxY = visibleHeight * 0.42;
-            this.targetPosition.x = Math.max(-maxX, Math.min(maxX, this.targetPosition.x));
-            this.targetPosition.y = Math.max(-maxY, Math.min(maxY, this.targetPosition.y));
+        // Soft-clamp within visible viewport
+        const maxX = visibleWidth * 0.46;
+        const maxY = visibleHeight * 0.44;
+        this.targetPosition.x = Math.max(-maxX, Math.min(maxX, targetX));
+        this.targetPosition.y = Math.max(-maxY, Math.min(maxY, targetY));
 
-            this._gestureState = "DRAG";
-          } else {
-            // ── OPEN-PALM HOVER: 3D Holographic Angular Inspection ──
+        // Direct follow during pinch-drag (instant, responsive 1:1 movement)
+        this.currentConstruct.group.position.lerp(this.targetPosition, 0.75);
+        this._gestureState = "DRAG";
+      } else {
+        // Pinch released
+        if (this._isDragging) {
+          this._isDragging = false;
+          this._dragAnchor = null;
+        }
+
+        // ── OPEN-PALM HOVER: 3D Holographic Angular Inspection ──
+        if (this._prevCursorPos) {
+          const dx = h.x - this._prevCursorPos.x;
+          const dy = h.y - this._prevCursorPos.y;
+          if (Math.hypot(dx, dy) < 180) {
             this.currentConstruct.group.rotation.y += dx * 0.007;
             this.currentConstruct.group.rotation.x += dy * 0.007;
             this._gestureState = "INSPECT";
           }
         }
       }
+
       this._prevCursorPos = { x: h.x, y: h.y };
       this._prevTwoHandDist = null;
 
     } else if (cursorList.length >= 2) {
       // ── TWO HANDS: Scale/Depth or Explode Scrub ──
+      this._isDragging = false;
+      this._dragAnchor = null;
       const [h1, h2] = cursorList;
       const currentDist = Math.hypot(h1.x - h2.x, h1.y - h2.y);
 

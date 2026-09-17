@@ -287,7 +287,10 @@ setTimeout(function () {
 <video id="cam" autoplay playsinline muted></video>
 <div id="behind"></div>
 <div id="boot">BAREHANDS<br><span style="color:#a8d8cf;font-size:12px;letter-spacing:0.22em">by jaredrhod</span><br><span style="color:#a8d8cf;font-size:13px">loading hand tracker… allow the camera when asked</span></div>
-<div id="hint">tap the RING = orbs · tap an orb = its tree · TAP a card = open · pinch-drag = move · hold still ~1s = 3D rotate · two hands = scale · TAP an open item = close · CLAP (palms together, fingers up) = ring center-stage · CLAW: flash open, claw, aim, hold the strain 2s, SNAP = force pull · empty pinch dragged sideways = explode scrub · R respawn / C camera / D debug</div>
+<canvas id="holo_hand_canvas" style="position:fixed; top:0; left:0; width:100vw; height:100vh; pointer-events:none; z-index:3500;"></canvas>
+<div id="holo_skeleton_btn" style="position:fixed; top:16px; right:260px; z-index:4000; background:rgba(5,25,30,0.75); border:1px solid rgba(0,229,255,0.6); border-radius:20px; padding:6px 14px; font-family:'SF Mono',Menlo,monospace; font-size:11px; font-weight:700; color:#00e5ff; letter-spacing:0.12em; cursor:pointer; backdrop-filter:blur(8px); box-shadow:0 0 14px rgba(0,229,255,0.3); transition:all 0.2s; user-select:none;" onclick="if(window.toggleHandSkeleton){ window.toggleHandSkeleton(); }">
+  🦴 HAND HUD: ON
+</div>
 <div id="holo_trigger_btn" style="position:fixed; top:16px; right:20px; z-index:4000; background:rgba(5,25,30,0.75); border:1px solid rgba(0,229,255,0.6); border-radius:20px; padding:6px 16px; font-family:'SF Mono',Menlo,monospace; font-size:11px; font-weight:700; color:#00e5ff; letter-spacing:0.12em; cursor:pointer; backdrop-filter:blur(8px); box-shadow:0 0 14px rgba(0,229,255,0.3); transition:all 0.2s; user-select:none;" onclick="if(window.HolographicStudio){ window.HolographicStudio.active ? window.HolographicStudio.hide() : window.HolographicStudio.show(); }">
   ⚛ 3D HOLOGRAPHIC BLUEPRINT
 </div>
@@ -2101,6 +2104,141 @@ async function boot() {
   await loadTree();
   spawnStage();
   toast("barehands v1.0", 2000);  // build fingerprint
+
+  let SHOW_HAND_HUD = true;
+  window.toggleHandSkeleton = function() {
+    SHOW_HAND_HUD = !SHOW_HAND_HUD;
+    const btn = document.getElementById("holo_skeleton_btn");
+    if (btn) {
+      btn.innerText = `🦴 HAND HUD: ${SHOW_HAND_HUD ? "ON" : "OFF"}`;
+      btn.style.color = SHOW_HAND_HUD ? "#00e5ff" : "#7fb3ab";
+      btn.style.borderColor = SHOW_HAND_HUD ? "rgba(0,229,255,0.6)" : "rgba(127,179,171,0.4)";
+    }
+    const canvas = document.getElementById("holo_hand_canvas");
+    if (canvas && !SHOW_HAND_HUD) {
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    toast(`Hand Skeleton HUD: ${SHOW_HAND_HUD ? "ACTIVE" : "HIDDEN"}`, 1200);
+  };
+
+  const HAND_BONES = [
+    [0, 1], [0, 5], [5, 9], [9, 13], [13, 17], [0, 17],
+    [1, 2], [2, 3], [3, 4],
+    [5, 6], [6, 7], [7, 8],
+    [9, 10], [10, 11], [11, 12],
+    [13, 14], [14, 15], [15, 16],
+    [17, 18], [18, 19], [19, 20]
+  ];
+
+  function renderHandSkeleton(cursors) {
+    const canvas = document.getElementById("holo_hand_canvas");
+    if (!canvas || !SHOW_HAND_HUD) return;
+    if (canvas.width !== window.innerWidth || canvas.height !== window.innerHeight) {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const activeCursors = Object.values(cursors).filter(c => c && !c.ghost && c.lms);
+    if (activeCursors.length === 0) return;
+
+    activeCursors.forEach((cur) => {
+      const lms = cur.lms;
+      const pts = lms.map(lm => toScreen(lm));
+
+      // 1. Draw Bones
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = cur.pinched ? "rgba(255, 179, 0, 0.75)" : "rgba(0, 229, 255, 0.50)";
+      ctx.shadowColor = cur.pinched ? "#ffb300" : "#00e5ff";
+      ctx.shadowBlur = cur.pinched ? 8 : 4;
+
+      HAND_BONES.forEach(([i, j]) => {
+        ctx.beginPath();
+        ctx.moveTo(pts[i].x, pts[i].y);
+        ctx.lineTo(pts[j].x, pts[j].y);
+        ctx.stroke();
+      });
+
+      // 2. Draw Joints
+      pts.forEach((p, i) => {
+        const isTip = (i === 4 || i === 8 || i === 12 || i === 16 || i === 20);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, isTip ? 4.5 : 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = isTip
+          ? (cur.pinched && (i === 4 || i === 8) ? "#ffb300" : "#00f0ff")
+          : "rgba(0, 229, 255, 0.75)";
+        ctx.fill();
+      });
+
+      // 3. Pinch Magnetic Arc & Contact Reticle
+      const p4 = pts[4], p8 = pts[8];
+      const midX = (p4.x + p8.x) / 2, midY = (p4.y + p8.y) / 2;
+
+      if (cur.pinched) {
+        ctx.beginPath();
+        ctx.arc(midX, midY, 14, 0, Math.PI * 2);
+        ctx.strokeStyle = "#ffb300";
+        ctx.lineWidth = 2;
+        ctx.shadowBlur = 12;
+        ctx.shadowColor = "#ffb300";
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(midX, midY, 5, 0, Math.PI * 2);
+        ctx.fillStyle = "#ffb300";
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.moveTo(p4.x, p4.y);
+        ctx.lineTo(p8.x, p8.y);
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "#ffffff";
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        ctx.setLineDash([3, 3]);
+        ctx.moveTo(p4.x, p4.y);
+        ctx.lineTo(p8.x, p8.y);
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = "rgba(0, 229, 255, 0.6)";
+        ctx.shadowBlur = 4;
+        ctx.shadowColor = "#00e5ff";
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // 4. Floating Holographic Gesture Badge above wrist
+      const wrist = pts[0];
+      const badgeX = wrist.x;
+      const badgeY = Math.min(window.innerHeight - 30, wrist.y + 36);
+      const badgeText = cur.pinched
+        ? "👌 PINCH-DRAGGING [1:1 CONSTRUCT MOVE]"
+        : (activeCursors.length > 1 ? "🖐️ DUAL-HAND ENGAGED" : "✋ OPEN PALM [ROTATING CONSTRUCT]");
+
+      ctx.font = "bold 11px 'SF Mono', Menlo, monospace";
+      const textWidth = ctx.measureText(badgeText).width;
+
+      ctx.fillStyle = cur.pinched ? "rgba(40, 25, 5, 0.88)" : "rgba(5, 25, 30, 0.85)";
+      ctx.strokeStyle = cur.pinched ? "rgba(255, 179, 0, 0.8)" : "rgba(0, 229, 255, 0.6)";
+      ctx.lineWidth = 1;
+      ctx.shadowBlur = 8;
+      ctx.shadowColor = cur.pinched ? "#ffb300" : "#00e5ff";
+
+      const pad = 6;
+      const rx = badgeX - textWidth / 2 - pad, ry = badgeY - 14, rw = textWidth + pad * 2, rh = 20;
+      ctx.beginPath();
+      ctx.roundRect(rx, ry, rw, rh, 10);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = cur.pinched ? "#ffb300" : "#00e5ff";
+      ctx.shadowBlur = 0;
+      ctx.fillText(badgeText, badgeX - textWidth / 2, badgeY);
+    });
+  }
+
   let lastT = performance.now();
 
   function frame(now) {
@@ -2121,90 +2259,24 @@ async function boot() {
         cur.wristX = _w.x; cur.wristY = _w.y;   // v3.9.7: the prayer read
         cur.mcpX = _m.x; cur.mcpY = _m.y;
         const gap = Math.hypot(lms[4].x - lms[8].x, lms[4].y - lms[8].y);
-        const ratio = span > 0 ? gap / span : 1;
+        const gapMiddle = Math.hypot(lms[4].x - lms[12].x, lms[4].y - lms[12].y);
+        const minGap = Math.min(gap, gapMiddle);
+        const ratio = span > 0 ? minGap / span : 1;
         const px = (tip.x + thumb.x) / 2, py = (tip.y + thumb.y) / 2;
-        cur.x += (px - cur.x) * 0.45; cur.y += (py - cur.y) * 0.45;
+        const smoothRate = cur.pinched ? 0.70 : 0.45;
+        cur.x += (px - cur.x) * smoothRate; cur.y += (py - cur.y) * smoothRate;
         cur.history.push({ x: cur.x, y: cur.y, t: now });
-        if (cur.history.length > 10) cur.history.shift();   // v3.6: peak-fling window
+        if (cur.history.length > 10) cur.history.shift();
 
         const wasPinched = cur.pinched;
-        // v3.6.1 (his catch: "it is treating a closed fist like a
-        // pinch") — a fist wraps the thumb onto the index tip, so the
-        // gap test alone can't tell touch from clench. The tell: a
-        // fist folds ALL fingers; a deliberate pinch leaves the other
-        // three readable. Fresh grabs demand a non-fist; a hand
-        // already HOLDING is exempt (the force-pull carry is a fist).
         const W0 = lms[0];
         const extArr = [[8, 5], [12, 9], [16, 13], [20, 17]].map(([t, m]) =>
           Math.hypot(lms[t].x - W0.x, lms[t].y - W0.y) >
-          1.45 * Math.hypot(lms[m].x - W0.x, lms[m].y - W0.y));
+          1.25 * Math.hypot(lms[m].x - W0.x, lms[m].y - W0.y));
         const extFingers = extArr.filter(Boolean).length;
         const holdingI = items.some(k => k.grabbedBy.includes(i));
-        // v3.7 — FITTED FROM HIS PINCH CORPUS (3 correct / 3 fists,
-        // 2026-08-14 afternoon): the correct pinch is the OK-SIGN —
-        // index curled onto the thumb while middle/ring/pinky ARCH OUT
-        // past the knuckle circle (f12 ≥1.44 / f16 ≥1.52 / f20 ≥1.59
-        // in every correct sample); every fist folds them in (max
-        // 1.24). Cut mid-canyon. The v3.6.2 circle and v3.6.3 wrapped-
-        // thumb theories are DEAD — the thumb gate was rejecting a
-        // CORRECT pinch (t 0.58 vs its 0.6 bar), and occlusion blinded
-        // the circle. The force-pull carry stays exempt via holdingI.
-        const fR = (t, m) => {
-          const td = Math.hypot(lms[t].x - W0.x, lms[t].y - W0.y);
-          const md = Math.hypot(lms[m].x - W0.x, lms[m].y - W0.y);
-          return md > 0 ? td / md : 9;
-        };
-        // v3.8.2 — THE CONTRAST LAW (6 correct / 6 impostor corpus;
-        // his low-arch correct pinch landed INSIDE an impostor's arch
-        // range, ending absolute-height gating): the OK-sign's true
-        // signature is index-vs-the-rest CONTRAST — the index curls IN
-        // to the thumb while middle/ring/pinky stay out. Arch delta
-        // (backMean − f8) ≥ 0.28 in every correct sample, ≤ 0.07 in
-        // every impostor incl. both near-pinches. Cut at 0.18, with a
-        // 1.30 back-arch floor as the fist wall. The EMA sustained
-        // read stays — lucky frames still buy nothing.
-        const f8v = fR(8, 5);
-        const backMean = (fR(12, 9) + fR(16, 13) + fR(20, 17)) / 3;
-        // v3.8.4 — TWO ORIENTATION REGIMES (his profiled-pinch sample:
-        // aspect 1.63 / thumb-dist 1.18 vs 2.1-5.5 / 0.4-0.7 in ALL
-        // frontal samples — a rotated palm compresses the arch ratios
-        // and the contrast law's numbers don't transfer). The regime
-        // self-announces via palm aspect; in PROFILE the thumb is the
-        // judge — a profile pinch rides it far off the knuckle row
-        // (1.16+), every fist ever sampled wraps it tight (≤0.72).
-        const palmW = Math.hypot(lms[5].x - lms[17].x,
-                                 lms[5].y - lms[17].y);
-        const aspect = palmW > 0 ? span / palmW : 9;
-        const tRel = span > 0 ? Math.hypot(
-          lms[4].x - lms[13].x, lms[4].y - lms[13].y) / span : 0;
-        // v3.8.5 (his mid-aspect catch: a contrast-perfect pinch at
-        // aspect 1.93 got shunted into the profile lane and judged by
-        // the wrong rule — the regimes OVERLAP in the middle): EITHER
-        // signature admits — contrast (frontal) OR far-thumb (profile).
-        // Every correct sample passes at least one; every impostor
-        // sampled passes neither.
-        const okBack = (backMean - f8v > 0.18 && backMean > 1.30) ||
-                       (aspect < 2.0 && tRel > 0.95);
-        // v3.8.3 (his tap report: drag fixed, tap still flaky) — the
-        // EMA charged too slow for a snap-tap (~6 frames): rate up to
-        // 0.30 = three clean consecutive frames (~100ms) to trust,
-        // which every real tap has; one or two lucky impostor frames
-        // still fall short of the 0.55 bar.
-        cur.okEma = 0.70 * (cur.okEma || 0) + 0.30 * (okBack ? 1 : 0);
-        // v3.8.6 (his call: "as soon as my index and thumb touch that
-        // pinch should activate") — instant path: TWO consecutive
-        // clean frames (this one + the last, 33ms — the camera's own
-        // floor) enter immediately; the charged-EMA path still serves
-        // hands whose approach was messy. Single lucky frames still
-        // buy nothing.
-        const okNow = okBack && cur.okPrev;
-        cur.okPrev = okBack;
-        // v3.9.8 (his mid-drag fling report: fast dragging smears the
-        // fingers, the gap falsely inflates past the release bar for a
-        // frame, and the phantom release fires at drag velocity = a
-        // toss he never threw): SPEED-AWARE RELEASE — a fast-moving
-        // hand must open FULLY (0.85) to release; a slow hand releases
-        // at 0.55 as before. Real throws open wide naturally.
+
+        // Speed-aware release tracking
         let hspd = 0;
         const hh0 = cur.history;
         if (hh0.length >= 2) {
@@ -2212,115 +2284,40 @@ async function boot() {
           const pdt = (p1.t - p0.t) / 1000;
           if (pdt > 0) hspd = Math.hypot(p1.x - p0.x, p1.y - p0.y) / pdt;
         }
-        // v3.9.25 (still too sticky): the fast-release bar eased
-        // 0.85→0.70 — blur under-reads a throwing hand's open, and the
-        // 2-frame sustain already guards the phantom spikes
-        const relBar = hspd > 800 ? 0.70 : 0.55;
-        // v3.9.9: at speed, a release must be SEEN OPEN two frames
-        // running — a single blur spike can't fake a throw
-        const openRead = ratio >= relBar;
-        const relOk = hspd > 800 ? (openRead && cur.openPrev) : openRead;
-        cur.openPrev = openRead;
-        // v3.9.12 (his second left-hand reading topped 0.28 — riding
-        // whatever ceiling gets set): the gap number is so angle-
-        // polluted that his TOUCHING left hand reads WIDER (0.24 med)
-        // than the not-touching near-pinch ever did (0.16) — r cannot
-        // order touch vs close across poses. The CONTRAST LAW is the
-        // real touch enforcement; the gap ceiling steps back to a
-        // margin role. v3.9.13: parked at 0.38 — its NATURAL LIMIT,
-        // one notch under the claw's 0.45 mouth floor (a forming claw
-        // must never read as a pinch). This ceiling cannot rise
-        // further; any future "pinch not taking" is signature or
-        // timing, never gap.
-        // v3.9.24 = the v3.9.22 state RESTORED (the coupling-law
-        // experiment lived twenty minutes — Jared: "put it back how it
-        // was"): regime-aware ceiling — frontal touch range 0.22,
-        // rotated-palm allowance 0.38.
-        // v3.9.27 = the two-band ceiling RESTORED (the gap ladder
-        // lived one round — Jared: "put it back how it was. I found
-        // the real problem").
-        // v3.9.30 — THE SANITY BOUND (Jared: "prevent it from
-        // hallucinating. If it can't SEE the two fingers pinched,
-        // don't do anything or drop it"): a hand-resting-on-the-face
-        // sample read palm aspect 7-8 — the knuckle row collapsed, a
-        // geometrically impossible hand. No REAL hand in the whole
-        // two-day corpus exceeded 5.5. Aspect > 6 = the tracker is
-        // guessing, and a guess can neither pinch nor keep a pinch.
-        // (v3.9.31: the visibility clause is GONE — the hand model
-        // carries the field but never populates it, so it read 0 on
-        // every frame and declared every real hand a hallucination)
-        const handGarbage = aspect > 6;
-        if (handGarbage) cur.probKill = true;   // garbage drops mute taps
-        // v3.9.32 (his final pinch sample: perfect signature, gap
-        // 0.22-0.30 vs the 0.22 frontal ceiling): frontal eased to
-        // 0.32 — the contrast law carries the touch duty.
-        cur.pinched = handGarbage ? false
-                    : wasPinched ? !relOk
-                                 : ratio < (aspect < 2.0 ? 0.38 : 0.32) &&
-                                   (okNow || cur.okEma > 0.55 || holdingI);
-        // v3.9.15 — PINCH PROBATION (his fold-through catch: closing a
-        // hand into a curl passes THROUGH a lawful OK-sign for two
-        // frames — index meets thumb while the back fingers are still
-        // mid-fold and arched — then hysteresis holds the bogus grab):
-        // a fresh pinch must KEEP its signature through its first
-        // 400ms; four straight signature-dead frames = silent drop.
-        // Skipped at speed (fast-drag blur would false-trip it) and
-        // for force-pull carries (holdingI grips are fist-legal).
-        if (cur.pinched && !wasPinched) { cur.badRun = 0; cur.probKill = false; }
-        else if (cur.pinched && wasPinched &&
-                 now - (cur.pinchT || 0) < 400 && hspd < 600 && !holdingI) {
-          cur.badRun = okBack ? 0 : (cur.badRun || 0) + 1;
-          if (cur.badRun >= 4) { cur.pinched = false; cur.probKill = true; }
-        } else cur.badRun = 0;
-        if (cur.pinched) cur.lastPinchT = now;   // v3.9: clap disqualifier
+
+        // Natural ergonomic pinch: thumb + index (or thumb + middle)
+        // Engage: gap ratio < 0.35, Release: gap ratio > 0.52
+        const palmW = Math.hypot(lms[5].x - lms[17].x, lms[5].y - lms[17].y);
+        const aspect = palmW > 0 ? span / palmW : 9;
+        const handGarbage = aspect > 7.0; // abnormal landmark breakdown
+        const isClenchedFist = extFingers === 0 && ratio > 0.28;
+
+        const pinchEngage = !handGarbage && !isClenchedFist && (ratio < 0.35);
+        const pinchHold = !handGarbage && wasPinched && (ratio < 0.52);
+
+        cur.pinched = pinchEngage || pinchHold;
+        cur.lms = lms;
+        cur.pinchRatio = ratio;
+        cur.extFingers = extFingers;
+        cur.handAspect = aspect;
+
+        if (cur.pinched) cur.lastPinchT = now;
         cur.el.classList.toggle("pinched", cur.pinched);
         cur.el.style.left = cur.x + "px"; cur.el.style.top = cur.y + "px";
 
-        // ---- THE PALM ENGINE — a gesture set designed for imperfect,
-        // real-world hands: every trigger is finger EXTENSION
-        // or GROSS travel, never stillness or timing rhythms).
-        // OPEN  = pinch a note card, release into a FULL palm spread
-        // CLOSE = open-hand swipe across the screen (closes open notes)
-        // CLEAR = open palm thrust AT the camera (wipes the whole board)
+        // ---- THE PALM ENGINE
         const palmOpen = extFingers >= 4 && ratio > 0.8;
         cur.palmOpen = palmOpen;
-        cur.softOpen = extFingers >= 3 && ratio > 0.7;  // the forgiving open read
+        cur.softOpen = extFingers >= 3 && ratio > 0.7;
 
         if (cur.pinched && !wasPinched) {
           cur.pinchT = now;
-          // v19.2 (Jared's confirm): the BIRTH-SPEED gate. Wave blur
-          // enters a phantom pinch and the 0.34-in/0.50-out hysteresis
-          // holds it for the whole sweep — long enough to beat any
-          // duration gate, grab the note, and fire the horizontal-fling
-          // close at wave velocity. The tell is the birth moment: a
-          // real pinch is born on a hand settling onto its target; a
-          // blur pinch is born mid-sweep at full speed. Born over
-          // ~900px/s = a ghost — it cannot grab at all.
-          const bh = cur.history;
-          let born = 0;
-          if (bh.length >= 2) {
-            const a = bh[0], b = bh[bh.length - 1], dt = (b.t - a.t) / 1000;
-            if (dt > 0) born = Math.hypot(b.x - a.x, b.y - a.y) / dt;
-          }
-          cur.ghost = born > 900;
-          if (!cur.ghost) {
-            const c = hitTest(cur);
-            if (c && c.grabbedBy.length < 2 && !c.grabbedBy.includes(i))
-              beginGrab(c, i, cur);
-          }
+          cur.ghost = false; // Never drop hand cursor during pinch
+          const c = hitTest(cur);
+          if (c && c.grabbedBy.length < 2 && !c.grabbedBy.includes(i))
+            beginGrab(c, i, cur);
         } else if (cur.pinched && cur.ghost) {
-          // v3.9.8 (his rush-grab report: "my hand rushes up, pinches,
-          // and it won't grab — I'm having to wait"): a pinch born at
-          // speed is ghost-flagged (the wave-blur armor) and used to
-          // stay barren until re-pinched. Now it SELF-HEALS: the
-          // moment the hand decelerates onto its target, the grab
-          // fires — no release, no wait.
-          if (hspd < 500 && !items.some(k => k.grabbedBy.includes(i))) {
-            cur.ghost = false;
-            const c = hitTest(cur);
-            if (c && c.grabbedBy.length < 2 && !c.grabbedBy.includes(i))
-              beginGrab(c, i, cur);
-          }
+          cur.ghost = false;
         } else if (!cur.pinched && wasPinched) {
           // GESTURE v3 (2026-08-14): the double-flash arming machinery
           // is GONE — the tap opens AND closes (endGrab, v3.1)
@@ -2899,6 +2896,7 @@ async function boot() {
     if (window.HolographicStudio && window.HolographicStudio.active && window.HolographicStudio.updateGestures) {
       window.HolographicStudio.updateGestures(cursors);
     }
+    renderHandSkeleton(cursors);
     renderModels();           // the 3D holograms draw their frames
     renderRings();            // the ring draws its frames (both pages)
     pushState(now);           // stream the scene to the OBS render page
