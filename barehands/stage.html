@@ -1633,44 +1633,77 @@ async function startCam(deviceId) {
   // Request J.A.R.V.I.S. to yield camera hardware
   await acquireJarvisCamera();
 
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
-  } catch (e) {
-    if (e.name === "NotReadableError" || e.name === "TrackStartError") {
-      await new Promise(r => setTimeout(r, 450));
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
-      } catch (retryErr) {}
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+      if (stream) break;
+    } catch (e) {
+      if (e.name === "NotReadableError" || e.name === "TrackStartError") {
+        await new Promise(r => setTimeout(r, 350 * (attempt + 1)));
+      } else {
+        break;
+      }
     }
-    if (!stream) {
+  }
+
+  if (!stream) {
+    try {
       const devs = (await navigator.mediaDevices.enumerateDevices())
         .filter(d => d.kind === "videoinput");
       for (const d of devs) {
         try {
           stream = await navigator.mediaDevices.getUserMedia({
-            video: { deviceId: { exact: d.deviceId },
-                     width: { ideal: IW }, height: { ideal: IH } },
-            audio: false });
-          break;
-        } catch (e2) {}
+            video: { deviceId: { exact: d.deviceId }, width: { ideal: IW }, height: { ideal: IH } },
+            audio: false
+          });
+          if (stream) break;
+        } catch {}
       }
-    }
-    if (!stream) throw e;
+    } catch {}
   }
+
+  let isVirtualFallback = false;
+  if (!stream) {
+    console.warn("Physical camera unavailable; initializing virtual stage canvas for mouse/keyboard navigation.");
+    const canvas = document.createElement("canvas");
+    canvas.width = IW;
+    canvas.height = IH;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#010814";
+    ctx.fillRect(0, 0, IW, IH);
+    ctx.strokeStyle = "rgba(0, 240, 255, 0.2)";
+    ctx.strokeRect(10, 10, IW - 20, IH - 20);
+    stream = canvas.captureStream(15);
+    isVirtualFallback = true;
+  }
+
   cam.srcObject = stream;
-  await new Promise(r => cam.onloadedmetadata = r);
-  camDevices = (await navigator.mediaDevices.enumerateDevices())
-    .filter(d => d.kind === "videoinput");
+  await Promise.race([
+    new Promise(r => cam.onloadedmetadata = r),
+    new Promise(r => setTimeout(r, 600))
+  ]);
+  cam.play().catch(() => {});
+
+  try {
+    camDevices = (await navigator.mediaDevices.enumerateDevices())
+      .filter(d => d.kind === "videoinput");
+  } catch {
+    camDevices = [];
+  }
+
   const live = stream.getVideoTracks()[0];
-  camIdx = camDevices.findIndex(d => d.label === live.label);
-  toast(`camera: ${live.label || "default"}`);
+  if (live && !isVirtualFallback) {
+    camIdx = camDevices.findIndex(d => d.label === live.label);
+    toast(`camera: ${live.label || "default"}`);
+  } else {
+    toast("OPTICAL TRACKING: STANDBY (MOUSE/KEYBOARD ACTIVE)", 3500);
+  }
 }
 
 async function pickInitialCam() {
-  // permission first (labels are blank until granted), then re-pick by name
   await startCam(null);
   const want = Q.get("cam") || localStorage.getItem("stage-cam") || "";
-  if (want) {
+  if (want && camDevices.length > 0) {
     const hit = camDevices.find(d =>
       d.label.toLowerCase().includes(want.toLowerCase()) || d.deviceId === want);
     if (hit && camDevices[camIdx] !== hit) await startCam(hit.deviceId);
@@ -2113,26 +2146,22 @@ function physics(dt) {
 
 async function boot() {
   await pickInitialCam();
-  const vision = await FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
-  landmarker = await HandLandmarker.createFromOptions(vision, {
-    baseOptions: { modelAssetPath:
-      "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-      delegate: "GPU" },
-    numHands: 2, runningMode: "VIDEO",
-    // phantom-hand filter (a real-room catch: debug showed a hand with
-    // none in frame — a busy background is full of hand-shaped clutter
-    // and the 0.5 defaults hallucinate there; a ghost hand can grab items
-    // and false-trigger gestures). 0.65 helped but the ghost
-    // survived → 0.7. Ease back toward 0.65 if real-hand pickup ever
-    // feels laggy; past 0.75 real tracking suffers.
-    minHandDetectionConfidence: 0.7,
-    // v3.9.9 (his blur diagnosis: fast hands smear and get DROPPED,
-    // and re-acquisition eats the frames that felt like grab-lag):
-    // KEEP-tracking eased to 0.5 so a latched hand rides through blur;
-    // fresh DETECTION stays 0.7 — the busy-background ghost wall holds.
-    minHandPresenceConfidence: 0.5 });
-  document.getElementById("boot").remove();
+  try {
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+    landmarker = await HandLandmarker.createFromOptions(vision, {
+      baseOptions: { modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+        delegate: "GPU" },
+      numHands: 2, runningMode: "VIDEO",
+      minHandDetectionConfidence: 0.7,
+      minHandPresenceConfidence: 0.5 });
+  } catch (err) {
+    console.warn("HandLandmarker initialization deferred or running in mouse mode:", err);
+    landmarker = null;
+  }
+  const bootEl = document.getElementById("boot");
+  if (bootEl) bootEl.remove();
   await loadTree();
   spawnStage();
   toast("barehands v1.0", 2000);  // build fingerprint
@@ -2140,7 +2169,7 @@ async function boot() {
 
   function frame(now) {
     const dt = Math.min((now - lastT) / 1000, 0.05); lastT = now;
-    if (cam.currentTime !== lastVideoTs) {
+    if (landmarker && cam.currentTime !== lastVideoTs) {
       lastVideoTs = cam.currentTime;
       const res = landmarker.detectForVideo(cam, now);
       const seen = new Set();
