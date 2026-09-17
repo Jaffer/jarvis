@@ -2165,6 +2165,24 @@ async function boot() {
   await loadTree();
   spawnStage();
   toast("barehands v1.0", 2000);  // build fingerprint
+
+  // Auto-mount Holographic Engineering Studio
+  const mountHolo = (retries = 30) => {
+    if (window.HolographicStudio) {
+      try {
+        window.HolographicStudio.show();
+        if (!window.HolographicStudio.currentConstruct) {
+          window.HolographicStudio.loadConstruct("arc_reactor");
+        }
+      } catch (e) {
+        console.warn("HolographicStudio auto-mount warning:", e);
+      }
+    } else if (retries > 0) {
+      setTimeout(() => mountHolo(retries - 1), 150);
+    }
+  };
+  mountHolo();
+
   let lastT = performance.now();
 
   function frame(now) {

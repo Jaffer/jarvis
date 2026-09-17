@@ -567,6 +567,53 @@ class SelfCodeManager:
         except Exception as e:
             return f"Error applying code improvement: {e}"
 
+    def apply_code_patch(self, file_path_str: str, target_snippet: str, replacement_snippet: str, instruction: str) -> str:
+        """Surgically replace a specific code block/snippet within an existing file, with AST verification."""
+        try:
+            target_path = Path(file_path_str).resolve()
+            if not str(target_path).startswith(str(self.root_dir)):
+                return f"Error: Code editing restricted to codebase root directory {self.root_dir}."
+
+            if not target_path.exists():
+                return f"Error: Target file {target_path.name} does not exist for patching."
+
+            original_content = target_path.read_text(encoding="utf-8")
+            if target_snippet not in original_content:
+                return f"Error: Target snippet not found in {target_path.name}. Please ensure exact match of existing lines."
+
+            updated_content = original_content.replace(target_snippet, replacement_snippet, 1)
+
+            # AST syntax safety check for Python files
+            if target_path.suffix == ".py":
+                try:
+                    ast.parse(updated_content)
+                except SyntaxError as syn_err:
+                    return f"Patch rejected due to Python SyntaxError: {syn_err}"
+
+            # Create timestamped rollback backup
+            backup_dir = self.root_dir / ".cache" / "code_backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            shutil.copy(target_path, backup_dir / f"{target_path.name}_{ts}.bak")
+
+            # Write updated content
+            target_path.write_text(updated_content, encoding="utf-8")
+
+            if self.memory:
+                self.memory.record_lesson("CODE_PATCH", f"Patched [{target_path.name}]: {instruction[:60]}")
+
+            log.info("⚡ [SELF CODE PATCH] Successfully patched %s: %s", target_path.name, instruction)
+            broadcast_ui_event({"type": "MEMORY_UPDATE", "note": f"Code Patch: {target_path.name}"})
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": f"⚡ Code Patched: {target_path.name}"})
+
+            return f"Successfully applied surgical patch to {target_path.name}: '{instruction}'. AST syntax verified nominal, sir."
+        except Exception as e:
+            return f"Error applying surgical code patch: {e}"
+
+    def write_new_module(self, file_path_str: str, code_content: str, instruction: str) -> str:
+        """Create a new modular tool, script, or plugin in the codebase."""
+        return self.apply_code_change(file_path_str, instruction, code_content)
+
     def restart_process(self) -> str:
         """Trigger process restart to hot-reload newly added code."""
         log.info("Restarting JARVIS process for hot-reloading code changes...")
@@ -863,6 +910,14 @@ class BiometricSentinelDaemon:
         self.face_sentinel = None
         self.voice_sentinel = None
 
+        # Real-time In-Orb Face Enrollment State
+        self._enrolling = False
+        self._enroll_admin_name = "Admin"
+        self._enroll_embeddings = []
+        self._enroll_variances = []
+        self._enroll_target_frames = 30
+        self._last_enroll_pct = -1
+
         try:
             from biometrics.face_sentinel import FaceSentinel
             from biometrics.voice_sentinel import VoiceSentinel
@@ -1006,10 +1061,136 @@ class BiometricSentinelDaemon:
         except Exception as e:
             log.debug("External frame processing error: %s", e)
 
+    def start_face_enrollment(self, admin_name: str = "Admin") -> dict:
+        """Initiate real-time in-Orb biometric face enrollment session."""
+        with self._lock:
+            self._enrolling = True
+            self._enroll_admin_name = admin_name or self.admin_name or "Admin"
+            self._enroll_embeddings = []
+            self._enroll_variances = []
+            self._enroll_start_time = time.time()
+            self._enroll_target_frames = 30
+            self._last_enroll_pct = -1
+            log.info("📷 [BIOMETRIC SENTINEL] Initiating biometric face enrollment for: %s", self._enroll_admin_name)
+            broadcast_ui_event({
+                "type": "FACE_ENROLLMENT_START",
+                "admin_name": self._enroll_admin_name,
+                "target_frames": self._enroll_target_frames,
+            })
+            return {"status": "ENROLLMENT_INITIATED", "target_frames": 30}
+
+    def cancel_face_enrollment(self):
+        """Cancel ongoing face enrollment session."""
+        with self._lock:
+            self._enrolling = False
+            self._enroll_embeddings = []
+            self._enroll_variances = []
+            log.info("📷 [BIOMETRIC SENTINEL] Face enrollment cancelled.")
+            broadcast_ui_event({"type": "FACE_ENROLLMENT_CANCEL"})
+
+    def _handle_enrollment_frame(self, frame: np.ndarray):
+        """Process frame for 3D landmark extraction, depth verification, and canonical embedding accumulation."""
+        if self.face_sentinel is None:
+            return
+        pts_3d = self.face_sentinel.extract_landmarks(frame)
+        if not pts_3d:
+            broadcast_ui_event({
+                "type": "FACE_ENROLLMENT_ALIGN_WARNING",
+                "message": "ALIGN FACE WITHIN TARGET RETICLE"
+            })
+            return
+
+        emb = self.face_sentinel.extract_face_embedding(pts_3d)
+        if emb is not None:
+            self._enroll_embeddings.append(emb)
+            _, var = self.face_sentinel.detector.evaluate_3d_depth(pts_3d)
+            self._enroll_variances.append(var)
+
+            count = len(self._enroll_embeddings)
+            pct = int((count / self._enroll_target_frames) * 100)
+            stage_name = (
+                "CAPTURING 3D TOPOLOGY" if pct < 35 else
+                ("DEPTH & PARALLAX CALIBRATION" if pct < 75 else "FINALIZING BIOMETRIC SIGNATURE")
+            )
+            if pct != self._last_enroll_pct:
+                self._last_enroll_pct = pct
+                broadcast_ui_event({
+                    "type": "FACE_ENROLLMENT_PROGRESS",
+                    "percentage": min(100, pct),
+                    "frames_captured": count,
+                    "target_frames": self._enroll_target_frames,
+                    "stage": stage_name,
+                })
+
+            if count >= self._enroll_target_frames:
+                self._finish_face_enrollment()
+
+    def _finish_face_enrollment(self):
+        """Finalize canonical 64D facial embedding vector and commit to memory vault."""
+        with self._lock:
+            self._enrolling = False
+            if not self._enroll_embeddings:
+                return
+            mean_emb = np.mean(self._enroll_embeddings, axis=0)
+            norm = np.linalg.norm(mean_emb) + 1e-6
+            canonical_emb = (mean_emb / norm).tolist()
+            mean_depth = float(np.mean(self._enroll_variances)) if self._enroll_variances else 0.15
+
+            profile_dir = Path(__file__).resolve().parent / "memory" / "00 - Biometrics"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            profile_file = profile_dir / "admin_profile.json"
+
+            admin_profile = {
+                "admin_name": self._enroll_admin_name,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "face": {
+                    "embedding": canonical_emb,
+                    "depth_variance_baseline": mean_depth,
+                    "enrolled_at": time.strftime("%Y-%m-%d %H:%M:%S")
+                },
+                "voice": {},
+                "security_policy": {
+                    "anti_spoofing_required": True,
+                    "min_liveness_score": 0.70,
+                    "min_face_confidence": 0.82,
+                    "min_voice_confidence": 0.78,
+                    "alert_on_spoof": True
+                }
+            }
+            with open(profile_file, "w", encoding="utf-8") as f:
+                json.dump(admin_profile, f, indent=2)
+
+            self.face_sentinel.admin_embedding = np.array(canonical_emb, dtype=np.float32)
+            self.face_sentinel.admin_name = self._enroll_admin_name
+            self.admin_name = self._enroll_admin_name
+            self.authenticated = True
+            self.last_auth_time = time.time()
+
+            log.info("✅ [BIOMETRIC SENTINEL] Admin Biometric Profile successfully saved: %s", profile_file)
+            broadcast_ui_event({
+                "type": "FACE_ENROLLMENT_COMPLETE",
+                "admin_name": self._enroll_admin_name,
+                "percentage": 100,
+                "message": f"Biometric profile enrolled for {self._enroll_admin_name}"
+            })
+            if _sound_engine:
+                _sound_engine.play("auth_confirmed")
+            if _voice_engine:
+                threading.Thread(
+                    target=_voice_engine.speak,
+                    args=(f"Biometric face enrollment complete for {self._enroll_admin_name}. Security sentinel calibrated and active, sir.",),
+                    daemon=True
+                ).start()
+
     def _process_frame(self, frame: np.ndarray):
         """Core face recognition and anti-spoofing logic for both local and HUD frames."""
         if self.face_sentinel is None:
             return
+
+        if self._enrolling:
+            self._handle_enrollment_frame(frame)
+            return
+
         res = self.face_sentinel.evaluate_frame(frame)
         self.last_status = res.status
 
@@ -2280,6 +2461,22 @@ class NeuralBrain:
             broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": f"⚡ Profile Updated [{key}]: {value}"})
             return f"Updated user profile record: {key} = {value}, sir."
 
+        elif name == "self_code_patch":
+            file_path = args.get("file_path", "jarvis.py")
+            target_snippet = args.get("target_snippet", "")
+            replacement_snippet = args.get("replacement_snippet", "")
+            instruction = args.get("instruction", "Surgical code patch")
+            if self.code_mgr and target_snippet and replacement_snippet:
+                return self.code_mgr.apply_code_patch(file_path, target_snippet, replacement_snippet, instruction)
+            return "Self code patch arguments missing or code manager offline."
+
+        elif name == "enroll_admin_face":
+            admin_name = args.get("admin_name", "Admin")
+            if _biometric_sentinel:
+                _biometric_sentinel.start_face_enrollment(admin_name)
+                return f"Initiated optical 3D facial enrollment for {admin_name}. Visual progress bar active on Orb HUD."
+            return "Biometric sentinel is offline."
+
         elif name == "self_code_improve":
             file_path = args.get("file_path", "jarvis.py")
             instruction = args.get("instruction", "Code refactoring")
@@ -2529,8 +2726,38 @@ class NeuralBrain:
                 {
                     "type": "function",
                     "function": {
+                        "name": "self_code_patch",
+                        "description": "Surgically patch a specific snippet of code in an existing file without rewriting the whole file. Preferred for small bug fixes, UI updates, and incremental improvements.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {"type": "string", "description": "Relative path to file (e.g. 'jarvis.py', 'web/app.js', 'web/index.html')"},
+                                "target_snippet": {"type": "string", "description": "Exact text snippet to find and replace in the file"},
+                                "replacement_snippet": {"type": "string", "description": "New replacement code snippet"},
+                                "instruction": {"type": "string", "description": "Explanation of the change"}
+                            },
+                            "required": ["file_path", "target_snippet", "replacement_snippet", "instruction"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "enroll_admin_face",
+                        "description": "Trigger in-Orb 3D biometric face enrollment for the admin user with real-time visual progress bar",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "admin_name": {"type": "string", "description": "The admin user's name (defaults to 'Admin')"}
+                            }
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
                         "name": "self_code_improve",
-                        "description": "Refactor, write, or modify Python files in JARVIS's codebase to add new capabilities or fix issues",
+                        "description": "Refactor, write, or modify files in JARVIS's codebase to add new capabilities or fix issues",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -3469,9 +3696,15 @@ class VoiceEngine:
             return
 
         if any(q in t for q in [
-            "enroll biometrics", "enroll face", "enroll voice", "register face", "calibrate biometrics"
+            "enroll biometrics", "enroll face", "enroll my face", "register face", "register my face",
+            "calibrate biometrics", "calibrate face", "start enrollment", "start face enrollment",
+            "strat the enrolment", "strat enrollment", "face enrollment", "enroll admin"
         ]):
-            self.speak("To calibrate your biometric profile, please run python enroll_admin.py in your terminal, sir.")
+            if _biometric_sentinel:
+                _biometric_sentinel.start_face_enrollment()
+                self.speak("Initiating biometric face calibration, sir. Please look straight at the optical sensor.")
+            else:
+                self.speak("Biometric sentinel is offline, sir.")
             return
 
         # ── 7d. User Profile & Explicit Self-Improvement ──
@@ -4010,12 +4243,42 @@ def _start_websocket_server(port: int = 8765) -> None:
                     "status": "ARMED",
                 })
             )
+            active_c = _active_construct if _active_construct else {"id": "arc_reactor", "name": "Arc Reactor Core"}
+            await websocket.send(
+                json.dumps({
+                    "type": "ACTIVE_CONSTRUCT_STATE",
+                    "manifest": active_c,
+                    "construct": active_c.get("id", "arc_reactor"),
+                    "simulation": "thermal",
+                    "stress": 1.0,
+                    "exploded": False
+                })
+            )
             async for message in websocket:
                 try:
                     data = json.loads(message)
                     if data.get("type") == "TRIGGER_ACTION":
                         action_name = data.get("action", "UI Gesture")
                         trigger_welcome_sequence(f"Hologram HUD ({action_name})")
+                    elif data.get("type") == "START_FACE_ENROLLMENT":
+                        admin_name = data.get("admin_name", "Admin")
+                        if _biometric_sentinel:
+                            _biometric_sentinel.start_face_enrollment(admin_name)
+                    elif data.get("type") == "CANCEL_FACE_ENROLLMENT":
+                        if _biometric_sentinel:
+                            _biometric_sentinel.cancel_face_enrollment()
+                    elif data.get("type") == "GET_ACTIVE_CONSTRUCT":
+                        active_c = _active_construct if _active_construct else {"id": "arc_reactor", "name": "Arc Reactor Core"}
+                        await websocket.send(
+                            json.dumps({
+                                "type": "ACTIVE_CONSTRUCT_STATE",
+                                "manifest": active_c,
+                                "construct": active_c.get("id", "arc_reactor"),
+                                "simulation": "thermal",
+                                "stress": 1.0,
+                                "exploded": False
+                            })
+                        )
                     elif data.get("type") == "GESTURE_ACTION":
                         act = data.get("action")
                         if act == "flick_save":

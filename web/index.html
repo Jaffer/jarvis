@@ -767,6 +767,191 @@
       box-shadow: 0 0 12px var(--color-primary-glow);
       transform: translateY(-1px);
     }
+
+    /* ══════════════════════════════════════════════════════════════════════
+       BIOMETRIC FACE ENROLLMENT HUD MODAL & ANIMATION
+       ══════════════════════════════════════════════════════════════════════ */
+    .enroll-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.3s;
+    }
+    .enroll-modal.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .enroll-modal-backdrop {
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at center, rgba(0, 15, 30, 0.75) 0%, rgba(2, 6, 14, 0.92) 100%);
+      backdrop-filter: blur(12px);
+    }
+    .enroll-card {
+      position: relative;
+      width: 480px;
+      max-width: 90vw;
+      background: rgba(4, 16, 28, 0.88);
+      border: 1px solid rgba(0, 229, 255, 0.45);
+      border-radius: 14px;
+      padding: 24px 28px;
+      box-shadow: 0 0 40px rgba(0, 229, 255, 0.22), 0 0 100px rgba(0, 0, 0, 0.85);
+      font-family: var(--font-mono);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      overflow: hidden;
+      user-select: none;
+    }
+    .enroll-card::before {
+      content: "";
+      position: absolute;
+      top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, transparent, #00e5ff, var(--color-primary), transparent);
+    }
+    .enroll-header {
+      width: 100%;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 18px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(0, 229, 255, 0.15);
+    }
+    .enroll-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: var(--color-cyan);
+      text-shadow: 0 0 10px var(--color-cyan-glow);
+    }
+    .enroll-close-btn {
+      background: rgba(255, 23, 68, 0.15);
+      border: 1px solid rgba(255, 23, 68, 0.4);
+      color: #ff80ab;
+      border-radius: 4px;
+      padding: 3px 8px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .enroll-close-btn:hover {
+      background: rgba(255, 23, 68, 0.35);
+      box-shadow: 0 0 10px rgba(255, 23, 68, 0.4);
+    }
+    .enroll-reticle-box {
+      position: relative;
+      width: 220px;
+      height: 220px;
+      margin: 8px 0 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .reticle-ring {
+      position: absolute;
+      inset: 0;
+      border: 1.5px dashed rgba(0, 229, 255, 0.4);
+      border-radius: 50%;
+      animation: voiceSpin 18s linear infinite;
+    }
+    .reticle-oval {
+      position: absolute;
+      width: 130px;
+      height: 175px;
+      border: 2px solid rgba(0, 229, 255, 0.7);
+      border-radius: 50% / 60%;
+      box-shadow: 0 0 18px rgba(0, 229, 255, 0.3), inset 0 0 14px rgba(0, 229, 255, 0.15);
+      transition: border-color 0.3s ease, box-shadow 0.3s ease;
+    }
+    .reticle-corner {
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      border-color: var(--color-cyan);
+      border-style: solid;
+      pointer-events: none;
+    }
+    .reticle-corner.tl { top: 6px; left: 6px; border-width: 2px 0 0 2px; }
+    .reticle-corner.tr { top: 6px; right: 6px; border-width: 2px 2px 0 0; }
+    .reticle-corner.bl { bottom: 6px; left: 6px; border-width: 0 0 2px 2px; }
+    .reticle-corner.br { bottom: 6px; right: 6px; border-width: 0 2px 2px 0; }
+    .reticle-scan-laser {
+      position: absolute;
+      width: 140px;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, #00e5ff 25%, #ffffff 50%, #00e5ff 75%, transparent);
+      box-shadow: 0 0 12px #00e5ff, 0 0 24px #00e5ff;
+      animation: scanSweep 2s ease-in-out infinite alternate;
+    }
+    @keyframes scanSweep {
+      0% { transform: translateY(-75px); opacity: 0.3; }
+      50% { opacity: 1; }
+      100% { transform: translateY(75px); opacity: 0.3; }
+    }
+    .reticle-status-badge {
+      position: absolute;
+      bottom: -4px;
+      background: rgba(0, 20, 35, 0.9);
+      border: 1px solid var(--color-cyan);
+      border-radius: 12px;
+      padding: 3px 12px;
+      font-size: 9.5px;
+      font-weight: 700;
+      color: #00e5ff;
+      letter-spacing: 1.5px;
+      box-shadow: 0 0 10px rgba(0, 229, 255, 0.3);
+    }
+    .enroll-progress-container {
+      width: 100%;
+      margin: 6px 0 12px;
+    }
+    .enroll-progress-track {
+      width: 100%;
+      height: 12px;
+      background: rgba(0, 20, 35, 0.7);
+      border: 1px solid rgba(0, 229, 255, 0.35);
+      border-radius: 6px;
+      overflow: hidden;
+      position: relative;
+      box-shadow: inset 0 0 8px rgba(0, 0, 0, 0.8);
+    }
+    .enroll-progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #00b0ff, #00e5ff 60%, #ffaa30 100%);
+      border-radius: 5px;
+      box-shadow: 0 0 14px rgba(0, 229, 255, 0.8);
+      transition: width 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .enroll-stats-row {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 6px;
+      font-size: 10.5px;
+      letter-spacing: 1px;
+    }
+    .enroll-pct {
+      color: var(--color-cyan);
+      font-weight: 700;
+      text-shadow: 0 0 8px var(--color-cyan-glow);
+    }
+    .enroll-guidance {
+      font-size: 10px;
+      color: rgba(255, 255, 255, 0.65);
+      text-align: center;
+      line-height: 1.5;
+      margin-top: 6px;
+      font-style: italic;
+    }
   </style>
 </head>
 <body>
@@ -874,6 +1059,45 @@
     </div>
   </div>
 
+  <!-- Biometric Face Enrollment Modal -->
+  <div id="face-enrollment-modal" class="enroll-modal hidden">
+    <div class="enroll-modal-backdrop" id="enroll-backdrop"></div>
+    <div class="enroll-card">
+      <div class="enroll-header">
+        <div class="enroll-title">
+          <span class="cmd-pulse-dot" style="background:#00e5ff; box-shadow:0 0 8px #00e5ff;"></span>
+          <span>BIOMETRIC PROTOCOL // ADMIN PROFILE ENROLLMENT</span>
+        </div>
+        <button id="btn-enroll-cancel" class="enroll-close-btn" title="Cancel Enrollment">ABORT [ESC]</button>
+      </div>
+
+      <div class="enroll-reticle-box">
+        <div class="reticle-ring"></div>
+        <div class="reticle-oval"></div>
+        <div class="reticle-corner tl"></div>
+        <div class="reticle-corner tr"></div>
+        <div class="reticle-corner bl"></div>
+        <div class="reticle-corner br"></div>
+        <div class="reticle-scan-laser"></div>
+        <div id="enroll-status-badge" class="reticle-status-badge">ALIGNING OPTICS...</div>
+      </div>
+
+      <div class="enroll-progress-container">
+        <div class="enroll-progress-track">
+          <div id="enroll-progress-bar" class="enroll-progress-bar" style="width: 0%;"></div>
+        </div>
+        <div class="enroll-stats-row">
+          <span id="enroll-stage-label" style="color: rgba(255,255,255,0.7);">STANDBY FOR CALIBRATION</span>
+          <span id="enroll-pct-text" class="enroll-pct">0%</span>
+        </div>
+      </div>
+
+      <div id="enroll-guidance-text" class="enroll-guidance">
+        Center your face in the holographic reticle and hold steady while the neural mesh calibrates.
+      </div>
+    </div>
+  </div>
+
   <!-- HUD Bottom Bar -->
   <footer class="hud-footer">
     <div class="shortcuts-legend">
@@ -884,6 +1108,7 @@
         <span class="shortcut-item" data-shortcut="v"><span class="key">V</span> voice</span>
       </div>
       <div>
+        <span class="shortcut-item" data-shortcut="e"><span class="key">E</span> enroll</span> &nbsp; 
         <span class="shortcut-item" data-shortcut="r"><span class="key">R</span> reset</span> &nbsp; 
         <span class="shortcut-item" data-shortcut="zoom-in"><span class="key">+</span> zoom in</span> &nbsp; 
         <span class="shortcut-item" data-shortcut="zoom-out"><span class="key">-</span> zoom out</span> &nbsp; 
@@ -899,6 +1124,7 @@
     <div class="action-controls">
       <button id="btn-cmd" class="hud-btn" style="border-color: var(--color-cyan); color: var(--color-cyan);"><span class="key" style="margin-right: 4px;">/</span>TYPE [ENTER]</button>
       <button id="btn-toggle-gesture" class="hud-btn">GESTURES [G]: OFF</button>
+      <button id="btn-enroll" class="hud-btn">ENROLL [E]</button>
       <button id="btn-theme" class="hud-btn">THEME [T]: ULTRON</button>
       <button id="btn-soundscape" class="hud-btn btn-active">SOUNDSCAPE [S]: ON</button>
       <button id="btn-voice" class="hud-btn btn-active">HANDS-FREE [V]: ON</button>

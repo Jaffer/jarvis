@@ -629,16 +629,39 @@ export class HolographicStudio {
     try {
       const wsUrl = `ws://${window.location.hostname || "localhost"}:8765`;
       const ws = new WebSocket(wsUrl);
+      this._ws = ws;
+
+      ws.onopen = () => {
+        try {
+          ws.send(JSON.stringify({ type: "GET_ACTIVE_CONSTRUCT" }));
+        } catch (e) {}
+      };
+
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.type === "RENDER_3D_BLUEPRINT" || data.type === "DYNAMIC_CONSTRUCT" || data.type === "MODIFY_CONSTRUCT") {
             this.show();
             this.loadConstruct(data.construct || (data.manifest ? data.manifest.id : "dynamic"), data.simulation || "fluid_dynamics", data.stress || 1.0, data.exploded || false, data.manifest);
+          } else if (data.type === "ACTIVE_CONSTRUCT_STATE" && data.construct) {
+            this.show();
+            this.loadConstruct(data.construct, data.simulation || "thermal", data.stress || 1.0, data.exploded || false, data.manifest || null);
+          } else if (data.type === "DISMISS_CONSTRUCT") {
+            this.hide();
           }
         } catch (e) {}
       };
-    } catch (e) {}
+
+      ws.onclose = () => {
+        setTimeout(() => this._connectWebSocket(), 3000);
+      };
+
+      ws.onerror = () => {
+        try { ws.close(); } catch (e) {}
+      };
+    } catch (e) {
+      setTimeout(() => this._connectWebSocket(), 4000);
+    }
   }
 
   static show() {
@@ -860,29 +883,39 @@ export class HolographicStudio {
 
     const pinchedHands = cursorList.filter(c => c.pinched);
 
-    if (pinchedHands.length === 1) {
-      // Single hand pinched -> 3D Holographic Rotation
-      const h = pinchedHands[0];
+    if (pinchedHands.length === 1 || cursorList.length === 1) {
+      // 1 Hand (pinched or single tracked cursor) -> Smooth 3D Rotation
+      const h = pinchedHands.length === 1 ? pinchedHands[0] : cursorList[0];
       if (this._prevGestureHand) {
         const dx = h.x - this._prevGestureHand.x;
         const dy = h.y - this._prevGestureHand.y;
-        this.currentConstruct.group.rotation.y += dx * 0.008;
-        this.currentConstruct.group.rotation.x += dy * 0.008;
+        if (Math.hypot(dx, dy) < 140) {
+          this.currentConstruct.group.rotation.y += dx * 0.007;
+          this.currentConstruct.group.rotation.x += dy * 0.007;
+        }
       }
       this._prevGestureHand = { x: h.x, y: h.y };
       this._prevHandDist = null;
-    } else if (pinchedHands.length >= 2) {
-      // Two hands pinched -> Gesture Pull/Spread (Exploded View Scrub & Scaling)
-      const [h1, h2] = pinchedHands;
+    } else if (cursorList.length >= 2) {
+      // 2 Hands -> Pull / Spread scrubbing (CAD explode & camera zoom)
+      const [h1, h2] = cursorList;
       const dist = Math.hypot(h1.x - h2.x, h1.y - h2.y);
       if (this._prevHandDist != null) {
         const dDist = dist - this._prevHandDist;
-        this.explodeAmount = Math.max(0, Math.min(1.5, this.explodeAmount + dDist * 0.004));
-        this.isExploded = this.explodeAmount > 0.3;
-        const explodeBtn = document.getElementById("holo_explode_btn");
-        if (explodeBtn) {
-          explodeBtn.innerText = `EXPLODED VIEW: ${this.isExploded ? "ON" : "OFF"}`;
-          explodeBtn.style.color = this.isExploded ? "#ffb300" : "#00e5ff";
+        if (Math.abs(dDist) < 120) {
+          if (pinchedHands.length >= 2) {
+            // Dual pinch -> Depth Zoom
+            this.camera.position.z = Math.max(4.5, Math.min(16.0, this.camera.position.z - dDist * 0.012));
+          } else {
+            // Dual open hands expand/contract -> Exploded View scrub
+            this.explodeAmount = Math.max(0, Math.min(1.5, this.explodeAmount + dDist * 0.005));
+            this.isExploded = this.explodeAmount > 0.25;
+            const explodeBtn = document.getElementById("holo_explode_btn");
+            if (explodeBtn) {
+              explodeBtn.innerText = `EXPLODED VIEW: ${this.isExploded ? "ON" : "OFF"}`;
+              explodeBtn.style.color = this.isExploded ? "#ffb300" : "#00e5ff";
+            }
+          }
         }
       }
       this._prevHandDist = dist;
@@ -894,5 +927,18 @@ export class HolographicStudio {
   }
 }
 
-// Attach globally for Barehands Board integration
+// Attach globally for Barehands Board integration & auto-init
 window.HolographicStudio = HolographicStudio;
+try {
+  if (typeof window !== "undefined") {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", () => {
+        HolographicStudio.init();
+      });
+    } else {
+      HolographicStudio.init();
+    }
+  }
+} catch (e) {
+  console.debug("HolographicStudio auto-init deferred:", e);
+}

@@ -968,6 +968,26 @@ function handleServerEvent(data) {
       soundscape.play("whoosh");
       showToast("💥 HOLOGRAM DISMISSED", 2500);
       break;
+
+    case "FACE_ENROLLMENT_START":
+      showEnrollmentModalUI(data.admin_name || "Admin");
+      soundscape.play("blueprint_whoosh");
+      showToast("📷 BIOMETRIC PROTOCOL // ENROLLMENT ACTIVE", 3500);
+      break;
+
+    case "FACE_ENROLLMENT_PROGRESS":
+      updateEnrollmentProgressUI(data.percentage || 0, data.stage || "CALIBRATING", data.frames || 0);
+      soundscape.play("sub_bass_tick");
+      break;
+
+    case "FACE_ENROLLMENT_COMPLETE":
+      finishEnrollmentModalUI(data.admin_name || "Admin");
+      break;
+
+    case "FACE_ENROLLMENT_CANCELLED":
+      closeEnrollmentModal(false);
+      showToast("Biometric enrollment cancelled", 2000);
+      break;
   }
 }
 
@@ -1067,6 +1087,117 @@ cmdInput?.addEventListener("keydown", (e) => {
   }
 });
 
+// ——— BIOMETRIC ADMIN FACE ENROLLMENT MODAL ———
+const enrollModal = document.getElementById("face-enrollment-modal");
+const enrollBackdrop = document.getElementById("enroll-backdrop");
+const enrollCloseBtn = document.getElementById("btn-enroll-cancel");
+const enrollTriggerBtn = document.getElementById("btn-enroll");
+const enrollProgressBar = document.getElementById("enroll-progress-bar");
+const enrollPctText = document.getElementById("enroll-pct-text");
+const enrollStageLabel = document.getElementById("enroll-stage-label");
+const enrollStatusBadge = document.getElementById("enroll-status-badge");
+const enrollGuidanceText = document.getElementById("enroll-guidance-text");
+let fastEnrollTimer = null;
+
+function showEnrollmentModalUI(adminName = "Admin") {
+  if (!enrollModal) return;
+  enrollModal.classList.remove("hidden");
+  enrollModal.style.display = "flex";
+  enrollModal.style.opacity = "1";
+  enrollModal.style.visibility = "visible";
+  enrollModal.style.pointerEvents = "auto";
+
+  if (enrollProgressBar) enrollProgressBar.style.width = "0%";
+  if (enrollPctText) enrollPctText.textContent = "0%";
+  if (enrollStageLabel) enrollStageLabel.textContent = "OPTICAL CALIBRATION INITIATED";
+  if (enrollStatusBadge) {
+    enrollStatusBadge.textContent = "CALIBRATING...";
+    enrollStatusBadge.style.color = "#00e5ff";
+    enrollStatusBadge.style.borderColor = "var(--color-cyan)";
+  }
+  if (enrollGuidanceText) {
+    enrollGuidanceText.textContent = `Center face within the oval reticle. Maintain eye contact while J.A.R.V.I.S. registers 3D neural topography for ${adminName}.`;
+  }
+  startFastEnrollmentRelay();
+}
+
+function updateEnrollmentProgressUI(pct, stage, frames) {
+  if (!enrollModal || enrollModal.classList.contains("hidden")) {
+    showEnrollmentModalUI();
+  }
+  if (enrollProgressBar) enrollProgressBar.style.width = `${pct}%`;
+  if (enrollPctText) enrollPctText.textContent = `${pct}%`;
+  if (enrollStageLabel) enrollStageLabel.textContent = (stage || "CALIBRATING").toUpperCase();
+  if (enrollStatusBadge) enrollStatusBadge.textContent = `CAPTURING // ${pct}% [${frames || 0}/30]`;
+}
+
+function finishEnrollmentModalUI(adminName = "Admin") {
+  if (enrollProgressBar) enrollProgressBar.style.width = "100%";
+  if (enrollPctText) enrollPctText.textContent = "100%";
+  if (enrollStageLabel) enrollStageLabel.textContent = "ADMIN PROFILE CANONICALIZED & COMMITTED";
+  if (enrollStatusBadge) {
+    enrollStatusBadge.textContent = "AUTHENTICATED // REGISTERED";
+    enrollStatusBadge.style.color = "#00e676";
+    enrollStatusBadge.style.borderColor = "#00e676";
+  }
+  if (enrollGuidanceText) {
+    enrollGuidanceText.textContent = `Success. Biometric profile for ${adminName} is permanently enrolled. All security clearances granted.`;
+  }
+  soundscape.play("chime_positive");
+  scene.triggerBurst();
+  showToast(`✅ ADMIN BIOMETRIC ENROLLED: ${adminName.toUpperCase()}`, 5000);
+  stopFastEnrollmentRelay();
+  setTimeout(() => {
+    closeEnrollmentModal(false);
+  }, 2500);
+}
+
+function startFaceEnrollment() {
+  showEnrollmentModalUI();
+  sendWsMessage({ type: "START_FACE_ENROLLMENT", admin_name: "Admin" });
+  soundscape.play("blueprint_whoosh");
+}
+
+function closeEnrollmentModal(notifyBackend = true) {
+  if (!enrollModal) return;
+  enrollModal.classList.add("hidden");
+  enrollModal.style.display = "none";
+  enrollModal.style.opacity = "0";
+  enrollModal.style.visibility = "hidden";
+  enrollModal.style.pointerEvents = "none";
+  stopFastEnrollmentRelay();
+  if (notifyBackend) {
+    sendWsMessage({ type: "CANCEL_FACE_ENROLLMENT" });
+  }
+}
+
+function startFastEnrollmentRelay() {
+  if (fastEnrollTimer) clearInterval(fastEnrollTimer);
+  if (!cameraActive) return;
+  fastEnrollTimer = setInterval(() => {
+    if (!cameraActive || !tracker || !tracker.video || tracker.video.readyState < 2) return;
+    try {
+      const ctx = relayCanvas.getContext("2d");
+      ctx.drawImage(tracker.video, 0, 0, 640, 480);
+      const dataUrl = relayCanvas.toDataURL("image/jpeg", 0.65);
+      sendWsMessage({ type: "OPTICAL_FRAME", frame: dataUrl });
+    } catch (e) {
+      console.debug("Fast optical frame relay error:", e);
+    }
+  }, 120);
+}
+
+function stopFastEnrollmentRelay() {
+  if (fastEnrollTimer) {
+    clearInterval(fastEnrollTimer);
+    fastEnrollTimer = null;
+  }
+}
+
+enrollTriggerBtn?.addEventListener("click", startFaceEnrollment);
+enrollCloseBtn?.addEventListener("click", () => closeEnrollmentModal(true));
+enrollBackdrop?.addEventListener("click", () => closeEnrollmentModal(true));
+
 // Button Events
 gestureBtn?.addEventListener("click", toggleCamera);
 themeBtn?.addEventListener("click", cycleTheme);
@@ -1090,6 +1221,7 @@ document.querySelectorAll(".shortcut-item").forEach((item) => {
     const sc = item.getAttribute("data-shortcut");
     if (sc === "cmd") openCmdModal();
     else if (sc === "g") toggleCamera();
+    else if (sc === "e") startFaceEnrollment();
     else if (sc === "t") cycleTheme();
     else if (sc === "s") toggleSoundscape();
     else if (sc === "v") toggleVoiceCommands();
@@ -1108,14 +1240,35 @@ document.querySelectorAll(".shortcut-item").forEach((item) => {
 // Keyboard controls
 window.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") {
-    if (e.key === "Escape") closeCmdModal();
+    if (e.key === "Escape") {
+      closeCmdModal();
+      closeEnrollmentModal(true);
+    }
     return;
   }
   const key = e.key.toLowerCase();
 
+  if (e.key === "Escape") {
+    closeCmdModal();
+    closeEnrollmentModal(true);
+    return;
+  }
+
   if (e.key === "Enter" || e.key === "/" || key === "c") {
     e.preventDefault();
     openCmdModal();
+    return;
+  }
+
+  if (key === "e") {
+    startFaceEnrollment();
+    return;
+  }
+
+  if (key === "x") {
+    scene.toggleExplode();
+    soundscape.play("sub_bass_tick");
+    showToast(`CAD Explode: ${(scene.getExplodeLevel() * 100).toFixed(0)}%`);
     return;
   }
 
@@ -1142,10 +1295,6 @@ window.addEventListener("keydown", (e) => {
     }
   } else if (key === "m") {
     initLocalMic();
-  } else if (key === "e") {
-    scene.toggleExplode();
-    soundscape.play("sub_bass_tick");
-    showToast(`CAD Explode: ${(scene.getExplodeLevel() * 100).toFixed(0)}%`);
   } else if (key === "b") {
     scene.loadConstruct();
     soundscape.play("blueprint_whoosh");
