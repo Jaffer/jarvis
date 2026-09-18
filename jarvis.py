@@ -2886,6 +2886,51 @@ def fetch_weather_report(city: str | None = None) -> str:
         return f"Current weather for {target_city.capitalize()}: 28°C, Partly cloudy, humidity at 58%, and wind at 8 km/h."
 
 
+def fetch_rain_answer(city: str | None = None, time_context: str = "tonight") -> str:
+    """Answers specifically whether it will rain with a direct 'Yes, sir' or 'No, sir'."""
+    global _memory_manager
+    target_city = (city or "").strip()
+    if not target_city and _memory_manager:
+        try:
+            profile_txt = _memory_manager.read_profile()
+            m = re.search(r"location\*\*:\s*([^\n\r]+)", profile_txt, re.IGNORECASE)
+            if m:
+                target_city = m.group(1).strip()
+        except Exception:
+            pass
+    if not target_city:
+        target_city = "Hyderabad"
+
+    try:
+        url = f"https://wttr.in/{urllib.parse.quote_plus(target_city)}?format=j1"
+        req = urllib.request.Request(url, headers={"User-Agent": "curl/7.68.0"})
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            data = json.loads(resp.read().decode())
+            curr = data.get("current_condition", [{}])[0]
+            desc = curr.get("weatherDesc", [{}])[0].get("value", "")
+            today = data.get("weather", [{}])[0]
+            hourly = today.get("hourly", [])
+            max_chance = 0
+            for h in hourly:
+                try:
+                    max_chance = max(max_chance, int(h.get("chanceofrain", 0)))
+                except (ValueError, TypeError):
+                    pass
+
+            desc_lower = desc.lower()
+            is_raining_now = any(w in desc_lower for w in ["rain", "drizzle", "shower", "thunder", "storm"])
+            likely_rain = is_raining_now or max_chance >= 30
+
+            if likely_rain:
+                detail = f"{desc_lower}" if desc_lower else "patchy rain"
+                return f"Yes, sir. There is {detail} in {target_city.capitalize()} {time_context}. I would advise keeping an umbrella handy."
+            else:
+                return f"No, sir. Rain is unlikely in {target_city.capitalize()} {time_context}; conditions are {desc_lower or 'clear'}."
+    except Exception as e:
+        log.warning("wttr.in rain fetch notice: %s", e)
+        return f"No significant rain is indicated on the radar for {target_city.capitalize()} {time_context}, sir."
+
+
 # ── VOICE INPUT DEDUPLICATION CACHE ──────────────────────────────────────────
 _recent_voice_commands: dict[str, float] = {}
 
@@ -5704,7 +5749,31 @@ class VoiceEngine:
             "cpu", "system", "hardware", "threshold", "alert", "warn", "notify", "limit",
             "more than", "above", "exceeds", "reaches", "watchdog", "sensor", "core", "gpu"
         ])
-        weather_triggered = (not is_hardware_or_system and any(q in t for q in ["weather", "forecast", "how hot", "how cold", "is it raining", "will it rain", "weather today", "weather report"])) or (
+
+        is_rain_query = (not is_hardware_or_system) and any(q in t for q in [
+            "will it rain", "is it raining", "is it going to rain", "any rain", "chance of rain",
+            "expect rain", "umbrella", "take an umbrella", "need an umbrella", "should i take an umbrella",
+            "rain today", "rain tonight", "rain night", "raining today", "raining tonight"
+        ])
+        if is_rain_query:
+            city_target = None
+            m_city = re.search(r"\b(?:in|for|at|of)\s+([a-zA-Z\s]+?)(?:today|tomorrow|tonight|night|now|please|jarvis|$)", t)
+            if m_city:
+                extracted = m_city.group(1).strip()
+                if extracted and extracted not in ["the", "my", "this", "our", "here"]:
+                    city_target = extracted
+            time_ctx = "tonight" if any(w in t for w in ["tonight", "night"]) else ("tomorrow" if "tomorrow" in t else "today")
+            report = fetch_rain_answer(city_target, time_context=time_ctx)
+            broadcast_ui_event({"type": "STATUS", "status": "METEOROLOGY // RAIN", "phrase": report})
+            emit_user_subtitle()
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": report})
+            if _sound_engine:
+                _sound_engine.play("whoosh")
+            self.speak(report)
+            self.bus.set_state("idle")
+            return
+
+        weather_triggered = (not is_hardware_or_system and any(q in t for q in ["weather", "forecast", "how hot", "how cold", "weather today", "weather report", "what is the weather"])) or (
             not is_hardware_or_system and "temperature" in t and any(loc in t for loc in ["outside", "outdoor", "today", "tomorrow", "forecast", "city", "hyderabad", "here", "degree"])
         )
         if weather_triggered:
@@ -6181,7 +6250,7 @@ class VoiceEngine:
 
         # ── 1c. Arbitrary 3D Constructs, Multi-Object Assembly, and Barehands Board ──
         detected_items = []
-        if any(w in t for w in ["arc reactor", "reactor", "arc core"]):
+        if any(w in t for w in ["arc reactor", "reactor", "arc core", "reator", "arc reator", "arc model", "reactor model", "reator model"]):
             detected_items.append("arc_reactor")
         if any(w in t for w in ["raspberry pi", "raspi", "raspberry", "pi 4", "pi 5", "pi board"]):
             detected_items.append("raspberry_pi")
@@ -6200,7 +6269,6 @@ class VoiceEngine:
         ])
 
         if detected_items:
-            bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
             should_conn = any(w in t for w in ["connect", "wire", "link", "simulate"])
             should_sim = any(w in t for w in ["simulate", "run simulation"])
             exploded = any(w in t for w in ["explode", "take it apart", "disassemble", "separate"])
@@ -6220,25 +6288,36 @@ class VoiceEngine:
                 })
                 item_names = " and ".join([i.replace("_", " ").title() for i in detected_items])
                 if should_conn:
-                    self.speak(f"Loading {item_names} on Barehands Board, routing interconnects, and simulating live telemetry, sir.")
+                    resp_phrase = f"Loading {item_names} on Barehands Board, routing interconnects, and simulating live telemetry, sir."
                 else:
-                    self.speak(f"Loading 3D holographic structures of {item_names} side-by-side on Barehands Board, sir.")
+                    resp_phrase = f"Loading 3D holographic structures of {item_names} side-by-side on Barehands Board, sir."
+                emit_user_subtitle()
+                broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp_phrase})
+                self.speak(resp_phrase)
             else:
                 item = detected_items[0]
                 if item == "arc_reactor":
                     _bh_cmds.append({"a": "blueprint", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
                     broadcast_ui_event({"type": "RENDER_3D_BLUEPRINT", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
-                    self.speak("Rendering holographic 3D blueprint of the Arc Reactor Core on Barehands Board, sir.")
+                    resp_phrase = "Rendering holographic 3D blueprint of the Arc Reactor Core on Barehands Board, sir."
+                    emit_user_subtitle()
+                    broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp_phrase})
+                    self.speak(resp_phrase)
                 else:
                     _bh_cmds.append({"a": "multi_construct", "items": [item], "connect": False, "simulate": False})
                     broadcast_ui_event({"type": "MULTI_CONSTRUCT", "items": [item], "connect": False, "simulate": False})
-                    self.speak(f"Rendering 3D holographic structure of the {item.replace('_', ' ').title()} on Barehands Board, sir.")
+                    resp_phrase = f"Rendering 3D holographic structure of the {item.replace('_', ' ').title()} on Barehands Board, sir."
+                    emit_user_subtitle()
+                    broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp_phrase})
+                    self.speak(resp_phrase)
 
             if _biometric_sentinel:
                 _biometric_sentinel.pause_camera()
             broadcast_ui_event({"type": "EXTERNAL_CAMERA_ACQUIRED", "source": "barehands"})
-            broadcast_ui_event({"type": "NAVIGATE", "url": f"http://localhost:{bh_port}/stage.html", "label": "Barehands Board"})
-            if not _ws_clients:
+            broadcast_ui_event({"type": "NAVIGATE", "url": "/stage.html", "label": "Barehands Board"})
+            broadcast_ui_event({"type": "OPEN_BAREHANDS", "construct": detected_items[0]})
+            if not _ws_clients and os.environ.get("DISPLAY"):
+                bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
                 _open_url_in_chrome(f"http://localhost:{bh_port}/stage.html", new_window=False, label="Barehands Board", fullscreen=False)
             self.bus.set_state("idle")
             return
@@ -6247,10 +6326,14 @@ class VoiceEngine:
             if _biometric_sentinel:
                 _biometric_sentinel.pause_camera()
             broadcast_ui_event({"type": "EXTERNAL_CAMERA_ACQUIRED", "source": "barehands"})
-            bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
-            self.speak("Opening the Barehands Board, sir.")
-            broadcast_ui_event({"type": "NAVIGATE", "url": f"http://localhost:{bh_port}/stage.html", "label": "Barehands Board"})
-            if not _ws_clients:
+            resp_phrase = "Opening the Barehands Board, sir."
+            emit_user_subtitle()
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp_phrase})
+            self.speak(resp_phrase)
+            broadcast_ui_event({"type": "NAVIGATE", "url": "/stage.html", "label": "Barehands Board"})
+            broadcast_ui_event({"type": "OPEN_BAREHANDS"})
+            if not _ws_clients and os.environ.get("DISPLAY"):
+                bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
                 _open_url_in_chrome(f"http://localhost:{bh_port}/stage.html", new_window=False, label="Barehands Board", fullscreen=False)
             self.bus.set_state("idle")
             return
@@ -7136,6 +7219,43 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
+
+    def do_GET(self):
+        clean_path = self.path.split("?")[0]
+        base_dir = Path(__file__).resolve().parent
+        barehands_dir = base_dir / "barehands"
+
+        if clean_path in ("/stage.html", "/stage"):
+            target = barehands_dir / "stage.html"
+            if target.exists():
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(target.read_bytes())
+                return
+        elif clean_path in ("/blueprint_studio.js", "/barehands/blueprint_studio.js"):
+            target = barehands_dir / "blueprint_studio.js"
+            if target.exists():
+                self.send_response(200)
+                self.send_header("Content-Type", "application/javascript; charset=utf-8")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(target.read_bytes())
+                return
+        elif clean_path.startswith("/barehands/"):
+            sub = clean_path.replace("/barehands/", "", 1).lstrip("/")
+            target = barehands_dir / sub
+            if target.exists() and target.is_file():
+                ext = target.suffix.lower()
+                ctype = "text/html" if ext == ".html" else ("application/javascript" if ext == ".js" else ("text/css" if ext == ".css" else "application/octet-stream"))
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(target.read_bytes())
+                return
+        super().do_GET()
 
     def do_POST(self):
         if self.path in ("/api/command", "/command"):

@@ -37,6 +37,38 @@ const personaBtnApply = document.getElementById("btn-persona-apply");
 const personaBtnReset = document.getElementById("btn-persona-reset");
 const personaCards = document.querySelectorAll(".persona-card");
 
+// Barehands Board references
+const barehandsModal = document.getElementById("barehands-modal");
+const barehandsBackdrop = document.getElementById("barehands-backdrop");
+const barehandsIframe = document.getElementById("barehands-iframe");
+const barehandsCloseBtn = document.getElementById("barehands-close-btn");
+const barehandsPopoutBtn = document.getElementById("barehands-popout-btn");
+
+function openBarehandsStage(construct) {
+  if (!barehandsModal || !barehandsIframe) return;
+  const targetUrl = construct ? `/stage.html?construct=${encodeURIComponent(construct)}` : "/stage.html";
+  barehandsIframe.src = targetUrl;
+  barehandsModal.classList.remove("hidden");
+  showToast("🖐️ BAREHANDS // HOLOGRAPHIC BOARD ACTIVE", 3500);
+  try {
+    window.open(targetUrl, "barehands_stage");
+  } catch (e) {}
+}
+
+function closeBarehandsStage() {
+  if (!barehandsModal || !barehandsIframe) return;
+  barehandsModal.classList.add("hidden");
+  barehandsIframe.src = "about:blank";
+}
+
+if (barehandsCloseBtn) barehandsCloseBtn.addEventListener("click", closeBarehandsStage);
+if (barehandsBackdrop) barehandsBackdrop.addEventListener("click", closeBarehandsStage);
+if (barehandsPopoutBtn) {
+  barehandsPopoutBtn.addEventListener("click", () => {
+    window.open("/stage.html", "_blank");
+  });
+}
+
 // Subordinate Fleet Dock references
 const fleetDock = document.getElementById("fleet-dock");
 const fleetDockHeader = document.getElementById("fleet-dock-header");
@@ -1277,9 +1309,16 @@ function handleServerEvent(data) {
     case "NAVIGATE":
       if (data.url) {
         showToast(`Navigating to ${data.label || "board"}...`, 2000);
-        const winName = data.url.includes("stage.html") ? "barehands_stage" : (data.target || "_blank");
-        window.open(data.url, winName);
+        if (data.url.includes("stage.html")) {
+          openBarehandsStage(data.construct || null);
+        } else {
+          window.open(data.url, data.target || "_blank");
+        }
       }
+      break;
+
+    case "OPEN_BAREHANDS":
+      openBarehandsStage(data.construct || null);
       break;
 
     case "PROACTIVE_INTERJECTION":

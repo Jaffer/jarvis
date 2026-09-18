@@ -813,6 +813,73 @@
       box-shadow: 0 0 8px var(--pod-color, #00e5ff);
     }
 
+    /* Barehands Spatial Holographic Board Modal */
+    .barehands-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.25s ease, visibility 0.25s ease;
+    }
+    .barehands-modal.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .barehands-modal-backdrop {
+      position: absolute;
+      inset: 0;
+      background: rgba(3, 7, 12, 0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+    .barehands-modal-box {
+      position: relative;
+      z-index: 1;
+      width: min(1300px, 96vw);
+      height: min(820px, 92vh);
+      background: rgba(6, 12, 18, 0.94);
+      border: 1px solid rgba(0, 229, 255, 0.6);
+      box-shadow: 0 0 50px rgba(0, 229, 255, 0.25), inset 0 0 30px rgba(0, 0, 0, 0.8);
+      border-radius: 10px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      animation: modalPop 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .barehands-modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 18px;
+      background: rgba(0, 229, 255, 0.08);
+      border-bottom: 1px solid rgba(0, 229, 255, 0.25);
+    }
+    .barehands-modal-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: #00e5ff;
+      text-transform: uppercase;
+    }
+    .barehands-modal-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    #barehands-iframe {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+      border: none;
+      background: #000;
+    }
+
     /* Holographic Silent Typing Command Modal */
     .cmd-modal {
       position: fixed;
@@ -1623,6 +1690,24 @@
       <div id="enroll-guidance-text" class="enroll-guidance">
         Center your face in the holographic reticle and hold steady while the neural mesh calibrates.
       </div>
+    </div>
+  </div>
+
+  <!-- Barehands Spatial Holographic Board Modal -->
+  <div id="barehands-modal" class="barehands-modal hidden">
+    <div class="barehands-modal-backdrop" id="barehands-backdrop"></div>
+    <div class="barehands-modal-box">
+      <div class="barehands-modal-header">
+        <div class="barehands-modal-title">
+          <span class="cmd-pulse-dot" style="background: #00e5ff; box-shadow: 0 0 8px #00e5ff;"></span>
+          <span>BAREHANDS // SPATIAL HOLOGRAPHIC BLUEPRINT STAGE</span>
+        </div>
+        <div class="barehands-modal-actions">
+          <button id="barehands-popout-btn" class="hud-btn" style="border-color:#00e5ff; color:#00e5ff; padding: 4px 10px; font-size: 10px;">POPOUT ↗</button>
+          <button id="barehands-close-btn" class="hud-btn" style="border-color:#ff4444; color:#ff4444; padding: 4px 10px; font-size: 10px;">CLOSE [ESC]</button>
+        </div>
+      </div>
+      <iframe id="barehands-iframe" src="about:blank" allow="camera; microphone; fullscreen; accelerometer; gyroscope"></iframe>
     </div>
   </div>
 
