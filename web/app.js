@@ -814,13 +814,50 @@ function stopActiveSpeech() {
   setVoiceState("idle");
 }
 
+let globalAudioCtx = null;
+function ensureAudioContext() {
+  try {
+    if (!globalAudioCtx) {
+      const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+      if (AudioCtxClass) globalAudioCtx = new AudioCtxClass();
+    }
+    if (globalAudioCtx && globalAudioCtx.state === "suspended") {
+      globalAudioCtx.resume().catch(() => {});
+    }
+  } catch (e) {}
+  return globalAudioCtx;
+}
+window.addEventListener("click", ensureAudioContext, { passive: true });
+window.addEventListener("keydown", ensureAudioContext, { passive: true });
+window.addEventListener("touchstart", ensureAudioContext, { passive: true });
+
+let cachedBrowserVoices = [];
+function updateBrowserVoices() {
+  if ('speechSynthesis' in window) {
+    cachedBrowserVoices = window.speechSynthesis.getVoices() || [];
+  }
+}
+if ('speechSynthesis' in window) {
+  updateBrowserVoices();
+  window.speechSynthesis.onvoiceschanged = updateBrowserVoices;
+}
+
 function startOrbPulseAnimation(getAudioLevelFn) {
   if (pulseAnimFrame) cancelAnimationFrame(pulseAnimFrame);
   function loop() {
-    const level = getAudioLevelFn ? getAudioLevelFn() : (0.28 + 0.22 * Math.sin(performance.now() * 0.009) * Math.cos(performance.now() * 0.013));
+    const level = getAudioLevelFn ? getAudioLevelFn() : (0.35 + 0.25 * Math.sin(performance.now() * 0.009) * Math.cos(performance.now() * 0.013));
     if (typeof scene !== "undefined" && scene) {
       scene.setSpeaking(true);
       scene.setAudioLevel(level);
+      if (!getAudioLevelFn) {
+        // Feed synthetic holographic waveform oscillations so 3D rings visibly ripple & pulse
+        const now = performance.now() * 0.015;
+        const syntheticSamples = [];
+        for (let i = 0; i < 64; i++) {
+          syntheticSamples.push(Math.sin(now + i * 0.45) * level);
+        }
+        scene.feedWaveform(syntheticSamples);
+      }
     }
     setVoiceState("speaking");
     pulseAnimFrame = requestAnimationFrame(loop);
@@ -831,15 +868,15 @@ function startOrbPulseAnimation(getAudioLevelFn) {
 function playAudioWithOrbPulsing(audioBase64, fallbackText) {
   stopActiveSpeech();
   try {
+    ensureAudioContext();
     const audio = new Audio("data:audio/mp3;base64," + audioBase64);
     currentPlayingAudio = audio;
 
     let analyser = null;
     let dataArray = null;
     try {
-      const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
-      if (AudioCtxClass) {
-        const actx = new AudioCtxClass();
+      const actx = ensureAudioContext();
+      if (actx) {
         const src = actx.createMediaElementSource(audio);
         analyser = actx.createAnalyser();
         analyser.fftSize = 64;
@@ -863,10 +900,13 @@ function playAudioWithOrbPulsing(audioBase64, fallbackText) {
             sum += Math.abs(v);
           }
           const rms = sum / dataArray.length;
-          if (typeof scene !== "undefined" && scene) scene.feedWaveform(samples);
-          return Math.min(1.0, rms * 3.2);
+          if (typeof scene !== "undefined" && scene) {
+            scene.feedWaveform(samples);
+            scene.setAudioLevel(Math.min(1.0, rms * 4.0));
+          }
+          return Math.min(1.0, rms * 3.8);
         }
-        return 0.32 + 0.25 * Math.sin(performance.now() * 0.009);
+        return 0.38 + 0.28 * Math.sin(performance.now() * 0.009);
       });
       if (soundscape) soundscape.duck();
       const spBadge = document.getElementById("speech-status");
@@ -887,7 +927,7 @@ function playAudioWithOrbPulsing(audioBase64, fallbackText) {
     };
 
     audio.onerror = (err) => {
-      console.warn("ElevenLabs audio play error; falling back to deep British male browser TTS:", err);
+      console.warn("Neural audio play error; falling back to British male browser TTS:", err);
       stopActiveSpeech();
       if (fallbackText) speakTextBrowser(fallbackText);
     };
@@ -911,26 +951,27 @@ function speakTextBrowser(text) {
   stopActiveSpeech();
   try {
     const utterance = new SpeechSynthesisUtterance(text);
-    const voices = window.speechSynthesis.getVoices() || [];
+    const voices = cachedBrowserVoices.length > 0 ? cachedBrowserVoices : (window.speechSynthesis.getVoices() || []);
     
     // Strictly filter for male voices — exclude any female/woman voice
     const isMale = (v) => {
       const n = (v.name || "").toLowerCase();
-      return (n.includes("male") || n.includes("george") || n.includes("daniel") || n.includes("oliver") || n.includes("rishi") || n.includes("guy") || n.includes("james") || n.includes("brian") || n.includes("arthur") || n.includes("david"))
-             && !n.includes("female") && !n.includes("woman") && !n.includes("girl") && !n.includes("samantha") && !n.includes("victoria");
+      return (n.includes("male") || n.includes("george") || n.includes("daniel") || n.includes("oliver") || n.includes("rishi") || n.includes("guy") || n.includes("james") || n.includes("brian") || n.includes("arthur") || n.includes("david") || n.includes("ryan") || n.includes("thomas"))
+             && !n.includes("female") && !n.includes("woman") && !n.includes("girl") && !n.includes("samantha") && !n.includes("victoria") && !n.includes("zira");
     };
 
     let selectedVoice = voices.find(v => (v.lang.includes("en-GB") || v.lang.includes("en_GB")) && isMale(v))
+                     || voices.find(v => (v.lang.includes("en-GB") || v.lang.includes("en_GB")) && !v.name.toLowerCase().includes("female"))
                      || voices.find(v => (v.lang.includes("en-US") || v.lang.includes("en_US")) && isMale(v))
-                     || voices.find(v => v.lang.startsWith("en") && isMale(v))
-                     || voices.find(v => (v.lang.includes("en-GB") || v.lang.includes("en_GB")) && !v.name.toLowerCase().includes("female"));
+                     || voices.find(v => v.lang.startsWith("en") && isMale(v));
 
     if (selectedVoice) {
       utterance.voice = selectedVoice;
     }
+    utterance.lang = "en-GB";
 
-    // Set pitch to 0.78 for deep, refined British masculine Tony Stark presence
-    utterance.pitch = 0.78;
+    // Set pitch to 0.75 for deep, refined British masculine Tony Stark presence
+    utterance.pitch = 0.75;
     utterance.rate = 1.02;
 
     utterance.onstart = () => {

@@ -6700,8 +6700,18 @@ class VoiceEngine:
             chunks = client.text_to_speech.convert(**kwargs)
             raw = b"".join(chunks)
         except Exception as e:
-            log.warning("ElevenLabs TTS error: %s", e)
-            return
+            log.warning("ElevenLabs TTS error: %s; initiating Edge-TTS fallback", e)
+            raw = None
+
+        if not raw:
+            try:
+                raw_mp3, _ = synthesize_jarvis_audio_mp3(text)
+                if raw_mp3:
+                    import miniaudio
+                    decoded = miniaudio.decode(raw_mp3, nchannels=1, sample_rate=pcm_rate)
+                    raw = decoded.samples
+            except Exception as e_dec:
+                log.warning("Local TTS fallback decode notice: %s", e_dec)
 
         if not raw or self._stop_speaking.is_set():
             return
@@ -6930,6 +6940,71 @@ def elevenlabs_env_config() -> tuple[str, str, str, int]:
     return voice, model, fmt, rate
 
 
+def synthesize_jarvis_audio_mp3(text: str) -> tuple[bytes | None, str]:
+    """Synthesize authentic British male J.A.R.V.I.S. voice.
+    Primary Live Voice: Microsoft Edge Neural British Male (en-GB-RyanNeural, pitch=-4Hz, rate=+2%).
+    Provides 100% free, studio-grade British AI voice with zero quota limits.
+    Fallback: ElevenLabs (Voice ID Hl96BMcxGf0y6Bg5qTgt).
+    Returns (mp3_bytes, provider_name).
+    """
+    if not text or not text.strip():
+        return None, "empty"
+
+    clean_text = re.sub(r"[*_~`#>\[\]]", " ", text)
+    clean_text = re.sub(r"https?://\S+", "", clean_text)
+    clean_text = re.sub(r"\s+", " ", clean_text).strip()
+    if not clean_text:
+        clean_text = text.strip()
+
+    # 1. Primary Live Engine: Microsoft Edge Neural British Male (en-GB-RyanNeural)
+    try:
+        import edge_tts, asyncio
+        async def _run_edge():
+            comm = edge_tts.Communicate(clean_text, "en-GB-RyanNeural", pitch="-4Hz", rate="+2%")
+            buf = bytearray()
+            async for chunk in comm.stream():
+                if chunk.get("type") == "audio":
+                    buf.extend(chunk.get("data", b""))
+            return bytes(buf)
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    audio_bytes = pool.submit(asyncio.run, _run_edge()).result(timeout=12)
+            else:
+                audio_bytes = loop.run_until_complete(_run_edge())
+        except RuntimeError:
+            audio_bytes = asyncio.run(_run_edge())
+
+        if audio_bytes and len(audio_bytes) > 500:
+            return audio_bytes, "edge-tts"
+    except Exception as e_edge:
+        log.warning("Edge-TTS synthesis notice: %s; falling back to ElevenLabs", e_edge)
+
+    # 2. Fallback Engine: ElevenLabs
+    try:
+        api_key = (os.environ.get("ELEVENLABS_API_KEY") or "sk_65d10500af500320ec5209365ca9312648066edb4bae4935").strip()
+        vid = (os.environ.get("ELEVENLABS_VOICE_ID") or "Hl96BMcxGf0y6Bg5qTgt").strip()
+        if api_key:
+            from elevenlabs.client import ElevenLabs
+            client = ElevenLabs(api_key=api_key)
+            chunks = client.text_to_speech.convert(
+                voice_id=vid,
+                text=clean_text,
+                model_id="eleven_multilingual_v2",
+                output_format="mp3_22050_32"
+            )
+            raw_audio = b"".join(chunks)
+            if raw_audio and len(raw_audio) > 500:
+                return raw_audio, "elevenlabs"
+    except Exception as e_eleven:
+        log.warning("ElevenLabs fallback synthesis notice: %s", e_eleven)
+
+    return None, "none"
+
+
 def _jarvis_welcome_cache_dir() -> Path:
     base = Path(__file__).resolve().parent
     override = (os.environ.get("JARVIS_WELCOME_CACHE_DIR") or "").strip()
@@ -7101,23 +7176,10 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
 
             audio_base64 = None
             if resp_text:
-                try:
-                    api_key = (os.environ.get("ELEVENLABS_API_KEY") or "sk_65d10500af500320ec5209365ca9312648066edb4bae4935").strip()
-                    vid = (os.environ.get("ELEVENLABS_VOICE_ID") or "Hl96BMcxGf0y6Bg5qTgt").strip()
-                    if api_key:
-                        from elevenlabs.client import ElevenLabs
-                        client = ElevenLabs(api_key=api_key)
-                        chunks = client.text_to_speech.convert(
-                            voice_id=vid,
-                            text=resp_text,
-                            model_id="eleven_multilingual_v2",
-                            output_format="mp3_22050_32"
-                        )
-                        raw_audio = b"".join(chunks)
-                        if raw_audio:
-                            audio_base64 = base64.b64encode(raw_audio).decode("utf-8")
-                except Exception as e_tts:
-                    log.warning("HTTP API ElevenLabs synthesis notice: %s", e_tts)
+                raw_audio, audio_provider = synthesize_jarvis_audio_mp3(resp_text)
+                if raw_audio:
+                    audio_base64 = base64.b64encode(raw_audio).decode("utf-8")
+                    log.info("Synthesized live speech via %s (%d bytes)", audio_provider, len(raw_audio))
 
             response_payload = json.dumps({
                 "status": "ok",
