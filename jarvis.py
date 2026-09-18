@@ -5962,6 +5962,162 @@ class VoiceEngine:
                 self.bus.set_state("idle")
                 return
 
+        # ── Map Navigation & Route Opener (Google Maps with From/To) ──
+        # Handles queries like "open maps from Hyderabad to Bangalore", "navigate to Bangalore",
+        # "directions to Mumbai", "show route to Delhi", "open google maps", "open maps"
+        is_map_open_query = (
+            any(w in t for w in ["open maps", "open google maps", "show maps", "show google maps", "navigate to", "navigation to", "directions to", "directions from", "show route to", "open route", "launch maps"])
+            or (t.startswith("map ") or t.startswith("maps "))
+        )
+        if is_map_open_query:
+            clean_q = t
+            for prefix in ["can you", "please", "jarvis", "tell me", "launch", "open"]:
+                clean_q = re.sub(r"\b" + prefix + r"\b", "", clean_q, flags=re.IGNORECASE).strip()
+
+            orig_dest = None
+            # Pattern 1: maps from X to Y / directions from X to Y / route from X to Y
+            m = re.search(r"(?:maps|directions|navigation|route)\s+from\s+(.+?)\s+to\s+(.+)", clean_q)
+            if m:
+                orig_dest = (m.group(1).strip(), m.group(2).strip())
+
+            # Pattern 2: navigate to Y from X / directions to Y from X
+            if not orig_dest:
+                m = re.search(r"(?:navigate|navigation|directions|route)\s+to\s+(.+?)\s+from\s+(.+)", clean_q)
+                if m:
+                    orig_dest = (m.group(2).strip(), m.group(1).strip())
+
+            # Pattern 3: navigate to Y / directions to Y / route to Y / maps to Y
+            if not orig_dest:
+                m = re.search(r"(?:navigate|navigation|directions|route|maps|google maps)\s+to\s+(.+)", clean_q)
+                if m:
+                    orig_dest = ("", m.group(1).strip())
+
+            user_loc = "Hyderabad"
+            if _memory_manager:
+                try:
+                    p_txt = _memory_manager.read_profile()
+                    m_loc = re.search(r"location\*\*:\s*([^\n\r]+)", p_txt, re.IGNORECASE)
+                    if m_loc:
+                        user_loc = m_loc.group(1).strip()
+                except Exception:
+                    pass
+
+            if orig_dest and orig_dest[1]:
+                raw_orig, raw_dest = orig_dest
+                for noise in ["please", "jarvis", "right now", "?", "."]:
+                    raw_orig = raw_orig.replace(noise, "").strip()
+                    raw_dest = raw_dest.replace(noise, "").strip()
+                if not raw_orig or raw_orig in ["here", "my location", "current location", "this place"]:
+                    raw_orig = user_loc
+
+                maps_url = f"https://www.google.com/maps/dir/?api=1&origin={urllib.parse.quote_plus(raw_orig)}&destination={urllib.parse.quote_plus(raw_dest)}&travelmode=driving"
+                spoken = f"Plotting navigation route from {raw_orig.title()} to {raw_dest.title()} on Google Maps, sir."
+                broadcast_ui_event({"type": "STATUS", "status": "NAV // GOOGLE MAPS", "phrase": f"Navigating: {raw_orig.title()} ➔ {raw_dest.title()}"})
+                emit_user_subtitle()
+                broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": spoken})
+                broadcast_ui_event({"type": "NAVIGATE", "url": maps_url, "label": f"Maps: {raw_orig.title()} to {raw_dest.title()}"})
+                try:
+                    webbrowser.open(maps_url)
+                except Exception:
+                    pass
+                if _sound_engine:
+                    _sound_engine.play("whoosh")
+                self.speak(spoken)
+                self.bus.set_state("idle")
+                return
+            else:
+                # Standalone maps open
+                maps_url = f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote_plus(user_loc)}"
+                spoken = f"Opening Google Maps for {user_loc}, sir."
+                broadcast_ui_event({"type": "STATUS", "status": "NAV // GOOGLE MAPS", "phrase": "Google Maps Active"})
+                emit_user_subtitle()
+                broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": spoken})
+                broadcast_ui_event({"type": "NAVIGATE", "url": maps_url, "label": "Google Maps"})
+                try:
+                    webbrowser.open(maps_url)
+                except Exception:
+                    pass
+                if _sound_engine:
+                    _sound_engine.play("whoosh")
+                self.speak(spoken)
+                self.bus.set_state("idle")
+                return
+
+        # ── Workstation & System Level OS Control (Desktop & Mobile Bridge) ──
+        # Handles commands like:
+        # "lock computer", "take a screenshot", "open terminal", "open calculator", "volume up", "volume down", "mute"
+        if any(w in t for w in ["lock computer", "lock screen", "lock workstation", "lock the system"]):
+            spoken = "Locking workstation immediately, sir."
+            emit_user_subtitle()
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": spoken})
+            broadcast_ui_event({"type": "STATUS", "status": "SYSTEM // LOCKED", "phrase": "Workstation Locked"})
+            try:
+                if sys.platform == "win32":
+                    import ctypes
+                    ctypes.windll.user32.LockWorkStation()
+                else:
+                    subprocess.Popen(["loginctl", "lock-session"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                log.warning("Lock session error: %s", e)
+            self.speak(spoken)
+            self.bus.set_state("idle")
+            return
+
+        if any(w in t for w in ["screenshot", "capture screen", "take a screenshot", "screen capture"]):
+            spoken = "Capturing workstation display telemetry, sir."
+            emit_user_subtitle()
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": spoken})
+            broadcast_ui_event({"type": "STATUS", "status": "SYSTEM // SCREENSHOT", "phrase": "Screenshot Captured"})
+            snap_path = Path.home() / f"jarvis_screenshot_{int(time.time())}.png"
+            try:
+                subprocess.Popen(["import", "-window", "root", str(snap_path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+            if _sound_engine:
+                _sound_engine.play("ping")
+            self.speak(spoken)
+            self.bus.set_state("idle")
+            return
+
+        if any(w in t for w in ["open terminal", "launch terminal", "open bash", "open command prompt"]):
+            spoken = "Opening terminal console now, sir."
+            emit_user_subtitle()
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": spoken})
+            try:
+                subprocess.Popen(["gnome-terminal"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+            self.speak(spoken)
+            self.bus.set_state("idle")
+            return
+
+        if any(w in t for w in ["volume up", "increase volume", "louder"]):
+            try:
+                subprocess.Popen(["amixer", "-q", "sset", "Master", "10%+"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+            self.speak("Volume increased ten percent, sir.")
+            self.bus.set_state("idle")
+            return
+
+        if any(w in t for w in ["volume down", "decrease volume", "lower volume", "softer"]):
+            try:
+                subprocess.Popen(["amixer", "-q", "sset", "Master", "10%-"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+            self.speak("Volume decreased ten percent, sir.")
+            self.bus.set_state("idle")
+            return
+
+        if any(w in t for w in ["mute audio", "mute sound", "mute volume", "unmute volume", "toggle mute"]):
+            try:
+                subprocess.Popen(["amixer", "-q", "sset", "Master", "toggle"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+            self.speak("Master audio output toggled, sir.")
+            self.bus.set_state("idle")
+            return
+
         # ── Webcam 3D Gestures Mode (handles 'gestures mode', 'on the gestures', 'justice mode', etc.) ──
         if any(q in t for q in ["gesture", "gestures", "hand track", "justice mode", "gesture mode", "gestures mode"]):
             is_disable = any(w in t for w in ["off", "disable", "stop", "close", "shut"])
