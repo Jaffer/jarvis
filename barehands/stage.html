@@ -1187,6 +1187,21 @@ function applyCmds(cmds) {
       // THE RING materializes center stage (the arms-together state);
       // clear = literally everything off, the ring included
       loadTree().then(() => spawnStage(0.5, 0.42));
+    } else if (c.a === "multi_construct") {
+      if (window.HolographicStudio) {
+        window.HolographicStudio.loadMulti(c.items || [], c.connect || false, c.simulate || false);
+      }
+    } else if (c.a === "connect_and_simulate" || c.a === "connect") {
+      if (window.HolographicStudio) {
+        window.HolographicStudio.connectAndSimulate();
+      }
+    } else if (c.a === "ui_control") {
+      if (window.HolographicStudio) {
+        if (c.pos) window.HolographicStudio.setControlPosition(c.pos);
+        if (c.dock) window.HolographicStudio.dock(c.dock);
+        if (c.sim) window.HolographicStudio.setSimulationMode(c.sim);
+        if (c.exploded != null) window.HolographicStudio.setExploded(c.exploded);
+      }
     } else if (c.a === "blueprint" || c.a === "simulate" || c.a === "stress" || c.a === "construct" || c.a === "dynamic_construct" || c.a === "modify_construct") {
       if (window.HolographicStudio) {
         window.HolographicStudio.loadConstruct(

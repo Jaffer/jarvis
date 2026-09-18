@@ -41,6 +41,7 @@ class ProactiveWatchdogDaemon:
         telegram_bridge=None,
         broadcast_fn: Optional[Callable[[dict], None]] = None,
         tts_checker: Optional[Callable[[], bool]] = None,
+        activation_checker: Optional[Callable[[], bool]] = None,
     ):
         self.bus = signal_bus
         self.voice_engine = voice_engine
@@ -48,6 +49,7 @@ class ProactiveWatchdogDaemon:
         self.telegram = telegram_bridge
         self.broadcast_fn = broadcast_fn
         self.tts_checker = tts_checker
+        self.activation_checker = activation_checker
 
         self.enabled = True
         self.silent_mode = False  # If True, broadcast to UI/Telegram without speaking aloud
@@ -57,6 +59,7 @@ class ProactiveWatchdogDaemon:
         self._thread: Optional[threading.Thread] = None
 
         self.session_start_time = time.time()
+        self.boot_grace_period_s = 45.0  # Suppress boot thermal spikes for first 45s
         self.last_voice_activity_time = time.time()
 
         # Stateful Hysteresis Timestamps & Trigger Memory
@@ -71,10 +74,17 @@ class ProactiveWatchdogDaemon:
         self._pending_interjection: Optional[Tuple[str, str, str]] = None  # (category, level, phrase)
 
         # Thresholds
-        self.THERMAL_WARNING_C = 82.0
-        self.THERMAL_CRITICAL_C = 90.0
+        self.THERMAL_WARNING_C = 100.0  # Default 100°C as requested by user
+        self.THERMAL_CRITICAL_C = 105.0
         self.RAM_WARNING_PCT = 88.0
         self.DISK_WARNING_PCT = 92.0
+
+    def set_thermal_thresholds(self, warning_c: float, critical_c: float = None) -> None:
+        """Dynamically set the temperature threshold for watchdog thermal alerts."""
+        self.THERMAL_WARNING_C = float(warning_c)
+        self.THERMAL_CRITICAL_C = float(critical_c) if critical_c is not None else float(warning_c + 5.0)
+        self._last_alert_times["thermal"] = 0.0  # Reset alert cooldown
+        log.info("Watchdog thermal alert threshold updated: warning=%.1f°C, critical=%.1f°C", self.THERMAL_WARNING_C, self.THERMAL_CRITICAL_C)
 
         log.info("Proactive Watchdog Daemon initialized.")
 
@@ -222,10 +232,20 @@ class ProactiveWatchdogDaemon:
     def is_conversational_channel_clear(self) -> bool:
         """Strict check to ensure J.A.R.V.I.S. NEVER interrupts an active conversation.
         Requires:
-        1. SignalBus state is 'idle'.
-        2. No active TTS playback (_tts_playing is clear).
-        3. At least 5.0 seconds have elapsed since last voice activity.
+        1. Boot grace period has elapsed (>45s).
+        2. J.A.R.V.I.S. is activated (not in standby).
+        3. SignalBus state is 'idle'.
+        4. No active TTS playback (_tts_playing is clear).
+        5. At least 5.0 seconds have elapsed since last voice activity.
         """
+        # Boot grace period: suppress spoken interjections during system startup (first 45s)
+        if time.time() - self.session_start_time < self.boot_grace_period_s:
+            return False
+
+        # Standby check: if J.A.R.V.I.S. is not yet activated by wake-up phrase/key, suppress spoken channel
+        if self.activation_checker and not self.activation_checker():
+            return False
+
         if self.bus:
             try:
                 state = self.bus.state_dir.joinpath("state").read_text().strip()
@@ -406,6 +426,11 @@ class ProactiveWatchdogDaemon:
                 log.debug("Telegram alert dispatch notice: %s", e)
 
         # 3. Spoken Audio Interjection (preceded by subtle Stark chime)
+        is_activated = True if self.activation_checker is None else self.activation_checker()
+        if not is_activated:
+            log.info("Watchdog: Suppressing spoken audio for '%s' (JARVIS in standby mode). Broadcasted silently.", category)
+            return
+
         if not self.silent_mode and self.voice_engine:
             if self.sound_engine:
                 self.sound_engine.play("wake" if level != "critical" else "security_alert")

@@ -878,6 +878,9 @@ function handleServerEvent(data) {
 
     case "AUDIO_LEVEL":
       scene.setAudioLevel(data.rms);
+      if (data.waveform) {
+        scene.feedWaveform(data.waveform);
+      }
       if (audioMeterBar) {
         const pct = Math.min(100, Math.round(data.rms * 300));
         audioMeterBar.style.width = `${pct}%`;
@@ -952,6 +955,32 @@ function handleServerEvent(data) {
       updatePersonaUI(data);
       break;
 
+    case "ROAST_DELIVERED":
+      showToast(`🔥 STARK ROAST EXECUTED (${data.wit || 95}% Wit)`, 3500);
+      if (personaBadge) {
+        personaBadge.textContent = `🍸 WIT: ${data.wit || 95}% | UNFILTERED ROAST`;
+        personaBadge.className = "badge badge-persona-unfiltered";
+      }
+      if (soundscape) soundscape.play("whoosh");
+      break;
+
+    case "SPEAKER_MATCH":
+      const spkBadge = document.getElementById("speaker-badge");
+      if (spkBadge) {
+        const spkName = (data.speaker || "Vasim").toUpperCase();
+        spkBadge.textContent = `👤 ${spkName} (${data.confidence_pct || 97}%)`;
+        spkBadge.className = data.is_admin ? "badge badge-persona-stark" : "badge badge-standby";
+      }
+      break;
+
+    case "ACOUSTIC_SCENE":
+      const acBadge = document.getElementById("acoustic-badge");
+      if (acBadge) {
+        const shortScene = (data.scene || "QUIET").replace("_", " ").split(" ")[0];
+        acBadge.textContent = `🎙️ ${data.decibels || 34}dB | ${shortScene}`;
+      }
+      break;
+
     case "FLEET_UPDATE":
       updateFleetStatusUI(data);
       break;
@@ -982,10 +1011,18 @@ function handleServerEvent(data) {
       addTerminalLine("jarvis", `Memory Vault updated: ${data.note}`, true);
       break;
 
+    case "HUMAN_EXPERIENCE_UPDATED":
+      showToast(`🧠 Human Insight: ${data.topic || "Cognitive Pattern Acquired"}`, 3500);
+      scene.triggerBurst();
+      soundscape.play("sub_bass_tick");
+      addTerminalLine("jarvis", `🧠 [HUMAN COGNITION] ${data.topic || "Research"}: ${data.summary || ""}`, true);
+      break;
+
     case "NAVIGATE":
       if (data.url) {
         showToast(`Navigating to ${data.label || "board"}...`, 2000);
-        window.open(data.url, "_blank");
+        const winName = data.url.includes("stage.html") ? "barehands_stage" : (data.target || "_blank");
+        window.open(data.url, winName);
       }
       break;
 
@@ -1060,7 +1097,309 @@ function handleServerEvent(data) {
       closeEnrollmentModal(false);
       showToast("Biometric enrollment cancelled", 2000);
       break;
+
+    case "UI_MUTATION":
+      handleUIMutation(data);
+      break;
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INSTANT VOICE-DRIVEN DYNAMIC UI MUTATION ENGINE
+// ═══════════════════════════════════════════════════════════════════════════
+function getUIMutationTargetElement(target) {
+  if (!target) return null;
+  const t = target.toLowerCase().trim();
+  const targetMap = {
+    "subtitles": "#cyber-terminal",
+    "subtitle": "#cyber-terminal",
+    "terminal": "#cyber-terminal",
+    "chat": "#cyber-terminal",
+    "history": "#cyber-terminal",
+    "fleet": "#fleet-dock",
+    "fleet_dock": "#fleet-dock",
+    "bots": "#fleet-dock",
+    "header": ".hud-header",
+    "top_bar": ".hud-header",
+    "topbar": ".hud-header",
+    "status_panel": ".status-panel",
+    "voice_ring": "#voice-ring",
+    "ring": "#voice-ring",
+    "audio_meter": ".audio-meter-container",
+    "meter": ".audio-meter-container",
+    "scanlines": ".overlay-scanlines",
+    "vignette": ".vignette-overlay",
+    "grain": ".overlay-grain",
+    "reticle": ".reticle-container",
+    "orb": "#canvas-container",
+  };
+  return targetMap[t] ? document.querySelector(targetMap[t]) : document.querySelector(target);
+}
+
+function setUIColorPalette(color) {
+  if (!color) return;
+  const c = color.toLowerCase().trim();
+  const root = document.documentElement;
+
+  const palettes = {
+    "emerald": { primary: "#00e676", glow: "rgba(0, 230, 118, 0.45)", border: "rgba(0, 230, 118, 0.35)", cyan: "#00e676", cyanGlow: "rgba(0, 230, 118, 0.4)", theme: "emerald" },
+    "green": { primary: "#00e676", glow: "rgba(0, 230, 118, 0.45)", border: "rgba(0, 230, 118, 0.35)", cyan: "#00e676", cyanGlow: "rgba(0, 230, 118, 0.4)", theme: "emerald" },
+    "purple": { primary: "#d500f9", glow: "rgba(213, 0, 249, 0.45)", border: "rgba(213, 0, 249, 0.35)", cyan: "#e040fb", cyanGlow: "rgba(224, 64, 251, 0.4)", theme: "neon_purple" },
+    "violet": { primary: "#d500f9", glow: "rgba(213, 0, 249, 0.45)", border: "rgba(213, 0, 249, 0.35)", cyan: "#e040fb", cyanGlow: "rgba(224, 64, 251, 0.4)", theme: "neon_purple" },
+    "magenta": { primary: "#e040fb", glow: "rgba(224, 64, 251, 0.45)", border: "rgba(224, 64, 251, 0.35)", cyan: "#ff4081", cyanGlow: "rgba(255, 64, 129, 0.4)", theme: "neon_purple" },
+    "red": { primary: "#ff1744", glow: "rgba(255, 23, 68, 0.45)", border: "rgba(255, 23, 68, 0.35)", cyan: "#ff5252", cyanGlow: "rgba(255, 82, 82, 0.4)", theme: "crimson" },
+    "crimson": { primary: "#ff1744", glow: "rgba(255, 23, 68, 0.45)", border: "rgba(255, 23, 68, 0.35)", cyan: "#ff5252", cyanGlow: "rgba(255, 82, 82, 0.4)", theme: "crimson" },
+    "cyan": { primary: "#00e5ff", glow: "rgba(0, 229, 255, 0.45)", border: "rgba(0, 229, 255, 0.35)", cyan: "#00b0ff", cyanGlow: "rgba(0, 176, 255, 0.4)", theme: "arc" },
+    "blue": { primary: "#00b0ff", glow: "rgba(0, 176, 255, 0.45)", border: "rgba(0, 176, 255, 0.35)", cyan: "#00e5ff", cyanGlow: "rgba(0, 229, 255, 0.4)", theme: "arc" },
+    "amber": { primary: "#ffaa30", glow: "rgba(255, 170, 48, 0.45)", border: "rgba(255, 170, 48, 0.35)", cyan: "#00e5ff", cyanGlow: "rgba(0, 229, 255, 0.4)", theme: "ultron" },
+    "gold": { primary: "#ffd700", glow: "rgba(255, 215, 0, 0.45)", border: "rgba(255, 215, 0, 0.35)", cyan: "#ffaa30", cyanGlow: "rgba(255, 170, 48, 0.4)", theme: "ultron" },
+    "orange": { primary: "#ff9100", glow: "rgba(255, 145, 0, 0.45)", border: "rgba(255, 145, 0, 0.35)", cyan: "#ffab40", cyanGlow: "rgba(255, 171, 64, 0.4)", theme: "ultron" },
+    "white": { primary: "#f5f5f5", glow: "rgba(245, 245, 245, 0.45)", border: "rgba(245, 245, 245, 0.35)", cyan: "#80d8ff", cyanGlow: "rgba(128, 216, 255, 0.4)", theme: "arc" }
+  };
+
+  const p = palettes[c] || {
+    primary: c.startsWith("#") ? c : "#00e5ff",
+    glow: c.startsWith("#") ? `${c}77` : "rgba(0, 229, 255, 0.45)",
+    border: c.startsWith("#") ? `${c}55` : "rgba(0, 229, 255, 0.35)",
+    cyan: c.startsWith("#") ? c : "#00e5ff",
+    cyanGlow: "rgba(0, 229, 255, 0.4)",
+    theme: "arc"
+  };
+
+  root.style.setProperty("--color-primary", p.primary);
+  root.style.setProperty("--color-primary-glow", p.glow);
+  root.style.setProperty("--color-border", p.border);
+  root.style.setProperty("--color-cyan", p.cyan);
+  root.style.setProperty("--color-cyan-glow", p.cyanGlow);
+
+  if (scene && scene.setColorTheme) {
+    scene.setColorTheme(p.theme);
+  }
+  showToast(`UI Color Palette: ${c.toUpperCase()}`, 2500);
+}
+
+function repositionElement(el, pos) {
+  if (!el) return;
+  const p = (pos || "right").toLowerCase().trim();
+  el.style.transition = "all 0.4s cubic-bezier(0.16, 1, 0.3, 1)";
+
+  if (p === "right" || p === "bottom-right") {
+    el.style.left = "auto";
+    el.style.right = "28px";
+    el.style.bottom = "100px";
+    el.style.top = "auto";
+    el.style.transform = "none";
+  } else if (p === "left" || p === "bottom-left") {
+    el.style.left = "28px";
+    el.style.right = "auto";
+    el.style.bottom = "100px";
+    el.style.top = "auto";
+    el.style.transform = "none";
+  } else if (p === "top-right") {
+    el.style.left = "auto";
+    el.style.right = "28px";
+    el.style.top = "84px";
+    el.style.bottom = "auto";
+    el.style.transform = "none";
+  } else if (p === "top-left") {
+    el.style.left = "28px";
+    el.style.right = "auto";
+    el.style.top = "84px";
+    el.style.bottom = "auto";
+    el.style.transform = "none";
+  } else if (p === "top" || p === "center-top") {
+    el.style.left = "50%";
+    el.style.transform = "translateX(-50%)";
+    el.style.top = "84px";
+    el.style.bottom = "auto";
+    el.style.right = "auto";
+  } else if (p === "center" || p === "middle") {
+    el.style.left = "50%";
+    el.style.top = "50%";
+    el.style.transform = "translate(-50%, -50%)";
+    el.style.bottom = "auto";
+    el.style.right = "auto";
+  } else if (p === "bottom" || p === "center-bottom") {
+    el.style.left = "50%";
+    el.style.transform = "translateX(-50%)";
+    el.style.bottom = "100px";
+    el.style.top = "auto";
+    el.style.right = "auto";
+  }
+}
+
+function addModularWidget(widgetType, data = {}) {
+  const w = (widgetType || "").toLowerCase().trim();
+  const id = `widget-${w.replace(/[^a-z0-9_]/g, "_")}`;
+  const existing = document.getElementById(id);
+  if (existing) {
+    existing.style.display = "";
+    showToast(`Widget ${w.toUpperCase()} active`, 2000);
+    return;
+  }
+
+  const container = document.createElement("div");
+  container.id = id;
+  container.className = "hud-modular-widget";
+
+  if (w === "digital_clock" || w === "clock" || w === "time") {
+    container.style.cssText = "position:fixed; top:84px; left:32px; z-index:45; background:rgba(10,14,24,0.78); border:1px solid var(--color-primary); border-radius:8px; padding:10px 18px; font-family:var(--font-mono); box-shadow:0 0 20px var(--color-primary-glow); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);";
+    container.innerHTML = `
+      <div style="font-size:9px; letter-spacing:2px; color:var(--color-primary); font-weight:700;">CHRONO // SYSTEM CLOCK</div>
+      <div id="${id}-time" style="font-size:22px; font-weight:800; color:#fff; letter-spacing:1px; margin-top:2px;">--:--:--</div>
+      <div id="${id}-date" style="font-size:10px; color:rgba(255,255,255,0.6); letter-spacing:1px; margin-top:2px;">---- -- ----</div>
+    `;
+    document.body.appendChild(container);
+
+    function updateClock() {
+      const timeEl = document.getElementById(`${id}-time`);
+      const dateEl = document.getElementById(`${id}-date`);
+      if (!timeEl) return;
+      const now = new Date();
+      timeEl.textContent = now.toLocaleTimeString();
+      dateEl.textContent = now.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase();
+    }
+    updateClock();
+    setInterval(updateClock, 1000);
+    showToast("Digital Chrono Widget Added", 2500);
+
+  } else if (w === "cpu_gauge" || w === "vitals" || w === "gauge") {
+    container.style.cssText = "position:fixed; bottom:290px; left:28px; z-index:45; width:220px; background:rgba(10,14,24,0.78); border:1px solid var(--color-primary); border-radius:8px; padding:10px 14px; font-family:var(--font-mono); box-shadow:0 0 20px var(--color-primary-glow); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);";
+    container.innerHTML = `
+      <div style="font-size:9px; letter-spacing:1.5px; color:var(--color-primary); font-weight:700;">TELEMETRY SPEEDOMETER</div>
+      <div style="display:flex; justify-content:space-between; margin-top:8px; font-size:10.5px;"><span>CPU THREADS</span><span id="${id}-cpu" style="color:var(--color-cyan); font-weight:700;">NOMINAL</span></div>
+      <div style="height:5px; background:rgba(255,255,255,0.1); border-radius:3px; overflow:hidden; margin-top:4px;"><div id="${id}-cpu-bar" style="height:100%; width:35%; background:linear-gradient(90deg, var(--color-cyan), var(--color-primary)); transition:width 0.3s ease;"></div></div>
+      <div style="display:flex; justify-content:space-between; margin-top:8px; font-size:10.5px;"><span>MEMORY CORE</span><span id="${id}-ram" style="color:var(--color-cyan); font-weight:700;">STABLE</span></div>
+      <div style="height:5px; background:rgba(255,255,255,0.1); border-radius:3px; overflow:hidden; margin-top:4px;"><div id="${id}-ram-bar" style="height:100%; width:48%; background:linear-gradient(90deg, var(--color-cyan), var(--color-primary)); transition:width 0.3s ease;"></div></div>
+    `;
+    document.body.appendChild(container);
+    showToast("Telemetry Gauge Widget Added", 2500);
+
+  } else {
+    const title = data.title || "HOLOGRAPHIC CARD";
+    const text = data.text || data.value || "Telemetry link active.";
+    container.style.cssText = "position:fixed; top:120px; left:32px; z-index:45; max-width:260px; background:rgba(10,14,24,0.78); border:1px solid var(--color-primary); border-radius:8px; padding:10px 16px; font-family:var(--font-mono); box-shadow:0 0 20px var(--color-primary-glow); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);";
+    container.innerHTML = `
+      <div style="font-size:9px; letter-spacing:1.5px; color:var(--color-primary); font-weight:700;">${title.toUpperCase()}</div>
+      <div style="font-size:12px; color:#fff; margin-top:4px; line-height:1.4;">${text}</div>
+    `;
+    document.body.appendChild(container);
+    showToast(`Widget ${title} Added`, 2500);
+  }
+
+  if (soundscape) soundscape.play("click");
+}
+
+function handleUIMutation(data) {
+  const action = (data.action || "style").toLowerCase().trim();
+  const target = (data.target || "").toLowerCase().trim();
+  const el = getUIMutationTargetElement(target);
+
+  if (action === "hide" || action === "remove") {
+    if (target === "clock" || target === "digital_clock" || target === "cpu_gauge" || target === "vitals") {
+      const wEl = document.getElementById(`widget-${target}`);
+      if (wEl) wEl.remove();
+      showToast(`Removed widget: ${target}`, 2000);
+      return;
+    }
+    if (el) {
+      el.style.display = "none";
+      if (soundscape) soundscape.play("whoosh");
+      showToast(`UI Element Hidden: ${target.toUpperCase()}`, 2000);
+      saveMutation({ action: "hide", target });
+    }
+  } else if (action === "show") {
+    if (el) {
+      el.style.display = "";
+      if (soundscape) soundscape.play("wake");
+      showToast(`UI Element Restored: ${target.toUpperCase()}`, 2000);
+      saveMutation({ action: "show", target });
+    }
+  } else if (action === "add") {
+    const widget = data.widget || target || "digital_clock";
+    addModularWidget(widget, data);
+    saveMutation({ action: "add", widget, data });
+  } else if (action === "color" || action === "theme_color") {
+    setUIColorPalette(data.color || data.value);
+    saveMutation({ action: "color", color: data.color || data.value });
+  } else if (action === "style") {
+    if (data.color) {
+      setUIColorPalette(data.color);
+      saveMutation({ action: "color", color: data.color });
+    } else if (el && data.property && data.value) {
+      el.style[data.property] = data.value;
+      saveMutation({ action: "style", target, property: data.property, value: data.value });
+      showToast(`Modified ${target} ${data.property}`, 2000);
+    }
+  } else if (action === "reposition" || action === "move") {
+    if (el) {
+      repositionElement(el, data.position || "right");
+      if (soundscape) soundscape.play("whoosh");
+      showToast(`Moved ${target.toUpperCase()} to ${data.position || "new position"}`, 2000);
+      saveMutation({ action: "reposition", target, position: data.position });
+    }
+  } else if (action === "orb_scale") {
+    const scale = parseFloat(data.scale || 1.0);
+    if (scene && scene.setScale) {
+      scene.setScale(scale);
+      showToast(`Orb Scale: ${scale}x`, 2000);
+      if (soundscape) soundscape.play("whoosh");
+      saveMutation({ action: "orb_scale", scale });
+    }
+  } else if (action === "reset") {
+    resetAllUIMutations();
+  }
+}
+
+function saveMutation(mut) {
+  try {
+    const saved = JSON.parse(localStorage.getItem("jarvis_ui_mutations") || "[]");
+    saved.push(mut);
+    localStorage.setItem("jarvis_ui_mutations", JSON.stringify(saved));
+  } catch (e) {}
+}
+
+function loadSavedUIMutations() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("jarvis_ui_mutations") || "[]");
+    saved.forEach(mut => {
+      try {
+        handleUIMutation(mut);
+      } catch (err) {}
+    });
+  } catch (e) {}
+}
+
+function resetAllUIMutations() {
+  try {
+    localStorage.removeItem("jarvis_ui_mutations");
+  } catch (e) {}
+
+  document.querySelectorAll(".hud-modular-widget").forEach(w => w.remove());
+  ["#cyber-terminal", "#fleet-dock", ".hud-header", "#voice-ring", ".audio-meter-container", ".overlay-scanlines", ".vignette-overlay"].forEach(sel => {
+    const el = document.querySelector(sel);
+    if (el) {
+      el.style.display = "";
+      el.style.left = "";
+      el.style.right = "";
+      el.style.top = "";
+      el.style.bottom = "";
+      el.style.transform = "";
+    }
+  });
+
+  const root = document.documentElement;
+  root.style.removeProperty("--color-primary");
+  root.style.removeProperty("--color-primary-glow");
+  root.style.removeProperty("--color-border");
+  root.style.removeProperty("--color-cyan");
+  root.style.removeProperty("--color-cyan-glow");
+
+  if (scene && scene.setScale) scene.setScale(1.0);
+  if (scene && scene.setColorTheme) scene.setColorTheme("ultron");
+
+  showToast("Restored Default Stark HUD Layout", 3000);
+  if (soundscape) soundscape.play("wake");
 }
 
 // ——— LOCAL WEB AUDIO API FALLBACK ———
@@ -1661,6 +2000,7 @@ window.addEventListener("keydown", (e) => {
 });
 
 // Start
+loadSavedUIMutations();
 connectWebSocket();
 showToast("JARVIS Holographic HUD Initialized", 3000);
 

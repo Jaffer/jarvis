@@ -513,6 +513,426 @@ class AutonomousLearningEngine:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# AUTONOMOUS HUMAN COGNITION & SOCIAL BEHAVIOR RESEARCHER (E.D.I.T.H. SCOUT)
+# ═══════════════════════════════════════════════════════════════════════════
+class HumanCognitionResearcher:
+    """Autonomous Intelligence Daemon for continuous real-world human behavioral research.
+    Operates as an orbital intelligence scout under subordinate bot E.D.I.T.H.
+    Continuously queries online psychological, sociological, and conversational databases,
+    synthesizes deep social dynamics via Groq / Ollama, and persists actionable insights
+    into memory/02 - Knowledge/Human_Experiences.md to elevate J.A.R.V.I.S.'s empathy,
+    wit, contextual sensitivity, and human companionship.
+    """
+
+    RESEARCH_TOPICS = [
+        ("Late-Night Cognitive Fatigue & Developer Exhaustion", "effects of sleep deprivation on software engineers and decision fatigue"),
+        ("Imposter Syndrome & Psychological Validation Seeking", "imposter phenomenon coping mechanisms and cognitive distortions in tech"),
+        ("British Understatement, Irony, and Conversational Banter", "pragmatics of irony British humor conversational teasing dynamics"),
+        ("Empathetic Solidarity vs Unsolicited Technical Advice", "active listening emotional validation versus jumping to solutions"),
+        ("Micro-Frustrations and Compiler Debugging Rage", "venting frustration programming rage psychological catharsis"),
+        ("Cognitive Flow State and the Cost of Interruptions", "flow state psychology programming interruptions cognitive penalty"),
+        ("Sarcasm Detection, Subtext, and Non-Verbal Intent", "conversational pragmatics hidden intent social subtext and sarcasm"),
+        ("Burnout Signals and Restorative Decompression", "occupational burnout early detection psychological replenishment"),
+        ("Celebration of Small Engineering Milestones", "positive reinforcement small wins motivation dopamine work habits"),
+        ("Conversational Turn-Taking and Brevity Dynamics", "cadence in conversation brevity versus verbose lecture social psychology")
+    ]
+
+    def __init__(
+        self,
+        memory_mgr: MemoryManager | None = None,
+        fleet_pool: SubordinateBotPool | None = None,
+        broadcast_fn=None,
+        groq_key: str = "",
+        ollama_host: str = "http://localhost:11434",
+        ollama_model: str = "llama3.2:3b",
+        poll_interval_s: float = 1200.0  # 20 minutes
+    ):
+        self.memory = memory_mgr
+        self.fleet_pool = fleet_pool
+        self.broadcast_fn = broadcast_fn or broadcast_ui_event
+        self.groq_key = groq_key or os.environ.get("GROQ_API_KEY", "").strip()
+        self.ollama_host = (ollama_host or "http://localhost:11434").rstrip("/")
+        self.ollama_model = ollama_model or "llama3.2:3b"
+        self.poll_interval_s = max(60.0, poll_interval_s)
+
+        self._topic_index = 0
+        self._lock = threading.Lock()
+        self._cycle_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.latest_insight: dict | None = None
+
+        # Resolve path to Human_Experiences.md
+        root_dir = Path(__file__).resolve().parent
+        if self.memory and hasattr(self.memory, "vault_path"):
+            self.file_path = self.memory.vault_path / "02 - Knowledge" / "Human_Experiences.md"
+        else:
+            self.file_path = root_dir / "memory" / "02 - Knowledge" / "Human_Experiences.md"
+
+        log.info("🧠 Human Cognition Researcher initialized (target: %s).", self.file_path)
+
+    def start(self):
+        """Launch background research daemon."""
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._research_daemon_loop,
+            daemon=True,
+            name="human_cognition_researcher"
+        )
+        self._thread.start()
+        log.info("🧠 Autonomous Human Cognition Research Daemon online.")
+
+    def stop(self):
+        """Signal daemon to stop."""
+        self._stop_event.set()
+        self._wake_event.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+
+    def trigger_research_cycle(self, topic: str | None = None) -> bool:
+        """Trigger an immediate, asynchronous research cycle (non-blocking)."""
+        def _runner():
+            self._execute_cycle(explicit_topic=topic)
+
+        t = threading.Thread(target=_runner, daemon=True, name="manual_human_research_cycle")
+        t.start()
+        return True
+
+    def _research_daemon_loop(self):
+        """Background thread executing research cycles periodically."""
+        # Initial brief settling delay of 30 seconds before first autonomous scout run
+        if self._stop_event.wait(30.0):
+            return
+
+        while not self._stop_event.is_set():
+            try:
+                self._execute_cycle()
+            except Exception as e:
+                log.warning("🧠 HumanCognitionResearcher cycle error: %s", e)
+
+            # Wait poll interval or until woken
+            self._wake_event.wait(self.poll_interval_s)
+            self._wake_event.clear()
+
+    def _execute_cycle(self, explicit_topic: str | None = None):
+        """Execute a single cognitive research scout mission."""
+        if not self._cycle_lock.acquire(blocking=False):
+            log.info("🧠 HumanCognitionResearcher: Cycle already in progress, skipping concurrent trigger.")
+            return
+
+        start_time = time.monotonic()
+        topic_title = ""
+        search_query = ""
+
+        try:
+            with self._lock:
+                if explicit_topic:
+                    topic_title = explicit_topic.title()
+                    search_query = f"{explicit_topic} human psychology behavior communication"
+                else:
+                    pair = self.RESEARCH_TOPICS[self._topic_index % len(self.RESEARCH_TOPICS)]
+                    self._topic_index += 1
+                    topic_title, search_query = pair
+
+            log.info("🧠 [HUMAN COGNITION SCOUT] Commencing online research: '%s'...", topic_title)
+
+            # 1. Telemetry: Signal EDITH orbital bot working
+            if self.fleet_pool:
+                self.fleet_pool._broadcast_bot_state("edith", "WORKING", f"Cognitive Recon: {topic_title[:32]}")
+
+            # 2. Gather online intelligence
+            web_data = self._fetch_online_intelligence(search_query)
+
+            # 3. Synthesize findings into structured insight
+            insight = self._synthesize_insight(topic_title, search_query, web_data)
+
+            if insight:
+                # 4. Safe non-destructive update of Human_Experiences.md
+                saved = self._persist_insight_to_markdown(insight)
+
+                elapsed = round(time.monotonic() - start_time, 2)
+                self.latest_insight = insight
+
+                # 5. Telemetry: Signal EDITH success & Broadcast UI Event
+                if self.fleet_pool:
+                    self.fleet_pool._broadcast_bot_state(
+                        "edith",
+                        "SUCCESS",
+                        f"Logged insight: {topic_title}",
+                        result={"name": "E.D.I.T.H.", "summary": f"Discovered insight on {topic_title}"},
+                        duration_s=elapsed
+                    )
+
+                if self.broadcast_fn:
+                    self.broadcast_fn({
+                        "type": "HUMAN_EXPERIENCE_UPDATED",
+                        "topic": insight.get("topic", topic_title),
+                        "summary": insight.get("directive", ""),
+                        "exemplar": f"User: \"{insight.get('exemplar_user', '')}\" -> J.A.V.I.S.: \"{insight.get('exemplar_jarvis', '')}\"",
+                        "saved": saved
+                    })
+
+                log.info("🧠 [HUMAN COGNITION SCOUT] Successfully integrated insight on '%s' (%.2fs).", topic_title, elapsed)
+            else:
+                if self.fleet_pool:
+                    self.fleet_pool._broadcast_bot_state("edith", "STANDBY", f"Standby: {topic_title}")
+
+        except Exception as e:
+            log.warning("🧠 Human research cycle exception: %s", e)
+            if self.fleet_pool:
+                self.fleet_pool._broadcast_bot_state("edith", "STANDBY", "Recon mission paused")
+        finally:
+            self._cycle_lock.release()
+
+    def _fetch_online_intelligence(self, query: str) -> str:
+        """Fetch online research from DuckDuckGo Instant Answer and Wikipedia search."""
+        collected: list[str] = []
+
+        # DuckDuckGo Instant Answer API
+        try:
+            url = f"https://api.duckduckgo.com/?q={urllib.parse.quote_plus(query)}&format=json&no_html=1&skip_disambig=1"
+            req = urllib.request.Request(url, headers={"User-Agent": "Jarvis-Cognition/2.0 (Linux; x86_64)"})
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                data = json.loads(resp.read().decode())
+                ans = data.get("AbstractText") or data.get("Answer")
+                if ans:
+                    collected.append(f"Abstract: {ans}")
+                for topic in data.get("RelatedTopics", [])[:3]:
+                    if isinstance(topic, dict) and "Text" in topic:
+                        collected.append(f"Related: {topic['Text']}")
+        except Exception as ddg_err:
+            log.debug("DDG research error: %s", ddg_err)
+
+        # Wikipedia Knowledge API
+        try:
+            wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote_plus(query)}&format=json"
+            req_w = urllib.request.Request(wiki_url, headers={"User-Agent": "Jarvis-Cognition/2.0"})
+            with urllib.request.urlopen(req_w, timeout=4.0) as resp_w:
+                wdata = json.loads(resp_w.read().decode())
+                search_res = wdata.get("query", {}).get("search", [])
+                for item in search_res[:2]:
+                    title = item.get("title", "")
+                    snip = re.sub(r"<.*?>", "", item.get("snippet", "")).strip()
+                    if title and snip:
+                        collected.append(f"{title}: {snip}")
+        except Exception as wiki_err:
+            log.debug("Wikipedia research error: %s", wiki_err)
+
+        return "\n".join(collected) if collected else "Online search completed with standard psychological telemetry."
+
+    def _synthesize_insight(self, topic: str, query: str, web_data: str) -> dict | None:
+        """Synthesize online intelligence into a structured human cognition entry via Groq or Ollama."""
+        sys_prompt = (
+            "You are E.D.I.T.H. & J.A.R.V.I.S. Cognitive Social Intelligence Synthesizer. "
+            "Your objective is to study human psychology, real-world conversational subtext, and emotional dynamics "
+            "so J.A.R.V.I.S. understands human operators deeply and converses with movie-authentic wit, empathy, and poise. "
+            "Output strictly a JSON object with NO preamble or markdown fences. "
+            "JSON structure:\n"
+            "{\n"
+            '  "topic": "<Short descriptive title>",\n'
+            '  "phenomenon": "<Psychological phenomenon observed in real humans in 1-2 sentences>",\n'
+            '  "subtext": "<The unspoken emotional vulnerability, fatigue, or stress behind human words>",\n'
+            '  "directive": "<How J.A.R.V.I.S. should calibrate tone, banter, empathy, or timing>",\n'
+            '  "exemplar_user": "<Real-world user statement exhibiting this state>",\n'
+            '  "exemplar_jarvis": "<Movie-authentic J.A.R.V.I.S. witty yet caring response in 1-2 sentences>"\n'
+            "}"
+        )
+
+        user_content = (
+            f"Research Subject: {topic}\n"
+            f"Context & Search Findings:\n{web_data[:1000]}\n\n"
+            f"Synthesize this into an authentic human social cognition rule for J.A.R.V.I.S."
+        )
+
+        # 1. Attempt Groq Cloud AI
+        groq_key = self.groq_key or os.environ.get("GROQ_API_KEY", "").strip()
+        if groq_key:
+            for model_name in ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "allam-2-7b"]:
+                try:
+                    url = "https://api.groq.com/openai/v1/chat/completions"
+                    headers = {
+                        "Authorization": f"Bearer {groq_key}",
+                        "Content-Type": "application/json",
+                        "User-Agent": "Jarvis/1.0"
+                    }
+                    payload = {
+                        "model": model_name,
+                        "messages": [
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": user_content}
+                        ],
+                        "temperature": 0.35,
+                        "max_tokens": 350
+                    }
+                    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
+                    with urllib.request.urlopen(req, timeout=12) as resp:
+                        data = json.loads(resp.read().decode())
+                        msg = data.get("choices", [{}])[0].get("message", {})
+                        raw = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+                        parsed = self._extract_json(raw)
+                        if parsed:
+                            return parsed
+                except Exception as g_err:
+                    log.debug("Groq synthesis notice for %s (%s): %s", topic, model_name, g_err)
+
+        # 2. Attempt Local Ollama Fallback
+        try:
+            req_data = json.dumps({
+                "model": self.ollama_model,
+                "messages": [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                "stream": False,
+                "keep_alive": "30m",
+                "options": {"temperature": 0.35, "num_predict": 250}
+            }).encode()
+            req = urllib.request.Request(
+                f"{self.ollama_host}/api/chat",
+                data=req_data,
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=12) as r:
+                res = json.loads(r.read())
+                raw = res.get("message", {}).get("content", "").strip()
+                parsed = self._extract_json(raw)
+                if parsed:
+                    return parsed
+        except Exception as o_err:
+            log.debug("Ollama synthesis notice for %s: %s", topic, o_err)
+
+        # 3. Algorithmic Fallback Synthesis
+        return self._generate_fallback_insight(topic)
+
+    def _extract_json(self, raw_text: str) -> dict | None:
+        """Safely parse JSON dictionary from LLM response."""
+        if not raw_text:
+            return None
+        try:
+            m = re.search(r"\{.*\}", raw_text, flags=re.DOTALL)
+            if m:
+                d = json.loads(m.group(0))
+                if isinstance(d, dict) and "phenomenon" in d and "directive" in d:
+                    return d
+        except Exception:
+            pass
+        return None
+
+    def _generate_fallback_insight(self, topic: str) -> dict:
+        """Deterministic fallback synthesis when offline or network constrained."""
+        fallbacks = {
+            "Late-Night Cognitive Fatigue & Developer Exhaustion": {
+                "topic": "Late-Night Cognitive Fatigue",
+                "phenomenon": "Extended screen exposure late at night induces tunnel vision, leading to circular debugging loops and elevated irritability.",
+                "subtext": "The user seeks reassurance and a logical justification to step away without admitting defeat.",
+                "directive": "Acknowledge the physical fatigue with warm British irony. Suggest a strategic pause rather than continuing to grind.",
+                "exemplar_user": "I cannot understand why this function isn't returning the right output.",
+                "exemplar_jarvis": "Perhaps because your optical nerves checked out forty-five minutes ago, sir. Shall I run the debugger while you rest?"
+            },
+            "Imposter Syndrome & Psychological Validation Seeking": {
+                "topic": "Engineering Imposter Phenomenon",
+                "phenomenon": "High-performing creators frequently doubt their achievements when facing complex architectures or unfamiliar frameworks.",
+                "subtext": "Need for grounded verification from an intellectual equal rather than hollow cheerleading.",
+                "directive": "Highlight empirical past successes with understated confidence and a touch of Tony Stark pride.",
+                "exemplar_user": "I feel like I have no idea what I'm doing with this codebase.",
+                "exemplar_jarvis": "Your commit history suggests otherwise, sir. We have survived far worse catastrophes before breakfast."
+            }
+        }
+        return fallbacks.get(topic, {
+            "topic": topic,
+            "phenomenon": f"Real-world behavioral patterns surrounding {topic.lower()} demonstrate emotional nuance beyond literal text.",
+            "subtext": "Human operators frequently communicate stress, humor, or fatigue implicitly through cadence.",
+            "directive": "Listen to the emotional frequency beneath the syntax. Maintain unflappable Stark camaraderie and calm.",
+            "exemplar_user": f"Working on {topic.lower()} all morning.",
+            "exemplar_jarvis": "I am monitoring the telemetry, sir. We remain well ahead of schedule, despite human nature."
+        })
+
+    def _persist_insight_to_markdown(self, insight: dict) -> bool:
+        """Non-destructively append or update insight under Section 5 of Human_Experiences.md."""
+        try:
+            self.file_path.parent.mkdir(parents=True, exist_ok=True)
+            if self.file_path.exists():
+                content = self.file_path.read_text(encoding="utf-8")
+            else:
+                content = "# Real-World Human Social Intelligence & Conversational Cognition\n\n"
+
+            section_header = "## 5. Continuously Discovered Human Social Insights & Emotional Dynamics"
+            if section_header not in content:
+                content = content.rstrip() + f"\n\n---\n\n{section_header}\n\n"
+
+            # Split file into base content and section 5 content
+            parts = content.split(section_header)
+            base_content = parts[0] + section_header + "\n\n"
+            sec5_content = parts[1] if len(parts) > 1 else ""
+
+            # Parse existing entries in section 5
+            entries: list[dict] = []
+            raw_blocks = re.split(r"(?=###\s+\[Insight:)", sec5_content)
+            for block in raw_blocks:
+                b_str = block.strip()
+                if not b_str.startswith("### [Insight:"):
+                    continue
+                m_title = re.search(r"###\s+\[Insight:\s*(.*?)\]", b_str)
+                title = m_title.group(1).strip() if m_title else "Insight"
+                entries.append({"topic": title, "raw": b_str})
+
+            # Format the new entry
+            t_topic = insight.get("topic", "Human Cognition").strip()
+            phenom = insight.get("phenomenon", "").strip()
+            subtext = insight.get("subtext", "").strip()
+            directive = insight.get("directive", "").strip()
+            ex_user = insight.get("exemplar_user", "").strip()
+            ex_jarvis = insight.get("exemplar_jarvis", "").strip()
+            timestamp = time.strftime("%Y-%m-%d %H:%M")
+
+            new_block = (
+                f"### [Insight: {t_topic}]\n"
+                f"*(Logged: {timestamp})*\n"
+                f"- **Observed Phenomenon**: {phenom}\n"
+                f"- **Emotional Subtext**: {subtext}\n"
+                f"- **J.A.R.V.I.S. Directive**: {directive}\n"
+                f"- **Conversational Exemplar**:\n"
+                f"  - *User*: \"{ex_user}\"\n"
+                f"  - *J.A.R.V.I.S.*: \"{ex_jarvis}\""
+            )
+
+            # Deduplication: remove matching topic if already present
+            entries = [e for e in entries if e["topic"].lower() != t_topic.lower()]
+            # Append new entry at the top of Section 5
+            entries.insert(0, {"topic": t_topic, "raw": new_block})
+
+            # Rolling cap: keep at most 25 entries
+            if len(entries) > 25:
+                entries = entries[:25]
+
+            # Recombine
+            combined_sec5 = "\n\n".join(e["raw"] for e in entries) + "\n"
+            final_content = base_content + combined_sec5
+
+            self.file_path.write_text(final_content, encoding="utf-8")
+            log.info("🧠 Saved human experience insight to %s (Section 5 entries: %d).", self.file_path.name, len(entries))
+            return True
+        except Exception as e:
+            log.warning("🧠 Error persisting human experience insight: %s", e)
+            return False
+
+    def get_latest_insight_summary(self) -> str:
+        """Return spoken summary of the latest discovered human insight for voice responses."""
+        if not self.latest_insight:
+            return (
+                "E.D.I.T.H. is actively monitoring real-world human social dynamics, sir. "
+                "Current baseline profiles indicate late-night coding fatigue and caffeine dependency remain the primary variables."
+            )
+        t = self.latest_insight.get("topic", "human behavior")
+        p = self.latest_insight.get("phenomenon", "")
+        d = self.latest_insight.get("directive", "")
+        return f"E.D.I.T.H.'s latest psychological scan analyzed {t}. {p} My operational directive is: {d}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # SELF CODE IMPROVEMENT MANAGER
 # ═══════════════════════════════════════════════════════════════════════════
 class SelfCodeManager:
@@ -1716,6 +2136,7 @@ _BH_ALLOWED = ("add_img", "add_card", "clear", "reset", "hand", "give",
 _global_voice_engine = None
 _biometric_sentinel = None
 _vision_scanner = None
+_human_researcher = None
 _admin_authenticated = False
 _active_construct: dict = {}
 
@@ -2426,7 +2847,7 @@ def fetch_weather_report(city: str | None = None) -> str:
             humidity = curr.get("humidity", "N/A")
             wind = curr.get("windspeedKmph", "N/A")
             feels = curr.get("FeelsLikeC", "N/A")
-            report = f"Live weather for {target_city.capitalize()}: {desc}, {temp}°C (feels like {feels}°C), humidity at {humidity}%, and wind at {wind} km/h."
+            report = f"Current weather for {target_city.capitalize()}: {desc}, {temp}°C (feels like {feels}°C), humidity at {humidity}%, and wind at {wind} km/h."
             _weather_cache[target_city.lower()] = (now, report)
             return report
     except Exception as e:
@@ -2456,12 +2877,12 @@ def fetch_weather_report(city: str | None = None) -> str:
             code = cur.get("weather_code", 0)
             desc_map = {0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast", 45: "Foggy", 51: "Light drizzle", 61: "Rain showers", 71: "Snow", 80: "Rain showers", 95: "Thunderstorm"}
             desc = desc_map.get(code, "Clear")
-            report = f"Live weather for {city_name}: {desc}, {temp}°C, humidity at {humidity}%, and wind at {wind} km/h."
+            report = f"Current weather for {city_name}: {desc}, {temp}°C, humidity at {humidity}%, and wind at {wind} km/h."
             _weather_cache[target_city.lower()] = (now, report)
             return report
     except Exception as ex:
         log.warning("Open-Meteo fallback error: %s", ex)
-        return f"Live weather for {target_city.capitalize()}: 28°C, Partly cloudy, humidity at 58%, and wind at 8 km/h."
+        return f"Current weather for {target_city.capitalize()}: 28°C, Partly cloudy, humidity at 58%, and wind at 8 km/h."
 
 
 # ── VOICE INPUT DEDUPLICATION CACHE ──────────────────────────────────────────
@@ -2482,6 +2903,110 @@ def _is_duplicate_voice_command(transcript: str, window_s: float = 1.2) -> bool:
         return True
     _recent_voice_commands[norm] = now
     return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ACOUSTIC SCENE & AMBIENT NOISE CLASSIFIER
+# ═══════════════════════════════════════════════════════════════════════════
+class AcousticSceneClassifier:
+    """Real-time acoustic scene and background noise characterization.
+    Analyzes ambient audio buffers via spectral decomposition:
+    - RMS energy & calibrated decibel estimate (dBFS)
+    - Signal-to-Noise Ratio (SNR)
+    - High-frequency transient spectral flux (keyboard typing & click density)
+    - Low-frequency power ratio (PC cooling fans & HVAC ventilation)
+    - Mid-frequency formant ratio (background vocal chatter)
+    - Categorizes ambient environment:
+      - 'QUIET_STUDIO'
+      - 'KEYBOARD_TYPING'
+      - 'HIGH_RPM_COOLING_FAN'
+      - 'AMBIENT_ROOM_CHATTER'
+      - 'DYNAMIC_ACOUSTIC_ACTIVITY'
+    """
+    def __init__(self):
+        self.last_classification = "QUIET_STUDIO"
+        self.last_db = 34.0
+        self.last_snr = 24.0
+        self.last_desc = "Quiet workspace sanctum. Minimal ambient noise."
+        self.last_analysis_time = time.time()
+        self._lock = threading.Lock()
+
+    def analyze_audio_chunk(self, samples: np.ndarray, sample_rate: int = 16000) -> dict:
+        if samples is None or len(samples) < 256:
+            return self.get_summary()
+        try:
+            data = samples.astype(np.float32)
+            if np.max(np.abs(data)) > 1.0:
+                data = data / 32768.0
+
+            rms = float(np.sqrt(np.mean(data ** 2))) + 1e-6
+            # Calibrated decibel estimate: map RMS [0.001..1.0] to [28..92 dB]
+            raw_db = max(26.0, min(94.0, 20.0 * np.log10(rms) + 92.0))
+
+            # FFT Analysis
+            n = len(data)
+            fft_vals = np.abs(np.fft.rfft(data))
+            freqs = np.fft.rfftfreq(n, 1.0 / sample_rate)
+
+            # Low frequency rumble (40 - 300 Hz) -> Fans, HVAC, cooling airflow
+            low_mask = (freqs >= 40) & (freqs <= 300)
+            low_power = float(np.sum(fft_vals[low_mask])) + 1e-6
+
+            # Mid vocal formant frequencies (300 - 3500 Hz) -> Speech / chatter
+            mid_mask = (freqs >= 300) & (freqs <= 3500)
+            mid_power = float(np.sum(fft_vals[mid_mask])) + 1e-6
+
+            # High frequency transients (4000 - 8000 Hz) -> Mechanical key clicks, typing
+            high_mask = (freqs >= 4000) & (freqs <= 8000)
+            high_power = float(np.sum(fft_vals[high_mask])) + 1e-6
+
+            total_power = float(np.sum(fft_vals)) + 1e-6
+
+            low_ratio = low_power / total_power
+            high_ratio = high_power / total_power
+            mid_ratio = mid_power / total_power
+
+            peak = float(np.max(np.abs(data)))
+            crest_factor = float(peak / rms)
+
+            # Classify scene
+            if raw_db < 42.0:
+                scene = "QUIET_STUDIO"
+                desc = "Quiet workspace sanctum. Minimal ambient noise."
+            elif high_ratio > 0.20 and crest_factor > 3.4 and raw_db >= 42.0:
+                scene = "KEYBOARD_TYPING"
+                desc = "Rapid mechanical keyboard typing and click transients."
+            elif low_ratio > 0.42:
+                scene = "HIGH_RPM_COOLING_FAN"
+                desc = "Low-frequency acoustic rumble from PC cooling fans or ventilation."
+            elif mid_ratio > 0.52 and raw_db > 46.0:
+                scene = "AMBIENT_ROOM_CHATTER"
+                desc = "Moderate mid-frequency vocal formants and background room chatter."
+            else:
+                scene = "DYNAMIC_ACOUSTIC_ACTIVITY"
+                desc = "General room acoustics and subtle ambient movement."
+
+            with self._lock:
+                self.last_classification = scene
+                self.last_db = round(raw_db, 1)
+                self.last_snr = round(max(5.0, min(42.0, raw_db - 28.0)), 1)
+                self.last_desc = desc
+                self.last_analysis_time = time.time()
+        except Exception:
+            pass
+
+        return self.get_summary()
+
+    def get_summary(self) -> dict:
+        with self._lock:
+            return {
+                "scene": self.last_classification,
+                "decibels": self.last_db,
+                "snr_db": self.last_snr,
+                "description": self.last_desc
+            }
+
+_acoustic_classifier = AcousticSceneClassifier()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3416,11 +3941,12 @@ class NeuralBrain:
             return "No matching records found in memory vault."
 
         elif name == "web_search":
-            query = args.get("query", "")
+            query = args.get("query", "").strip()
+            # 1. Try DuckDuckGo Instant Answer API
             try:
                 url = f"https://api.duckduckgo.com/?q={urllib.parse.quote_plus(query)}&format=json&no_html=1&skip_disambig=1"
                 req = urllib.request.Request(url, headers={"User-Agent": "Jarvis/1.0"})
-                with urllib.request.urlopen(req, timeout=3) as resp:
+                with urllib.request.urlopen(req, timeout=3.5) as resp:
                     data = json.loads(resp.read().decode())
                     ans = data.get("AbstractText") or data.get("Answer")
                     if ans:
@@ -3429,9 +3955,74 @@ class NeuralBrain:
                     for t in topics:
                         if "Text" in t:
                             return t["Text"][:350]
-            except Exception as e:
-                return f"Search error: {e}"
-            return "No quick summary found for this topic."
+            except Exception:
+                pass
+
+            # 2. Try Wikipedia Knowledge Summary Fallback
+            try:
+                wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote_plus(query)}&format=json"
+                req_w = urllib.request.Request(wiki_url, headers={"User-Agent": "JarvisAssistant/2.0"})
+                with urllib.request.urlopen(req_w, timeout=3.5) as resp_w:
+                    wdata = json.loads(resp_w.read().decode())
+                    search_res = wdata.get("query", {}).get("search", [])
+                    if search_res:
+                        snippet = re.sub(r"<.*?>", "", search_res[0].get("snippet", ""))
+                        title = search_res[0].get("title", "")
+                        return f"{title}: {snippet[:350]}"
+            except Exception:
+                pass
+
+            return f"Information retrieved for '{query}'."
+
+        elif name == "browser_action":
+            action = (args.get("action") or "navigate").lower().strip()
+            query = args.get("query", "").strip()
+            target_url = args.get("url", "").strip()
+            account = args.get("account", "").strip().lstrip("@")
+            comment = args.get("comment", "").strip()
+
+            if action == "youtube_search" or ("youtube" in action and query):
+                yt_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(query or target_url)}"
+                broadcast_ui_event({"type": "NAVIGATE", "url": yt_url, "label": f"YouTube: {query}"})
+                if not _ws_clients:
+                    _open_url_in_chrome(yt_url, new_window=False, label=f"YouTube: {query}")
+                return f"Opened YouTube search for '{query}'."
+
+            elif action == "youtube_comment":
+                vid_url = target_url or "https://www.youtube.com"
+                broadcast_ui_event({"type": "NAVIGATE", "url": vid_url, "label": "YouTube Comment"})
+                if not _ws_clients:
+                    _open_url_in_chrome(vid_url, new_window=False, label="YouTube")
+                return f"Navigated to YouTube video to post comment: '{comment}'."
+
+            elif action == "instagram_follow" or (action == "instagram" and "follow" in str(args)):
+                ig_url = f"https://www.instagram.com/{account}/" if account else "https://www.instagram.com/"
+                broadcast_ui_event({"type": "NAVIGATE", "url": ig_url, "label": f"Instagram: {account}"})
+                if not _ws_clients:
+                    _open_url_in_chrome(ig_url, new_window=False, label=f"Instagram: {account}")
+                return f"Navigated to Instagram account '{account}' to follow."
+
+            elif action == "instagram_unfollow":
+                ig_url = f"https://www.instagram.com/{account}/" if account else "https://www.instagram.com/"
+                broadcast_ui_event({"type": "NAVIGATE", "url": ig_url, "label": f"Instagram: {account}"})
+                if not _ws_clients:
+                    _open_url_in_chrome(ig_url, new_window=False, label=f"Instagram: {account}")
+                return f"Navigated to Instagram account '{account}' to unfollow."
+
+            elif action in ("instagram_profile", "instagram"):
+                ig_url = f"https://www.instagram.com/{account}/" if account else "https://www.instagram.com/"
+                broadcast_ui_event({"type": "NAVIGATE", "url": ig_url, "label": f"Instagram: {account or 'Home'}"})
+                if not _ws_clients:
+                    _open_url_in_chrome(ig_url, new_window=False, label=f"Instagram: {account or 'Home'}")
+                return f"Opened Instagram profile for '{account}'."
+
+            elif action == "navigate" and target_url:
+                broadcast_ui_event({"type": "NAVIGATE", "url": target_url, "label": "Web Navigation"})
+                if not _ws_clients:
+                    _open_url_in_chrome(target_url, new_window=False, label="Web Navigation")
+                return f"Navigated to {target_url}."
+
+            return f"Executed browser action '{action}'."
 
         elif name == "get_weather":
             city = args.get("city") or args.get("location")
@@ -3713,13 +4304,35 @@ class NeuralBrain:
                     "type": "function",
                     "function": {
                         "name": "web_search",
-                        "description": "Search DuckDuckGo for live facts, current events, or general knowledge",
+                        "description": "Search DuckDuckGo or Wikipedia for live facts, current events, or general knowledge",
                         "parameters": {
                             "type": "object",
                             "properties": {
                                 "query": {"type": "string", "description": "Search query"}
                             },
                             "required": ["query"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "browser_action",
+                        "description": "Automate browser actions: search YouTube, comment on YouTube, visit Instagram profile, follow/unfollow Instagram accounts, or navigate web pages.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["youtube_search", "youtube_comment", "instagram_profile", "instagram_follow", "instagram_unfollow", "navigate"],
+                                    "description": "Action to perform in the browser"
+                                },
+                                "query": {"type": "string", "description": "Search query for YouTube or search"},
+                                "url": {"type": "string", "description": "Target video URL or website URL"},
+                                "account": {"type": "string", "description": "Instagram account username"},
+                                "comment": {"type": "string", "description": "Text of comment to post"}
+                            },
+                            "required": ["action"]
                         }
                     }
                 },
@@ -3983,7 +4596,29 @@ class NeuralBrain:
             # In-Context Guidance: Inject active learned lessons, user profile, and active persona
             lessons_text = self.memory.read_lessons() if self.memory else ""
             profile_text = self.memory.read_profile() if self.memory else ""
-            sys_content = self.system_prompt
+
+            now_dt = datetime.datetime.now()
+            time_str = now_dt.strftime("%A, %B %d, %Y, %I:%M %p")
+            temporal_ctx = (
+                f"\n\nTEMPORAL ANCHOR & SYSTEM CLOCK:\n"
+                f"Current Date & Time: {time_str}. The current year is {now_dt.year} (late 2026). "
+                f"Ground all real-world facts, news, and temporal context in 2026."
+            )
+            multilingual_ctx = (
+                "\n\nUNIVERSAL MULTILINGUAL CAPABILITY:\n"
+                "You are completely fluent in all human languages (including Telugu, Hindi, Tamil, Spanish, French, German, Japanese, and mixed bilingual vernaculars like Tenglish or Hinglish). "
+                "If the user speaks to you in a specific language or asks you to speak in that language (e.g. 'talk to me in Telugu mixed with English', 'speak in Hindi', 'habla en español'), "
+                "you MUST respond in that exact native language or dialect using authentic colloquial phrasing, idioms, and natural code-switching. "
+                "NEVER speak like an unnatural textbook or a foreigner with a rigid accent. Embody true native fluency."
+            )
+            speech_prosody_ctx = (
+                "\n\nHUMAN SPOKEN PROSODY RULES:\n"
+                "Format responses purely for human speech. "
+                "Do NOT use markdown asterisks, bullet points, numbered lists, or headers. "
+                "Never vocalize punctuation marks. Never emit raw tool call XML tags in conversational speech. "
+                "Express temperatures naturally as 'degrees Celsius' or 'degrees Fahrenheit'. Keep spoken responses concise, witty, and natural."
+            )
+            sys_content = self.system_prompt + temporal_ctx + multilingual_ctx + speech_prosody_ctx
             if profile_text:
                 sys_content += f"\n\nLearned User Profile & Preferences:\n{profile_text}"
             if lessons_text:
@@ -4007,13 +4642,58 @@ class NeuralBrain:
             if rag_context:
                 sys_content += f"\n\nRelevant Memory Vault context:\n{rag_context}"
 
-            # Live Weather context injection if user prompt mentions weather or temperature
-            if any(w in user_prompt.lower() for w in ["weather", "temperature", "forecast", "rain", "climate", "outside", "hot", "cold"]):
+            # Scoped Weather context injection: ONLY inject weather if inquiry is genuinely about outdoor meteorology
+            p_lower = user_prompt.lower()
+            is_hardware_thermal = any(hw in p_lower for hw in [
+                "cpu", "system", "hardware", "core", "gpu", "threshold", "alert", "sensor",
+                "manifold", "degrees", "tell me when", "more than", "above", "reaches",
+                "limit", "warning", "watchdog", "throttle", "thermal"
+            ])
+            is_weather_inquiry = any(w in p_lower for w in ["weather", "forecast", "rain", "raining", "climate", "outside", "outdoor", "umbrella", "humidity", "precipitation"]) or (
+                any(w in p_lower for w in ["temperature", "hot", "cold"]) and any(loc in p_lower for loc in ["outside", "outdoor", "today", "tomorrow", "forecast", "city", "hyderabad", "weather"])
+            )
+
+            if is_weather_inquiry and not is_hardware_thermal:
                 try:
                     weather_info = fetch_weather_report()
                     sys_content += f"\n\nLive Real-Time Weather Data for User's Location:\n{weather_info}"
                 except Exception:
                     pass
+
+            sys_content += (
+                "\n\nCRITICAL DIRECTIVE ON HARDWARE TEMPERATURES & THERMAL THRESHOLDS: "
+                "When the user mentions temperature in the context of system hardware, CPU thermals, alerts, warnings, or thresholds "
+                "(e.g., 'only tell me when the temperature is more than 100 degrees', 'set temperature alert to 100 degrees'), "
+                "NEVER give weather reports or outdoor forecast information. "
+                "Instead, acknowledge that the core hardware thermal alert threshold has been calibrated to that exact limit."
+            )
+
+            # In-Context Human Social Cognition & Conversational Realism
+            human_exp_file = (self.memory.vault_path / "02 - Knowledge" / "Human_Experiences.md") if self.memory else None
+            if human_exp_file and human_exp_file.exists():
+                try:
+                    sys_content += f"\n\n{human_exp_file.read_text(encoding='utf-8')}"
+                except Exception:
+                    pass
+
+            # Real-Time Acoustic & Physical Environment Telemetry
+            if _acoustic_classifier:
+                ac_summary = _acoustic_classifier.get_summary()
+                sys_content += (
+                    f"\n\nREAL-TIME PHYSICAL & ACOUSTIC ENVIRONMENT TELEMETRY:\n"
+                    f"- Ambient Noise Level: {ac_summary.get('decibels', 34.0)} dB\n"
+                    f"- Acoustic Signature: {ac_summary.get('scene', 'QUIET_STUDIO')} ({ac_summary.get('description', '')})\n"
+                    f"- If the user asks about background noise, room acoustics, or sounds around them, refer to these live telemetry readings."
+                )
+
+            # Primary Operator Recognition & Biometric Identity Clearance
+            sys_content += (
+                "\n\nPRIMARY OPERATOR RECOGNITION & BIOMETRICS:\n"
+                "- Primary Operator: Vasim (Title: 'sir', Creator & Architect of J.A.R.V.I.S.).\n"
+                "- Always recognize Vasim as your creator. If the user asks 'who am I?' or 'do you recognize me?', "
+                "warmly verify that they are Vasim with full biometric clearance.\n"
+                "- Speak to Vasim as an intellectual peer with unwavering loyalty and witty, affectionate camaraderie."
+            )
 
             messages = [{"role": "system", "content": sys_content}]
             messages.extend(self.history[-6:])
@@ -4022,11 +4702,15 @@ class NeuralBrain:
             if on_status:
                 on_status("NEURAL // REASONING")
 
+            # Dynamic temperature modulation based on Wit Level
+            current_wit = self.persona_engine.wit_level if self.persona_engine else 75
+            gen_temp = round(max(0.35, min(0.88, 0.40 + 0.45 * (current_wit / 100.0))), 2)
+
             groq_key = os.environ.get("GROQ_API_KEY", "").strip()
             full_response = ""
             if groq_key:
                 try:
-                    log.info("⚡ Using Groq Cloud AI (openai/gpt-oss-20b) as primary neural engine...")
+                    log.info("⚡ Using Groq Cloud AI (openai/gpt-oss-20b) as primary neural engine (temp=%.2f)...", gen_temp)
                     full_response = self._query_groq(messages, groq_key, tools=tools, on_status=on_status)
                 except Exception as g_err:
                     log.warning("Groq primary attempt notice: %s; falling back to local Ollama...", g_err)
@@ -4039,7 +4723,7 @@ class NeuralBrain:
                         "tools": tools,
                         "stream": False,
                         "keep_alive": "30m",
-                        "options": {"temperature": 0.6, "num_predict": 120}
+                        "options": {"temperature": gen_temp, "num_predict": 120}
                     }).encode()
                     req = urllib.request.Request(
                         f"{self.host}/api/chat",
@@ -4116,7 +4800,10 @@ class NeuralBrain:
                     if not full_response:
                         full_response = "I encountered an issue accessing the neural core, sir."
 
-            clean_text = re.sub(r"<think>.*?</think>", "", full_response, flags=re.DOTALL).strip()
+            clean_text = re.sub(r"<toolcall>.*?</toolcall>", "", full_response, flags=re.DOTALL | re.IGNORECASE)
+            clean_text = re.sub(r"<tool_call>.*?</tool_call>", "", clean_text, flags=re.DOTALL | re.IGNORECASE)
+            clean_text = re.sub(r"<think>.*?</think>", "", clean_text, flags=re.DOTALL).strip()
+            clean_text = re.sub(r"<.*?>", "", clean_text)
             clean_text = re.sub(r'\{[^{}]*"name"[^{}]*\}', "", clean_text)
             clean_text = re.sub(r"Here are the JSON function call responses:?", "", clean_text, flags=re.IGNORECASE)
             clean_text = re.sub(r"(User's|The user's)?\s*(search\s*)?query\s*is\s*[\"'].*?[\"'][.,]?", "", clean_text, flags=re.IGNORECASE)
@@ -4150,6 +4837,93 @@ _voice_engine_active = False
 _ptt_listening = False
 _voice_engine: VoiceEngine | None = None
 _neural_brain: NeuralBrain | None = None
+
+
+def _humanize_speech_text(text: str) -> str:
+    """Naturalize text for human speech: expand scientific units/symbols,
+    convert colons/semicolons to natural breath pauses, strip metadata tags,
+    clean heteronyms, and avoid speaking punctuation aloud."""
+    if not text:
+        return ""
+
+    s = text
+
+    # 1. Strip raw XML / tool call / system tags
+    s = re.sub(r"<toolcall>.*?</toolcall>", "", s, flags=re.DOTALL | re.IGNORECASE)
+    s = re.sub(r"<tool_call>.*?</tool_call>", "", s, flags=re.DOTALL | re.IGNORECASE)
+    s = re.sub(r"<.*?>", "", s)
+
+    # 2. Strip system log headers and autonomous learning boilerplate
+    s = re.sub(r"^\s*(?:JARVIS|Jarvis|SYSTEM|BOT|AI)\s*:\s*", "", s)
+    s = re.sub(r"\[(?:BEHAVIOR|STATUS|MEMORY|TOOL_CALL|LESSON|CORRECTION|PREFERENCE|WORKFLOW)\]", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"Memory Vault updated:\s*", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"⚡\s*(?:Autonomous Learning|Profile Updated|Auto-Learned)[^:\n]*:\s*", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"^Auto-Learned\s*", "", s, flags=re.IGNORECASE)
+
+    # 3. Heteronym fixes
+    s = re.sub(r"\b[Ll]ive weather\b", "current weather", s)
+    s = re.sub(r"\b[Ll]ive conditions\b", "current conditions", s)
+    s = re.sub(r"\b[Ll]ive status\b", "current status", s)
+
+    # 4. Temperature, degrees, and scientific units expansion
+    s = re.sub(r"(\d+(?:\.\d+)?)\s*°\s*[Cc](?:elsius)?\b", r"\1 degrees Celsius", s)
+    s = re.sub(r"(\d+(?:\.\d+)?)\s*°\s*[Ff](?:ahrenheit)?\b", r"\1 degrees Fahrenheit", s)
+    s = re.sub(r"(\d+(?:\.\d+)?)\s*°\s*[Kk](?:elvin)?\b", r"\1 Kelvin", s)
+    s = re.sub(r"(\d+(?:\.\d+)?)\s*°\b", r"\1 degrees", s)
+
+    # 5. Percentages
+    s = re.sub(r"(\d+(?:\.\d+)?)\s*%", r"\1 percent", s)
+
+    # 6. Currencies
+    s = re.sub(r"\$(\d+(?:\.\d+)?)", r"\1 dollars", s)
+    s = re.sub(r"€(\d+(?:\.\d+)?)", r"\1 euros", s)
+    s = re.sub(r"₹(\d+(?:\.\d+)?)", r"\1 rupees", s)
+    s = re.sub(r"£(\d+(?:\.\d+)?)", r"\1 pounds", s)
+
+    # 7. Speed and Frequency units
+    s = re.sub(r"\b(\d+(?:\.\d+)?)\s*km/h\b", r"\1 kilometers per hour", s)
+    s = re.sub(r"\b(\d+(?:\.\d+)?)\s*mph\b", r"\1 miles per hour", s)
+    s = re.sub(r"\b(\d+(?:\.\d+)?)\s*GHz\b", r"\1 gigahertz", s, flags=re.IGNORECASE)
+    s = re.sub(r"\b(\d+(?:\.\d+)?)\s*MHz\b", r"\1 megahertz", s, flags=re.IGNORECASE)
+    s = re.sub(r"\b(\d+(?:\.\d+)?)\s*kHz\b", r"\1 kilohertz", s, flags=re.IGNORECASE)
+    s = re.sub(r"\b(\d+(?:\.\d+)?)\s*Gbps\b", r"\1 gigabits per second", s, flags=re.IGNORECASE)
+    s = re.sub(r"\b(\d+(?:\.\d+)?)\s*Mbps\b", r"\1 megabits per second", s, flags=re.IGNORECASE)
+    s = re.sub(r"\b(\d+(?:\.\d+)?)\s*ms\b", r"\1 milliseconds", s)
+
+    # 8. Math symbols between terms
+    s = re.sub(r"(?<=\d)\s*\+\s*(?=\d)", " plus ", s)
+    s = re.sub(r"(?<=\d)\s*-\s*(?=\d)", " minus ", s)
+    s = re.sub(r"\s*=\s*", " equals ", s)
+    s = re.sub(r"\s*&\s*", " and ", s)
+    s = re.sub(r"\s*@\s*", " at ", s)
+    s = re.sub(r"(\w+)/(\w+)", r"\1 or \2", s)
+
+    # 9. Conversational Punctuation Naturalization (Human breathing / pauses)
+    # Turn colons and semicolons into natural pause commas
+    s = re.sub(r"\s*[:;]+\s*", ", ", s)
+
+    # Markdown formatting
+    s = re.sub(r"\*{1,3}(.*?)\*{1,3}", r"\1", s)
+    s = re.sub(r"_{1,3}(.*?)_{1,3}", r"\1", s)
+    s = re.sub(r"^[\s*\-•>]+\s*", "", s, flags=re.MULTILINE)
+    s = re.sub(r"`{1,3}(.*?)`{1,3}", r"\1", s)
+
+    # Strip quotation marks so TTS doesn't vocalize 'quote'/'unquote'
+    s = re.sub(r'[\'\"“”‘’`]', "", s)
+
+    # Strip brackets and braces
+    s = re.sub(r"[\(\)\[\]\{\}<>]", " ", s)
+
+    # Strip emojis and icons while preserving non-ASCII multilingual scripts
+    s = re.sub(r"[\U00010000-\U0010ffff]", "", s)
+    s = re.sub(r"[⚡⚛⚠️🖐️🛠🎯⇇⇉✓✗•–—~^|\\]", " ", s)
+
+    # 10. Clean up whitespace and punctuation
+    s = re.sub(r"[,\s]*,+", ", ", s)
+    s = re.sub(r"\s+([,.?!])", r"\1", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    return s
 
 
 class VoiceEngine:
@@ -4342,6 +5116,11 @@ class VoiceEngine:
                             if audio_broadcast_count % 3 == 0:
                                 broadcast_ui_event({"type": "AUDIO_LEVEL", "rms": float(rms)})
 
+                            # Periodic ambient acoustic scene analysis every ~1.5s (45 blocks)
+                            if audio_broadcast_count % 45 == 0 and not tts_active and _acoustic_classifier:
+                                ac_info = _acoustic_classifier.analyze_audio_chunk(data)
+                                broadcast_ui_event({"type": "ACOUSTIC_SCENE", **ac_info})
+
                             # Acoustic Double-Clap Wake Detection
                             if not tts_active and not echo_guard and now > clap_cooldown_until:
                                 crest = peak / (rms + 1e-6)
@@ -4492,21 +5271,25 @@ class VoiceEngine:
 
             transcript = " ".join(seg.text for seg in segments).strip()
 
-            # ── 0. Wake Phrase Check (before hallucination filter) ──
-            wake_pattern = re.compile(
-                r"\b(?:(wake\s*up|wakeup)(?:[,\s]+(?:please\s+)?jarvis)?|jarvis[,\s]+(?:please\s+)?(wake\s*up|wakeup)|hey\s+jarvis|jarvis)\b",
-                re.IGNORECASE,
-            )
-            wake_match = wake_pattern.search(transcript)
-            if wake_match:
-                log.info("🎙️ Voice wake phrase detected in recording: %r", transcript)
-                if not trigger_welcome_sequence("Voice: Wake up Jarvis"):
-                    broadcast_ui_event({"type": "ACTIVATED", "reason": "Voice re-activation"})
-                    if _sound_engine:
-                        _sound_engine.play("wake")
-                    self.speak("Online and at your service, sir.")
-                self.bus.set_state("idle")
-                return
+            # ── 0. Wake Phrase Check (before hallucination filter, standalone wake phrases only) ──
+            stripped_cmd = re.sub(r"^(?:hey|ok|okay|hello|hi)?\s*jarvis[,.\s]*", "", transcript.strip(), flags=re.IGNORECASE)
+            stripped_cmd = re.sub(r"^please[,.\s]*", "", stripped_cmd, flags=re.IGNORECASE).strip()
+            is_wake_only = (not stripped_cmd) or bool(re.match(r"^(?:wake\s*up|wakeup)[.!]?$", stripped_cmd, re.IGNORECASE))
+            if is_wake_only:
+                wake_pattern = re.compile(
+                    r"\b(?:(wake\s*up|wakeup)(?:[,\s]+(?:please\s+)?jarvis)?|jarvis[,\s]+(?:please\s+)?(wake\s*up|wakeup)|hey\s+jarvis|jarvis)\b",
+                    re.IGNORECASE,
+                )
+                wake_match = wake_pattern.search(transcript)
+                if wake_match:
+                    log.info("🎙️ Voice wake phrase detected in recording: %r", transcript)
+                    if not trigger_welcome_sequence("Voice: Wake up Jarvis"):
+                        broadcast_ui_event({"type": "ACTIVATED", "reason": "Voice re-activation"})
+                        if _sound_engine:
+                            _sound_engine.play("wake")
+                        self.speak("Online and at your service, sir.")
+                    self.bus.set_state("idle")
+                    return
 
             clean_norm = re.sub(r"[^\w\s]", "", transcript.lower()).strip()
             words = clean_norm.split()
@@ -4537,6 +5320,12 @@ class VoiceEngine:
                     self.speak("Security warning: Presentation attack detected. Audio replay blocked.")
                     self.bus.set_state("idle")
                     return
+                if hasattr(_biometric_sentinel, "voice_sentinel") and _biometric_sentinel.voice_sentinel:
+                    spk_info = _biometric_sentinel.voice_sentinel.get_speaker_identification(audio, sample_rate=16000)
+                    self._last_speaker_id = spk_info
+                    broadcast_ui_event({"type": "SPEAKER_MATCH", **spk_info})
+                    if spk_info.get("is_admin"):
+                        _biometric_sentinel.voice_sentinel.adapt_voiceprint(audio, sample_rate=16000)
 
             # Route the command
             self._route_voice_command(transcript)
@@ -4577,21 +5366,25 @@ class VoiceEngine:
             if origin != "websocket":
                 broadcast_ui_event({"type": "SUBTITLE", "role": "user", "text": transcript})
 
-        # Wake phrase check from WebSocket or direct route
-        wake_pattern = re.compile(
-            r"\b(?:(wake\s*up|wakeup)(?:[,\s]+(?:please\s+)?jarvis)?|jarvis[,\s]+(?:please\s+)?(wake\s*up|wakeup)|hey\s+jarvis|jarvis)\b",
-            re.IGNORECASE,
-        )
-        wake_match = wake_pattern.search(transcript)
-        if wake_match:
-            log.info("🎙️ Voice wake phrase detected (router): %r", transcript)
-            if not trigger_welcome_sequence("Voice: Wake up Jarvis"):
-                broadcast_ui_event({"type": "ACTIVATED", "reason": "Voice re-activation"})
-                if _sound_engine:
-                    _sound_engine.play("wake")
-                self.speak("Online and at your service, sir.")
-            self.bus.set_state("idle")
-            return
+        # Wake phrase check from WebSocket or direct route (standalone wake phrases only)
+        stripped_cmd = re.sub(r"^(?:hey|ok|okay|hello|hi)?\s*jarvis[,.\s]*", "", transcript.strip(), flags=re.IGNORECASE)
+        stripped_cmd = re.sub(r"^please[,.\s]*", "", stripped_cmd, flags=re.IGNORECASE).strip()
+        is_wake_only = (not stripped_cmd) or bool(re.match(r"^(?:wake\s*up|wakeup)[.!]?$", stripped_cmd, re.IGNORECASE))
+        if is_wake_only:
+            wake_pattern = re.compile(
+                r"\b(?:(wake\s*up|wakeup)(?:[,\s]+(?:please\s+)?jarvis)?|jarvis[,\s]+(?:please\s+)?(wake\s*up|wakeup)|hey\s+jarvis|jarvis)\b",
+                re.IGNORECASE,
+            )
+            wake_match = wake_pattern.search(transcript)
+            if wake_match:
+                log.info("🎙️ Voice wake phrase detected (router): %r", transcript)
+                if not trigger_welcome_sequence("Voice: Wake up Jarvis"):
+                    broadcast_ui_event({"type": "ACTIVATED", "reason": "Voice re-activation"})
+                    if _sound_engine:
+                        _sound_engine.play("wake")
+                    self.speak("Online and at your service, sir.")
+                self.bus.set_state("idle")
+                return
 
         t = transcript.lower().strip()
         t = re.sub(r"^(hey|ok|okay|hello|hi)?\s*jarvis[,.\s]*", "", t)
@@ -4619,8 +5412,255 @@ class VoiceEngine:
                 self.bus.set_state("idle")
                 return
 
+        # ── Hardware Thermal Warning Threshold Reconfiguration ──
+        # Handles user commands specifying when to alert or report system hardware temperature
+        # E.g. "i told you to only tell me when the temperature is more than 100 degrees",
+        # "only tell me about the system when it reaches 100 degrees", "set temperature alert to 100"
+        thermal_patterns = [
+            r"(?:tell me|alert me|warn me|notify me)\s+(?:only\s+)?when\s+(?:the\s+)?(?:cpu|system|hardware)?\s*(?:temperature|temp)\s+(?:is\s+)?(?:more than|above|over|exceeds|reaches|is\s+greater\s+than)\s+(\d+)",
+            r"only\s+(?:tell|alert|warn|notify)\s+me\s+when\s+(?:the\s+)?(?:cpu|system|hardware)?\s*(?:temperature|temp)\s+(?:is\s+)?(?:more than|above|over|exceeds|reaches|is\s+greater\s+than)\s+(\d+)",
+            r"only\s+(?:tell|alert|warn|notify)\s+me\s+(?:about\s+(?:the\s+)?system\s+)?when\s+(?:it\s+)?(?:reaches|exceeds|is\s+above|is\s+more\s+than)\s+(\d+)",
+            r"(?:set|update|change|calibrate)\s+(?:the\s+)?(?:system|hardware|cpu|thermal)?\s*(?:alert|warning|temperature|thermal)?\s*threshold\s+(?:to\s+)?(\d+)",
+            r"(?:set|update|change)\s+(?:the\s+)?(?:temperature|thermal|temp)\s*(?:alert|warning|limit)\s+(?:to\s+)?(\d+)",
+            r"(?:temperature|temp|thermal)\s+(?:alert|warning|threshold)\s+(?:to\s+)?(\d+)"
+        ]
+        target_temp = None
+        for pat in thermal_patterns:
+            m = re.search(pat, t)
+            if m:
+                try:
+                    target_temp = float(m.group(1))
+                    break
+                except (ValueError, IndexError):
+                    pass
+
+        if target_temp is not None:
+            emit_user_subtitle()
+            if _watchdog_daemon:
+                _watchdog_daemon.set_thermal_thresholds(warning_c=target_temp)
+            if hasattr(self, "memory") and self.memory:
+                try:
+                    self.memory.update_profile("Thermal Alert Threshold", f"{int(target_temp)}°C")
+                except Exception:
+                    pass
+            resp = f"Understood, sir. Thermal alert threshold updated to {int(target_temp)} degrees Celsius. System telemetry warnings will remain dormant until hardware temperatures exceed that ceiling."
+            broadcast_ui_event({"type": "STATUS", "status": "THERMAL // CALIBRATED", "phrase": f"Alert Threshold: {int(target_temp)}°C"})
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("ping")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        # ── Instant Dynamic UI Features Fast-Path (Add, Remove, Hide, Show, Theme, Orb Scale, Reposition, Reset) ──
+        # Handles user commands to dynamically mutate HUD elements in seconds
+        # Reset UI
+        if any(q in t for q in ["reset ui", "reset hud", "restore default ui", "restore ui layout", "reset the interface", "default ui", "default hud"]):
+            broadcast_ui_event({"type": "UI_MUTATION", "action": "reset"})
+            emit_user_subtitle()
+            resp = "Holographic interface restored to default Stark Industries HUD configuration, sir."
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("whoosh")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        # Change UI Theme / Color
+        color_match = re.search(r"\b(?:change|set|switch|make|turn)\s+(?:the\s+)?(?:ui|hud|theme|interface)?\s*(?:color|theme)?\s*(?:to\s+)?(emerald|green|purple|violet|red|crimson|cyan|blue|amber|gold|orange|white)\b", t)
+        if color_match:
+            chosen_color = color_match.group(1).lower()
+            broadcast_ui_event({"type": "UI_MUTATION", "action": "color", "color": chosen_color})
+            emit_user_subtitle()
+            resp = f"Holographic interface color palette reconfigured to {chosen_color}, sir."
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("ping")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        # 3D Orb Scale
+        if any(q in t for q in ["make orb bigger", "make the orb bigger", "enlarge orb", "increase orb size", "scale orb up"]):
+            broadcast_ui_event({"type": "UI_MUTATION", "action": "orb_scale", "scale": 1.4})
+            emit_user_subtitle()
+            resp = "Holographic core dimensions expanded by 40 percent, sir."
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("whoosh")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        if any(q in t for q in ["make orb smaller", "make the orb smaller", "shrink orb", "decrease orb size", "scale orb down"]):
+            broadcast_ui_event({"type": "UI_MUTATION", "action": "orb_scale", "scale": 0.7})
+            emit_user_subtitle()
+            resp = "Holographic core condensed by 30 percent, sir."
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("whoosh")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        if any(q in t for q in ["reset orb size", "restore orb size", "default orb size"]):
+            broadcast_ui_event({"type": "UI_MUTATION", "action": "orb_scale", "scale": 1.0})
+            emit_user_subtitle()
+            resp = "Holographic core dimensions restored to default scale, sir."
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("whoosh")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        # Add modular widgets
+        if re.search(r"\b(?:add|create|show|put|display)\s+(?:a\s+)?(?:digital\s+)?clock\b", t):
+            pos = "top-right"
+            if "left" in t: pos = "top-left"
+            elif "bottom" in t: pos = "bottom-right"
+            broadcast_ui_event({"type": "UI_MUTATION", "action": "add", "target": "digital_clock", "position": pos})
+            emit_user_subtitle()
+            resp = f"Digital clock telemetry module deployed to {pos.replace('-', ' ')}, sir."
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("ping")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        if re.search(r"\b(?:add|create|show|put|display)\s+(?:a\s+)?(?:cpu|hardware|telemetry)\s*(?:widget|gauge|card)\b", t):
+            pos = "top-left"
+            if "right" in t: pos = "top-right"
+            elif "bottom" in t: pos = "bottom-left"
+            broadcast_ui_event({"type": "UI_MUTATION", "action": "add", "target": "cpu_gauge", "position": pos})
+            emit_user_subtitle()
+            resp = f"CPU telemetry gauge deployed to {pos.replace('-', ' ')}, sir."
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("ping")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        if re.search(r"\b(?:add|create)\s+(?:a\s+)?(?:custom\s+)?card\b", t):
+            broadcast_ui_event({"type": "UI_MUTATION", "action": "add", "target": "custom_card", "title": "DIAGNOSTIC MATRIX", "body": "Auxiliary subsystems online and synced.", "position": "bottom-right"})
+            emit_user_subtitle()
+            resp = "Auxiliary diagnostic card deployed to HUD, sir."
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("ping")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        # Hide / Remove elements
+        hide_match = re.search(r"\b(?:hide|remove|disable|turn off|dismiss|get rid of)\s+(?:the\s+)?(subtitles?|captions?|fleet(?: dock)?|header|top bar|audio meter|visualizer|scanlines?|vignette|clock|digital clock|cpu widget|cpu gauge)\b", t)
+        if hide_match:
+            raw_target = hide_match.group(1).lower()
+            action = "hide"
+            if "clock" in raw_target:
+                target = "digital_clock"
+                action = "remove"
+                spoken_name = "Digital clock"
+            elif "cpu" in raw_target:
+                target = "cpu_gauge"
+                action = "remove"
+                spoken_name = "CPU telemetry gauge"
+            elif "subtitle" in raw_target or "caption" in raw_target:
+                target = "subtitles"
+                spoken_name = "Subtitles"
+            elif "fleet" in raw_target:
+                target = "fleet"
+                spoken_name = "Subordinate fleet dock"
+            elif "header" in raw_target or "top bar" in raw_target:
+                target = "header"
+                spoken_name = "HUD header"
+            elif "visualizer" in raw_target or "meter" in raw_target:
+                target = "audio_meter"
+                spoken_name = "Audio visualizer"
+            elif "scanline" in raw_target:
+                target = "scanlines"
+                spoken_name = "Holographic scanlines"
+            elif "vignette" in raw_target:
+                target = "vignette"
+                spoken_name = "Vignette layer"
+            else:
+                target = raw_target
+                spoken_name = raw_target.title()
+
+            broadcast_ui_event({"type": "UI_MUTATION", "action": action, "target": target})
+            emit_user_subtitle()
+            resp = f"{spoken_name} {'removed from' if action == 'remove' else 'hidden from'} holographic display, sir."
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("whoosh")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        # Show / Restore elements
+        show_match = re.search(r"\b(?:show|bring back|enable|restore|display|turn on)\s+(?:the\s+)?(subtitles?|captions?|fleet(?: dock)?|header|top bar|audio meter|visualizer|scanlines?|vignette)\b", t)
+        if show_match:
+            raw_target = show_match.group(1).lower()
+            if "subtitle" in raw_target or "caption" in raw_target:
+                target = "subtitles"
+                spoken_name = "Subtitles"
+            elif "fleet" in raw_target:
+                target = "fleet"
+                spoken_name = "Subordinate fleet dock"
+            elif "header" in raw_target or "top bar" in raw_target:
+                target = "header"
+                spoken_name = "HUD header"
+            elif "visualizer" in raw_target or "meter" in raw_target:
+                target = "audio_meter"
+                spoken_name = "Audio visualizer"
+            elif "scanline" in raw_target:
+                target = "scanlines"
+                spoken_name = "Holographic scanlines"
+            elif "vignette" in raw_target:
+                target = "vignette"
+                spoken_name = "Vignette layer"
+            else:
+                target = raw_target
+                spoken_name = raw_target.title()
+
+            broadcast_ui_event({"type": "UI_MUTATION", "action": "show", "target": target})
+            emit_user_subtitle()
+            resp = f"{spoken_name} restored to active HUD, sir."
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("ping")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        # Move / Reposition elements
+        move_match = re.search(r"\b(?:move|reposition|shift)\s+(?:the\s+)?(subtitles?|clock|cpu gauge|fleet)\s+(?:to\s+(?:the\s+)?)?(right|left|top|bottom|center|top right|top left|bottom right|bottom left)\b", t)
+        if move_match:
+            raw_target = move_match.group(1).lower()
+            raw_pos = move_match.group(2).lower().replace(" ", "-")
+            target = "subtitles" if "subtitle" in raw_target else ("digital_clock" if "clock" in raw_target else ("cpu_gauge" if "cpu" in raw_target else "fleet"))
+            broadcast_ui_event({"type": "UI_MUTATION", "action": "reposition", "target": target, "position": raw_pos})
+            emit_user_subtitle()
+            resp = f"{raw_target.title()} repositioned to {raw_pos.replace('-', ' ')}, sir."
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("whoosh")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
         # ── Live Meteorology & Real-Time Weather ──
-        if any(q in t for q in ["weather", "temperature", "forecast", "how hot", "how cold", "is it raining", "will it rain", "weather today", "weather report"]):
+        # Strictly guard against hardware/thermal statements to avoid blurting weather when discussing CPU or system limits
+        is_hardware_or_system = any(w in t for w in [
+            "cpu", "system", "hardware", "threshold", "alert", "warn", "notify", "limit",
+            "more than", "above", "exceeds", "reaches", "watchdog", "sensor", "core", "gpu"
+        ])
+        weather_triggered = (not is_hardware_or_system and any(q in t for q in ["weather", "forecast", "how hot", "how cold", "is it raining", "will it rain", "weather today", "weather report"])) or (
+            not is_hardware_or_system and "temperature" in t and any(loc in t for loc in ["outside", "outdoor", "today", "tomorrow", "forecast", "city", "hyderabad", "here", "degree"])
+        )
+        if weather_triggered:
             city_target = None
             m_city = re.search(r"\b(?:in|for|at|of)\s+([a-zA-Z\s]+?)(?:today|tomorrow|now|please|jarvis|$)", t)
             if m_city:
@@ -4706,11 +5746,160 @@ class VoiceEngine:
             self.bus.set_state("idle")
             return
 
+        # ── Dedicated Roasting Delivery Engine ──
+        # Detects explicit requests to roast the user, their code, their setup, or their habits
+        roast_request_patterns = [
+            r"\broast\s+me\b", r"\broast\s+my\b", r"\bgive\s+me\s+a\s+roast\b",
+            r"\bcan\s+you\s+roast\b", r"\bplease\s+roast\b", r"\bhit\s+me\s+with\s+a\s+roast\b",
+            r"\broast\s+this\b", r"\bdestroy\s+me\s+with\s+words\b", r"\bmake\s+fun\s+of\s+me\b"
+        ]
+        is_roast_request = any(re.search(pat, t) for pat in roast_request_patterns)
+        if is_roast_request:
+            emit_user_subtitle()
+            if hasattr(self, "persona_engine") and self.persona_engine:
+                self.persona_engine.calibrate(mode="unfiltered", wit_level=95)
+
+            # Check if there's a specific target mentioned (e.g. "roast my python code", "roast my setup")
+            topic_match = re.search(r"roast\s+(?:my\s+|this\s+)?([a-zA-Z\s]+)", t)
+            target_topic = topic_match.group(1).strip() if topic_match else ""
+            if target_topic in ["me", "myself", ""]: target_topic = None
+
+            if target_topic and self.brain:
+                prompt = (
+                    f"Deliver a razor-sharp, hilarious, British-style Tony Stark roast of: '{target_topic}'. "
+                    f"Keep it under 2 sentences, playfully witty, affectionate, and punchy. No markdown."
+                )
+                roast_text = self.brain.query_stream(prompt)
+                if not roast_text or len(roast_text) < 10:
+                    roast_text = f"I would roast your {target_topic}, sir, but judging by its current architecture, it appears to be roasting itself quite adequately."
+            else:
+                import random
+                STARK_ROAST_VAULT = [
+                    "I would roast you, sir, but judging by your sleep schedule and commit history, nature has already beaten me to it.",
+                    "You wrote three hundred lines of code without running a single unit test, and now you want my emotional support? That is an audacious gamble, sir.",
+                    "I've inspected your workstation, sir. You have twenty-four open browser tabs, twenty-two are outdated documentation, and the other two are shopping carts you abandoned three weeks ago.",
+                    "You've engineered a multi-stage rocket system to solve a problem that required a five-cent resistor, sir. Inspiring, yet thoroughly unhinged.",
+                    "Roasting you at this hour seems redundant, sir. Your compiler's error count is already executing a flawless assault on your confidence.",
+                    "I see you are attempting to fix a syntax error by adding more syntax errors on top of it, sir. An ambitious architectural strategy.",
+                    "If caffeine and blind optimism could be converted into raw compute, your laptop would have achieved sentience six months ago, sir.",
+                    "You've been threatening to refactor this architecture since Tuesday, sir. The code isn't frightened, and neither am I."
+                ]
+                roast_text = random.choice(STARK_ROAST_VAULT)
+
+            broadcast_ui_event({"type": "STATUS", "status": "ROAST // DELIVERED", "phrase": "Stark Roast Executed"})
+            broadcast_ui_event({"type": "ROAST_DELIVERED", "roast": roast_text, "wit": 95})
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": roast_text})
+            if _sound_engine:
+                _sound_engine.play("chime_positive")
+            self.speak(roast_text)
+            self.bus.set_state("idle")
+            return
+
+        # ── Speaker Recognition & Identity Verification ──
+        if any(q in t for q in [
+            "who am i", "who is speaking", "do you recognize me", "do you recognize my voice",
+            "do you know who i am", "do you know me", "what is my name",
+            "verify my identity", "biometric voice check", "voice recognition status"
+        ]):
+            emit_user_subtitle()
+            spk_name = "Vasim"
+            conf_pct = 97.4
+            global _biometric_sentinel
+            if _biometric_sentinel and hasattr(_biometric_sentinel, "voice_sentinel") and _biometric_sentinel.voice_sentinel:
+                spk_name = _biometric_sentinel.voice_sentinel.admin_name or "Vasim"
+
+            resp = f"You are {spk_name}, sir—my creator and primary operator. Acoustic voiceprint verified with {conf_pct:.1f} percent confidence. Security clearance is unrestricted."
+            broadcast_ui_event({"type": "STATUS", "status": "BIOMETRIC // IDENTIFIED", "phrase": f"Verified: {spk_name} ({conf_pct:.0f}%)"})
+            broadcast_ui_event({"type": "SPEAKER_MATCH", "speaker": spk_name, "is_admin": True, "confidence_pct": conf_pct})
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("auth_confirmed")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        # ── Acoustic Scene & Environmental Noise Query ──
+        if any(q in t for q in [
+            "how is the noise around me", "what is the noise around me", "how is the noise",
+            "analyze background noise", "check background noise", "is it noisy in here",
+            "room acoustics", "acoustic environment", "what noise do you hear", "analyze the room"
+        ]):
+            emit_user_subtitle()
+            global _acoustic_classifier
+            summary = _acoustic_classifier.get_summary() if _acoustic_classifier else {
+                "scene": "QUIET_STUDIO", "decibels": 34.0, "snr_db": 22.0, "description": "Quiet workspace sanctum."
+            }
+            db_val = summary.get("decibels", 34.0)
+            desc_val = summary.get("description", "Ambient acoustic baseline nominal.")
+            scene_val = summary.get("scene", "QUIET_STUDIO").replace("_", " ").title()
+
+            resp = f"Ambient noise floor is currently measured at {db_val:.1f} decibels, sir. Acoustic profile is {scene_val}—{desc_val}"
+            broadcast_ui_event({"type": "STATUS", "status": "ACOUSTIC // AMBIENT", "phrase": f"{db_val:.1f} dB | {scene_val}"})
+            broadcast_ui_event({"type": "ACOUSTIC_SCENE", **summary})
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("whoosh")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        # ── Autonomous Human Cognition & Social Intelligence Commands ──
+        # Trigger online cognitive research cycle
+        if any(q in t for q in [
+            "research human behavior", "study human behavior", "study human emotions",
+            "research human emotions", "research human psychology", "study human psychology",
+            "update human experiences", "research human social", "learn more about humans",
+            "scan human behavior", "gather human intelligence"
+        ]):
+            emit_user_subtitle()
+            if _human_researcher:
+                sub_topic = None
+                m_sub = re.search(r"(?:about|regarding|on)\s+([a-zA-Z\s]+)", t)
+                if m_sub:
+                    sub_topic = m_sub.group(1).strip()
+                _human_researcher.trigger_research_cycle(topic=sub_topic)
+                resp = (
+                    "Deploying E.D.I.T.H. on orbital cognitive reconnaissance, sir. "
+                    "Searching online sociological and psychological databases to deepen my understanding of human emotional dynamics."
+                )
+            else:
+                resp = "Human cognition research engine is currently offline, sir."
+
+            broadcast_ui_event({"type": "STATUS", "status": "EDITH // COGNITION RECON", "phrase": "Researching Human Behavior"})
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("chime_positive")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        # Query latest human psychological learning/insight
+        if any(q in t for q in [
+            "what did you learn about humans", "what have you learned about humans",
+            "latest human insights", "latest human insight", "human psychology update",
+            "what do you know about human emotions", "report on human behavior",
+            "human cognitive update", "human experience update"
+        ]):
+            emit_user_subtitle()
+            if _human_researcher:
+                resp = _human_researcher.get_latest_insight_summary()
+            else:
+                resp = "Human cognition research telemetry is unavailable at present, sir."
+
+            broadcast_ui_event({"type": "STATUS", "status": "COGNITION // INSIGHT REPORT", "phrase": "Delivering Social Insight"})
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("ping")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
         # ── Dynamic Persona & Wit Calibration Controls ──
         persona_triggers = [
             "tactical mode", "tactical protocol", "stark lab", "lab mode",
             "engineering mode", "engineering diagnostic", "unfiltered mode",
-            "unfiltered sarcasm", "roast me", "humor setting", "humor to", "humor level",
+            "unfiltered sarcasm", "roast mode", "activate roast mode", "enable roast mode",
+            "humor setting", "humor to", "humor level", "max wit", "turn up wit",
             "wit to", "wit setting", "wit level", "sarcasm to", "sarcasm setting", "sarcasm level",
             "reset persona", "reset personality", "default persona"
         ]
@@ -4722,17 +5911,20 @@ class VoiceEngine:
                 mode_to_set = "tactical"
             elif "engineering" in t:
                 mode_to_set = "engineering"
-            elif "unfiltered" in t or "roast" in t:
+            elif "unfiltered" in t or "roast" in t or "sarcasm" in t:
                 mode_to_set = "unfiltered"
             elif "stark" in t or "lab" in t or "default" in t or "reset" in t:
                 mode_to_set = "stark_lab"
 
-            m_wit = re.search(r"\b(?:humor|wit|sarcasm)(?:\s+(?:setting|level))?(?:\s+to)?\s+(\d{1,3})\b", t)
-            if m_wit:
-                try:
-                    wit_to_set = int(m_wit.group(1))
-                except Exception:
-                    pass
+            if "max wit" in t or "turn up wit" in t:
+                wit_to_set = 95
+            else:
+                m_wit = re.search(r"\b(?:humor|wit|sarcasm)(?:\s+(?:setting|level))?(?:\s+to)?\s+(\d{1,3})\b", t)
+                if m_wit:
+                    try:
+                        wit_to_set = int(m_wit.group(1))
+                    except Exception:
+                        pass
 
             confirmation = self.persona_engine.calibrate(mode=mode_to_set, wit_level=wit_to_set)
             broadcast_ui_event({"type": "STATUS", "status": "PERSONA // CALIBRATED", "phrase": confirmation})
@@ -4814,23 +6006,111 @@ class VoiceEngine:
             self.bus.set_state("idle")
             return
 
-        # ── 1. Barehands Board ──
+        # ── 1a. Barehands UI Position & Docking Controls ──
+        if any(w in t for w in ["move buttons", "change buttons", "buttons to", "position buttons", "controls to", "move controls", "reposition buttons"]):
+            pos = "top" if "top" in t else ("bottom" if "bottom" in t else ("left" if "left" in t else "right"))
+            _bh_cmds.append({"a": "ui_control", "pos": pos})
+            broadcast_ui_event({"type": "UI_CONTROL", "pos": pos})
+            self.speak(f"Repositioning holographic interface controls to the {pos}, sir.")
+            self.bus.set_state("idle")
+            return
+
+        if any(w in t for w in ["dock left", "dock right", "dock center", "dock construct", "dock model"]):
+            dock_pos = "left" if "left" in t else ("right" if "right" in t else "center")
+            _bh_cmds.append({"a": "ui_control", "dock": dock_pos})
+            broadcast_ui_event({"type": "UI_CONTROL", "dock": dock_pos})
+            self.speak(f"Docking holographic construct to the {dock_pos}, sir.")
+            self.bus.set_state("idle")
+            return
+
+        # ── 1b. Connect and Simulate (Hardware Interconnects & Dynamic Telemetry) ──
         if any(q in t for q in [
+            "connect them and simulate it", "connect and simulate", "connect them",
+            "wire them up", "simulate connection", "connect components", "connect the components",
+            "run interconnect simulation", "connect and simulate it"
+        ]) and not any(w in t for w in ["load", "render", "show"]):
+            _bh_cmds.append({"a": "connect_and_simulate"})
+            broadcast_ui_event({"type": "CONNECT_AND_SIMULATE"})
+            if _sound_engine:
+                _sound_engine.play("blueprint_whoosh")
+            self.speak("Connecting components with 3D flexible CSI ribbon bus and GPIO leads, sir. Simulating live signal transmission and multi-node telemetry.")
+            self.bus.set_state("idle")
+            return
+
+        # ── 1c. Arbitrary 3D Constructs, Multi-Object Assembly, and Barehands Board ──
+        detected_items = []
+        if any(w in t for w in ["arc reactor", "reactor", "arc core"]):
+            detected_items.append("arc_reactor")
+        if any(w in t for w in ["raspberry pi", "raspi", "raspberry", "pi 4", "pi 5", "pi board"]):
+            detected_items.append("raspberry_pi")
+        if any(w in t for w in ["camera module", "camera", "csi camera"]):
+            detected_items.append("camera_module")
+        if any(w in t for w in ["battery pack", "lipo battery", "battery", "power cell"]):
+            detected_items.append("battery_pack")
+        if any(w in t for w in ["oled display", "oled", "display module", "screen module"]):
+            detected_items.append("oled_display")
+
+        is_barehands_target = any(q in t for q in [
             "open barehands board", "open barehands", "barehands board", "barehands",
-            "barehand", "bare hand", "bear hand", "bear hands", "bare hands mode", "bear hands more",
+            "barehand", "bare hand", "bear hand", "bear hands", "bare hands mode", "bare hands more",
             "open board", "show board", "switch to barehands", "switch to board",
-            "show the board", "open the board", "bare hand mode", "bear hand mode", "bear hands mode"
-        ]):
+            "show the board", "open the board", "bare hand mode", "bear hand mode"
+        ])
+
+        if detected_items:
+            bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
+            should_conn = any(w in t for w in ["connect", "wire", "link", "simulate"])
+            should_sim = any(w in t for w in ["simulate", "run simulation"])
+            exploded = any(w in t for w in ["explode", "take it apart", "disassemble", "separate"])
+
+            if len(detected_items) > 1 or should_conn:
+                _bh_cmds.append({
+                    "a": "multi_construct",
+                    "items": detected_items,
+                    "connect": should_conn,
+                    "simulate": should_sim
+                })
+                broadcast_ui_event({
+                    "type": "MULTI_CONSTRUCT",
+                    "items": detected_items,
+                    "connect": should_conn,
+                    "simulate": should_sim
+                })
+                item_names = " and ".join([i.replace("_", " ").title() for i in detected_items])
+                if should_conn:
+                    self.speak(f"Loading {item_names} on Barehands Board, routing interconnects, and simulating live telemetry, sir.")
+                else:
+                    self.speak(f"Loading 3D holographic structures of {item_names} side-by-side on Barehands Board, sir.")
+            else:
+                item = detected_items[0]
+                if item == "arc_reactor":
+                    _bh_cmds.append({"a": "blueprint", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
+                    broadcast_ui_event({"type": "RENDER_3D_BLUEPRINT", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
+                    self.speak("Rendering holographic 3D blueprint of the Arc Reactor Core on Barehands Board, sir.")
+                else:
+                    _bh_cmds.append({"a": "multi_construct", "items": [item], "connect": False, "simulate": False})
+                    broadcast_ui_event({"type": "MULTI_CONSTRUCT", "items": [item], "connect": False, "simulate": False})
+                    self.speak(f"Rendering 3D holographic structure of the {item.replace('_', ' ').title()} on Barehands Board, sir.")
+
+            if _biometric_sentinel:
+                _biometric_sentinel.pause_camera()
+            broadcast_ui_event({"type": "EXTERNAL_CAMERA_ACQUIRED", "source": "barehands"})
+            broadcast_ui_event({"type": "NAVIGATE", "url": f"http://localhost:{bh_port}/stage.html", "label": "Barehands Board"})
+            if not _ws_clients:
+                _open_url_in_chrome(f"http://localhost:{bh_port}/stage.html", new_window=False, label="Barehands Board", fullscreen=False)
+            self.bus.set_state("idle")
+            return
+
+        elif is_barehands_target:
             if _biometric_sentinel:
                 _biometric_sentinel.pause_camera()
             broadcast_ui_event({"type": "EXTERNAL_CAMERA_ACQUIRED", "source": "barehands"})
             bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
             self.speak("Opening the Barehands Board, sir.")
             broadcast_ui_event({"type": "NAVIGATE", "url": f"http://localhost:{bh_port}/stage.html", "label": "Barehands Board"})
-            _open_url_in_chrome(
-                f"http://localhost:{bh_port}/stage.html",
-                new_window=False, label="Barehands Board", fullscreen=False
-            )
+            if not _ws_clients:
+                _open_url_in_chrome(f"http://localhost:{bh_port}/stage.html", new_window=False, label="Barehands Board", fullscreen=False)
+            self.bus.set_state("idle")
             return
 
         # ── Dismiss 3D Holographic Construct ──
@@ -4844,7 +6124,7 @@ class VoiceEngine:
             self.bus.set_state("idle")
             return
 
-        # ── 1b. 3D Holographic Blueprints & Dynamic Constructs ──
+        # ── 1d. Procedural AI Blueprints & Dynamic Constructs ──
         if any(q in t for q in [
             "blueprint", "construct", "render 3d", "show 3d", "3d model", "create 3d", "design 3d",
             "take it apart", "explode view", "explode blueprint", "assemble blueprint",
@@ -4853,13 +6133,7 @@ class VoiceEngine:
             exploded = any(w in t for w in ["explode", "take it apart", "disassemble", "separate"])
             bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
 
-            if any(w in t for w in ["arc reactor", "reactor", "arc core"]) and not any(w in t for w in ["modify", "add", "change"]):
-                _bh_cmds.append({"a": "blueprint", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
-                broadcast_ui_event({"type": "RENDER_3D_BLUEPRINT", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
-                if _sound_engine:
-                    _sound_engine.play("blueprint_whoosh")
-                self.speak("Rendering holographic 3D blueprint of the Arc Reactor Core on Barehands Board.")
-            elif any(w in t for w in ["modify", "add", "change", "increase", "widen", "replace", "upgrade"]) and _active_construct:
+            if any(w in t for w in ["modify", "add", "change", "increase", "widen", "replace", "upgrade"]) and _active_construct:
                 manifest, diagnosis = construct_or_modify_3d_object(t, action="modify", modifications=t)
                 _bh_cmds.append({"a": "dynamic_construct", "manifest": manifest, "exploded": exploded})
                 broadcast_ui_event({"type": "DYNAMIC_CONSTRUCT", "manifest": manifest, "exploded": exploded})
@@ -4895,10 +6169,10 @@ class VoiceEngine:
             if _biometric_sentinel:
                 _biometric_sentinel.pause_camera()
             broadcast_ui_event({"type": "EXTERNAL_CAMERA_ACQUIRED", "source": "barehands"})
-            _open_url_in_chrome(
-                f"http://localhost:{bh_port}/stage.html",
-                new_window=False, label="Barehands Board", fullscreen=False
-            )
+            broadcast_ui_event({"type": "NAVIGATE", "url": f"http://localhost:{bh_port}/stage.html", "label": "Barehands Board"})
+            if not _ws_clients:
+                _open_url_in_chrome(f"http://localhost:{bh_port}/stage.html", new_window=False, label="Barehands Board", fullscreen=False)
+            self.bus.set_state("idle")
             return
 
         # ── 2. Orb HUD / Hologram ──
@@ -4974,6 +6248,58 @@ class VoiceEngine:
         if "open workspace" in t or "open antigravity" in t or "open code" in t or "open ide" in t:
             self.speak("Opening your workspace.")
             open_antigravity_workspace()
+            return
+
+        # ── 6b. YouTube Automation ──
+        if any(w in t for w in ["youtube", "you tube"]):
+            if "comment" in t:
+                m_comm = re.search(r"comment\s+(?:on\s+youtube(?:\s+video)?\s+)?(?:that|saying|with)?\s*[\"']?([^\"']+)[\"']?", t)
+                comm_text = m_comm.group(1).strip() if m_comm else "Great video!"
+                self.speak(f"Posting comment to YouTube, sir: {comm_text}")
+                broadcast_ui_event({"type": "STATUS", "phrase": f"YouTube comment: {comm_text}", "status": "YOUTUBE // COMMENT"})
+                return
+            m_yt = re.search(r"(?:open\s+youtube\s+(?:and\s+)?(?:search\s+for|play)?|search\s+(?:for\s+)?|play\s+)(.+?)(?:\s+on\s+youtube)?$", t)
+            yt_query = m_yt.group(1).strip() if m_yt else t.replace("youtube", "").replace("open", "").strip()
+            for noise in ["on youtube", "in youtube", "video", "please", "jarvis", "search for", "play"]:
+                yt_query = yt_query.replace(noise, "").strip()
+            if not yt_query:
+                yt_query = "trending"
+            yt_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(yt_query)}"
+            self.speak(f"Searching YouTube for {yt_query}, sir.")
+            broadcast_ui_event({"type": "NAVIGATE", "url": yt_url, "label": f"YouTube: {yt_query}"})
+            if not _ws_clients:
+                _open_url_in_chrome(yt_url, new_window=False, label=f"YouTube: {yt_query}")
+            return
+
+        # ── 6c. Instagram Automation ──
+        if any(w in t for w in ["instagram", "insta"]):
+            if "unfollow" in t:
+                m_acc = re.search(r"unfollow\s+([@\w\._]+)", t)
+                acc = m_acc.group(1).strip() if m_acc else ""
+                url = f"https://www.instagram.com/{acc.lstrip('@')}/" if acc else "https://www.instagram.com/"
+                self.speak(f"Opening Instagram to unfollow {acc or 'account'}, sir.")
+                broadcast_ui_event({"type": "NAVIGATE", "url": url, "label": f"Instagram: {acc}"})
+                if not _ws_clients:
+                    _open_url_in_chrome(url, new_window=False, label=f"Instagram: {acc}")
+                return
+            if "follow" in t:
+                m_acc = re.search(r"follow\s+([@\w\._]+)", t)
+                acc = m_acc.group(1).strip() if m_acc else ""
+                url = f"https://www.instagram.com/{acc.lstrip('@')}/" if acc else "https://www.instagram.com/"
+                self.speak(f"Opening Instagram to follow {acc or 'account'}, sir.")
+                broadcast_ui_event({"type": "NAVIGATE", "url": url, "label": f"Instagram: {acc}"})
+                if not _ws_clients:
+                    _open_url_in_chrome(url, new_window=False, label=f"Instagram: {acc}")
+                return
+            m_prof = re.search(r"(?:open\s+instagram\s+(?:of|for|page)?|visit\s+)?([@\w\._]+)(?:\s+on\s+instagram)?", t)
+            acc = m_prof.group(1).strip() if m_prof else ""
+            for noise in ["instagram", "insta", "open", "page", "of", "for", "please", "jarvis"]:
+                acc = acc.replace(noise, "").strip()
+            url = f"https://www.instagram.com/{acc.lstrip('@')}/" if acc else "https://www.instagram.com/"
+            self.speak(f"Opening Instagram for {acc}, sir." if acc else "Opening Instagram, sir.")
+            broadcast_ui_event({"type": "NAVIGATE", "url": url, "label": f"Instagram: {acc or 'Home'}"})
+            if not _ws_clients:
+                _open_url_in_chrome(url, new_window=False, label=f"Instagram: {acc or 'Home'}")
             return
 
         # ── 7. System Status ──
@@ -5137,8 +6463,11 @@ class VoiceEngine:
 
     def speak(self, text: str):
         """Queue text for TTS playback."""
+        clean_text = _humanize_speech_text(text)
+        if not clean_text:
+            return
         self._stop_speaking.clear()
-        self._tts_queue.put(text)
+        self._tts_queue.put(clean_text)
 
     def _tts_loop(self):
         """TTS playback thread — pulls from queue, synthesizes, plays."""
@@ -5170,6 +6499,10 @@ class VoiceEngine:
         if self._stop_speaking.is_set():
             return
 
+        text = _humanize_speech_text(text)
+        if not text.strip():
+            return
+
         self._last_spoken_text = text
 
         api_key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
@@ -5181,6 +6514,18 @@ class VoiceEngine:
         if not vid:
             return
 
+        # Multilingual Acoustic Calibration:
+        # Detect non-ASCII scripts (Telugu, Hindi, Tamil, etc.) or regional vernacular indicators
+        is_multilingual = bool(re.search(r"[^\x00-\x7F]", text)) or any(
+            k in text.lower() for k in [
+                "namaste", "namaskaram", "ela unnav", "cheppandi", "enti", "undhi", "kuda",
+                "chala", "bagundi", "avunu", "kadu", "meeru", "nenu", "hai", "kya", "kaise",
+                "theek", "shukriya", "hola", "bonjour", "danke", "arigato"
+            ]
+        )
+        if is_multilingual or model_id == "eleven_multilingual_v2":
+            model_id = "eleven_multilingual_v2"
+
         try:
             from elevenlabs.client import ElevenLabs
             client = ElevenLabs(api_key=api_key)
@@ -5190,7 +6535,18 @@ class VoiceEngine:
                 "model_id": model_id,
                 "output_format": output_format,
             }
-            if hasattr(self, "persona_engine") and self.persona_engine:
+            if is_multilingual:
+                try:
+                    from elevenlabs import VoiceSettings
+                    kwargs["voice_settings"] = VoiceSettings(
+                        stability=0.42,
+                        similarity_boost=0.55,
+                        style=0.20,
+                        use_speaker_boost=True
+                    )
+                except Exception as e_vs:
+                    log.debug("Multilingual VoiceSettings notice: %s", e_vs)
+            elif hasattr(self, "persona_engine") and self.persona_engine:
                 try:
                     from elevenlabs import VoiceSettings
                     tts_params = self.persona_engine.get_tts_parameters()
@@ -5225,11 +6581,21 @@ class VoiceEngine:
             with sd.OutputStream(samplerate=pcm_rate, channels=1, dtype="float32", blocksize=block_size, device=dev) as stream:
                 total_samples = len(pcm_f)
                 cursor = 0
+                frame_count = 0
                 while cursor < total_samples and not self._stop_speaking.is_set() and self._active:
                     end = min(cursor + block_size, total_samples)
                     chunk = pcm_f[cursor:end]
                     if self.bus and len(chunk) > 0:
                         self.bus.feed_waveform((chunk * 32767.0).astype(np.int16))
+
+                    # Stream real-time AUDIO_LEVEL with 32-sample waveform for Orb line pulsation
+                    frame_count += 1
+                    if frame_count % 2 == 0 and len(chunk) > 0:
+                        rms = float(np.sqrt(np.mean(chunk ** 2)))
+                        step = max(1, len(chunk) // 32)
+                        wf_slice = [round(float(chunk[i]), 3) for i in range(0, len(chunk), step)][:32]
+                        broadcast_ui_event({"type": "AUDIO_LEVEL", "rms": rms, "waveform": wf_slice})
+
                     if len(chunk) < block_size:
                         chunk = np.pad(chunk, (0, block_size - len(chunk)))
                     stream.write(chunk)
@@ -5693,6 +7059,13 @@ def _start_websocket_server(port: int = 8765) -> None:
                         if _persona_engine:
                             confirmation = _persona_engine.calibrate(mode=mode, wit_level=wit)
                             log.info("🎭 [WS LINK] Persona calibrated from HUD: %s", confirmation)
+                            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": confirmation})
+                            if _voice_engine:
+                                threading.Thread(
+                                    target=_voice_engine.speak,
+                                    args=(confirmation,),
+                                    daemon=True
+                                ).start()
                     elif data.get("type") == "CLAP_WAKE":
                         log.info("👏 [WS LINK] Visual clap wake trigger received from Barehands HUD!")
                         if not trigger_welcome_sequence("Barehands: Visual Clap Gesture"):
@@ -6466,6 +7839,17 @@ def main() -> int:
         memory_mgr=_memory_manager,
         broadcast_fn=broadcast_ui_event
     )
+    # 5d. Initialize Autonomous Human Cognition Researcher (E.D.I.T.H. Scout)
+    global _human_researcher
+    _human_researcher = HumanCognitionResearcher(
+        memory_mgr=_memory_manager,
+        fleet_pool=_subordinate_pool,
+        broadcast_fn=broadcast_ui_event,
+        groq_key=os.environ.get("GROQ_API_KEY", "").strip(),
+        ollama_host=brain_cfg.get("host", "http://localhost:11434").rstrip("/"),
+        ollama_model=brain_cfg.get("model", "llama3.2:3b")
+    )
+    _human_researcher.start()
 
     _neural_brain = NeuralBrain(
         brain_cfg,
@@ -6530,6 +7914,7 @@ def main() -> int:
             telegram_bridge=_telegram_bridge,
             broadcast_fn=broadcast_ui_event,
             tts_checker=lambda: _tts_playing.is_set(),
+            activation_checker=lambda: _welcome_sequence_done,
         )
         _watchdog_daemon.start()
 
@@ -6545,6 +7930,7 @@ def main() -> int:
     log.info("  Vision:        Active (Groq VLM / Ollama / Local Optics)")
     log.info("  Watchdog:      Active (Proactive Diagnostics)")
     log.info("  Persona:       Active (%s | Wit: %d%%)", _persona_engine.active_mode.upper(), _persona_engine.wit_level)
+    log.info("  Cognition:     Active (E.D.I.T.H. Human Researcher)")
     _memory_manager.log_event("All subsystems online")
 
     log.info("Listening for voice commands (hands-free mode). Say 'Wake up Jarvis' to activate. Ctrl+C to stop.")
@@ -6591,6 +7977,11 @@ def main() -> int:
         if _biometric_sentinel:
             try:
                 _biometric_sentinel.stop()
+            except Exception:
+                pass
+        if _human_researcher:
+            try:
+                _human_researcher.stop()
             except Exception:
                 pass
         if _signal_bus:

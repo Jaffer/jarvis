@@ -1162,13 +1162,13 @@ export function createOrbScene(container) {
     icoWire.scale.setScalar(Math.min(1.15, 1 + surge * 0.1 + audioBoost * 0.08 + voiceBoost * 0.05));
     icoWireMat.opacity = Math.min(0.75, 0.45 + surge * 0.1 + audioBoost * 0.1 + voiceBoost * 0.08);
 
-    // Dynamic Sound Frequency Waveform Modulation on Orb Lines (Subtle & Movie-Authentic)
+    // Dynamic Sound Frequency Waveform Modulation on Orb Lines (Movie-Authentic Stark Holographic Voice Reaction)
     const isVoiceActive = isSpeaking || waveformEnergy > 0.005 || smoothedAudio > 0.02;
     const targetSpeechModAmp = isVoiceActive
-      ? Math.max(0.015, Math.min(0.05, waveformEnergy * 0.35 + smoothedAudio * 0.25 + (isSpeaking ? 0.02 : 0.0)))
+      ? Math.max(0.15, Math.min(0.75, waveformEnergy * 1.6 + smoothedAudio * 1.2 + (isSpeaking ? 0.18 : 0.0)))
       : 0.0;
 
-    smoothedModAmp += (targetSpeechModAmp - smoothedModAmp) * 0.2;
+    smoothedModAmp += (targetSpeechModAmp - smoothedModAmp) * 0.25;
 
     if (smoothedModAmp > 0.001 || wasModulating) {
       const pcmLen = waveformSamples.length;
@@ -1203,17 +1203,17 @@ export function createOrbScene(container) {
             const pcmIdx = Math.floor((i / segs) * pcmLen) % pcmLen;
             const pcmVal = waveformSamples[pcmIdx] || 0.0;
 
-            // Multi-harmonic subtle audio frequency ripple
+            // Multi-harmonic audio frequency ripple
             const harmonic =
               0.50 * Math.sin(6 * angle * fMult - 16 * t + pOffset) +
               0.32 * Math.sin(14 * angle * fMult + 24 * t - pOffset) +
               0.18 * Math.sin(28 * angle - 38 * t);
 
-            // Fluctuation displacement: hard clamped to max +-0.05 units (~2.5% of sphere radius)
-            const rawDeltaR = smoothedModAmp * (harmonic * 0.04 + pcmVal * 0.05);
-            const deltaR = Math.max(-0.05, Math.min(0.05, rawDeltaR));
-            const rawDeltaY = smoothedModAmp * (Math.sin(10 * angle * fMult - 20 * t) * 0.025 + pcmVal * 0.025);
-            const deltaY = Math.max(-0.03, Math.min(0.03, rawDeltaY));
+            // Fluctuation displacement: scaled to visible frequency amplitude (+-0.22 units)
+            const rawDeltaR = smoothedModAmp * (harmonic * 0.12 + pcmVal * 0.18);
+            const deltaR = Math.max(-0.22, Math.min(0.22, rawDeltaR));
+            const rawDeltaY = smoothedModAmp * (Math.sin(10 * angle * fMult - 20 * t) * 0.08 + pcmVal * 0.10);
+            const deltaY = Math.max(-0.14, Math.min(0.14, rawDeltaY));
 
             const rCurr = rBase + deltaR;
             const idx = i * 3;
@@ -1241,9 +1241,9 @@ export function createOrbScene(container) {
               0.30 * Math.sin(18 * lat * fMult + 28 * t) +
               0.15 * Math.sin(32 * lat - 42 * t);
 
-            // Envelope tapers smoothly to zero at poles, hard clamped to +-0.05 units
-            const rawDeltaR = smoothedModAmp * (harmonic * 0.04 + pcmVal * 0.05) * cosLat;
-            const deltaR = Math.max(-0.05, Math.min(0.05, rawDeltaR));
+            // Envelope tapers smoothly to zero at poles, scaled to +-0.22 units
+            const rawDeltaR = smoothedModAmp * (harmonic * 0.12 + pcmVal * 0.18) * cosLat;
+            const deltaR = Math.max(-0.22, Math.min(0.22, rawDeltaR));
 
             const rCurr = rBase + deltaR;
             const idx = i * 3;
@@ -1371,7 +1371,11 @@ export function createOrbScene(container) {
     loadConstruct: (manifest) => hologramManager.loadConstruct(manifest),
     dismissConstruct: (save) => hologramManager.dismissConstruct(save),
     isConstructActive: () => hologramManager.isActive(),
-    rotateConstruct: (deltaAngle) => hologramManager.rotateBy(deltaAngle),
+    setScale: (factor) => {
+      const s = Math.max(0.2, Math.min(3.5, Number(factor) || 1.0));
+      orbGroup.scale.set(s, s, s);
+    },
+    getScale: () => orbGroup.scale.x,
     dispose,
   };
 }

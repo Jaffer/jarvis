@@ -151,6 +151,22 @@ export class PhysicsSimulator {
       } else {
         this.alert = null;
       }
+    } else if (this.mode === "system_interconnect" || constructName.includes("pi") || constructName.includes("camera") || constructName.includes("battery") || constructName.includes("connect")) {
+      const v = (5.12 + Math.sin(this.time * 3) * 0.03).toFixed(2);
+      const a = (1.42 + s * 0.35 + Math.sin(this.time * 5) * 0.04).toFixed(2);
+      const w = (v * a).toFixed(2);
+      const tempSoC = Math.round(44 + s * 12 + Math.sin(this.time * 2) * 2);
+      this.telemetry = {
+        primaryLabel: "SYSTEM BUS & CLOCK",
+        primaryVal: "CSI-2 1.5 Gbps  |  I2C 400 kHz",
+        secondaryLabel: "POWER CONSUMPTION",
+        secondaryVal: `${v} V · ${a} A (${w} W)`,
+        tertiaryLabel: "SoC THERMALS // THROUGHPUT",
+        tertiaryVal: `${tempSoC}°C  ·  1080p @ 60 FPS`,
+        formula: "P = V·I = 7.27 W  |  MIPI D-PHY v1.2  |  T_j < 85°C",
+        nominal: tempSoC < 75
+      };
+      this.alert = tempSoC >= 75 ? `⚠️ ELEVATED SoC TEMPERATURE (${tempSoC}°C)` : null;
     } else {
       // Universal Dynamic Generative Construct & Physics Engine Solver
       const phys = (this.activeManifest && this.activeManifest.physics) ? this.activeManifest.physics : null;
@@ -495,6 +511,341 @@ export class BlueprintBuilder {
 
     return { group, parts, name: (manifest && manifest.id) || "custom_construct", manifest };
   }
+
+  // ── HIGH-DETAIL EMBEDDED COMPUTING CONSTRUCT: RASPBERRY PI 4 / 5 ──
+  static buildRaspberryPi() {
+    const group = new THREE.Group();
+    group.name = "construct_root";
+    const parts = [];
+
+    const matPcb = new THREE.MeshBasicMaterial({ color: 0x0a3d24, wireframe: false, side: THREE.DoubleSide });
+    const matPcbTrace = new THREE.MeshBasicMaterial({ color: 0x00e5ff, wireframe: true, transparent: true, opacity: 0.35 });
+    const matSocAlloy = new THREE.MeshBasicMaterial({ color: 0xb0bec5, wireframe: false });
+    const matChipBlack = new THREE.MeshBasicMaterial({ color: 0x1a1a1a, wireframe: false });
+    const matGoldPins = new THREE.MeshBasicMaterial({ color: 0xffd700, wireframe: false });
+    const matHeaderBlack = new THREE.MeshBasicMaterial({ color: 0x212121, wireframe: false });
+    const matMetalShield = new THREE.MeshBasicMaterial({ color: 0x90a4ae, wireframe: false });
+    const matUsbBlue = new THREE.MeshBasicMaterial({ color: 0x0055ff, wireframe: false });
+    const matWhiteSocket = new THREE.MeshBasicMaterial({ color: 0xf5f5f5, wireframe: false });
+
+    // 1. Primary FR-4 Multi-Layer Substrate PCB
+    const pcbGeo = new THREE.BoxGeometry(3.6, 0.08, 2.4);
+    const pcbMesh = new THREE.Mesh(pcbGeo, matPcb);
+    pcbMesh.add(new THREE.Mesh(pcbGeo, matPcbTrace));
+    pcbMesh.userData = { home: new THREE.Vector3(0, 0, 0), explodeDir: new THREE.Vector3(0, -1.2, 0), label: "[RPI-01] 6-Layer High-Speed FR-4 PCB Substrate", intensity: 1.0 };
+    group.add(pcbMesh);
+    parts.push(pcbMesh);
+
+    // 2. Broadcom BCM2712 Quad-Core 2.4GHz SoC with Metal Heat Spreader
+    const socGeo = new THREE.BoxGeometry(0.72, 0.14, 0.72);
+    const socMesh = new THREE.Mesh(socGeo, matSocAlloy);
+    socMesh.position.set(-0.25, 0.11, -0.15);
+    socMesh.userData = { home: new THREE.Vector3(-0.25, 0.11, -0.15), explodeDir: new THREE.Vector3(0, 1.8, 0), label: "[RPI-02] Broadcom BCM2712 Quad-Core 2.4GHz SoC", intensity: 1.5, isCore: true };
+    group.add(socMesh);
+    parts.push(socMesh);
+
+    // 3. 8GB LPDDR4X-4266 SDRAM IC
+    const ramGeo = new THREE.BoxGeometry(0.55, 0.08, 0.55);
+    const ramMesh = new THREE.Mesh(ramGeo, matChipBlack);
+    ramMesh.position.set(-0.25, 0.08, 0.55);
+    ramMesh.userData = { home: new THREE.Vector3(-0.25, 0.08, 0.55), explodeDir: new THREE.Vector3(0, 1.4, 0), label: "[RPI-03] 8GB LPDDR4X SDRAM", intensity: 1.2 };
+    group.add(ramMesh);
+    parts.push(ramMesh);
+
+    // 4. 40-Pin Dual-Row GPIO Header
+    const gpioGroup = new THREE.Group();
+    const gpioBase = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.12, 0.22), matHeaderBlack);
+    gpioGroup.add(gpioBase);
+    for (let p = 0; p < 20; p++) {
+      const px = -0.95 + p * 0.1;
+      const pinA = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.32, 8), matGoldPins);
+      pinA.position.set(px, 0.18, -0.05);
+      const pinB = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.32, 8), matGoldPins);
+      pinB.position.set(px, 0.18, 0.05);
+      gpioGroup.add(pinA, pinB);
+    }
+    gpioGroup.position.set(0.4, 0.1, -1.02);
+    gpioGroup.userData = { home: new THREE.Vector3(0.4, 0.1, -1.02), explodeDir: new THREE.Vector3(0, 2.2, -1.0), label: "[RPI-04] 40-Pin Multi-Function GPIO Bus", intensity: 1.1 };
+    group.add(gpioGroup);
+    parts.push(gpioGroup);
+
+    // 5. Gigabit Ethernet Port
+    const ethMesh = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.62, 0.68), matMetalShield);
+    ethMesh.position.set(1.45, 0.35, -0.72);
+    ethMesh.userData = { home: new THREE.Vector3(1.45, 0.35, -0.72), explodeDir: new THREE.Vector3(1.6, 0.8, -0.8), label: "[RPI-05] Shielded RJ45 Gigabit Ethernet Port", intensity: 1.0 };
+    group.add(ethMesh);
+    parts.push(ethMesh);
+
+    // 6. Dual Stacked USB 3.0 & USB 2.0 Ports
+    const usb3Mesh = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.65, 0.58), matMetalShield);
+    const usb3Tongue = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.08, 0.4), matUsbBlue);
+    usb3Tongue.position.set(0.28, 0.1, 0);
+    usb3Mesh.add(usb3Tongue);
+    usb3Mesh.position.set(1.45, 0.36, 0.05);
+    usb3Mesh.userData = { home: new THREE.Vector3(1.45, 0.36, 0.05), explodeDir: new THREE.Vector3(1.8, 0.8, 0), label: "[RPI-06A] Dual USB 3.0 Host Ports", intensity: 1.1 };
+    group.add(usb3Mesh);
+    parts.push(usb3Mesh);
+
+    const usb2Mesh = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.65, 0.58), matMetalShield);
+    usb2Mesh.position.set(1.45, 0.36, 0.78);
+    usb2Mesh.userData = { home: new THREE.Vector3(1.45, 0.36, 0.78), explodeDir: new THREE.Vector3(1.8, 0.8, 0.9), label: "[RPI-06B] Dual USB 2.0 Host Ports", intensity: 1.0 };
+    group.add(usb2Mesh);
+    parts.push(usb2Mesh);
+
+    // 7. Dual Micro-HDMI Ports & USB-C Power In
+    const hdmi1 = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.16, 0.26), matMetalShield);
+    hdmi1.position.set(-0.55, 0.12, 1.1);
+    hdmi1.userData = { home: new THREE.Vector3(-0.55, 0.12, 1.1), explodeDir: new THREE.Vector3(-0.4, 0.6, 1.6), label: "[RPI-07A] Micro-HDMI 0 Port · 4Kp60", intensity: 1.0 };
+    const hdmi2 = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.16, 0.26), matMetalShield);
+    hdmi2.position.set(0.05, 0.12, 1.1);
+    hdmi2.userData = { home: new THREE.Vector3(0.05, 0.12, 1.1), explodeDir: new THREE.Vector3(0.2, 0.6, 1.6), label: "[RPI-07B] Micro-HDMI 1 Port · 4Kp60", intensity: 1.0 };
+    const usbcPower = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.16, 0.28), matMetalShield);
+    usbcPower.position.set(-1.25, 0.12, 1.1);
+    usbcPower.userData = { home: new THREE.Vector3(-1.25, 0.12, 1.1), explodeDir: new THREE.Vector3(-1.2, 0.6, 1.6), label: "[RPI-08] USB-C 5V/5A Power Delivery Ingest", intensity: 1.3 };
+    group.add(hdmi1, hdmi2, usbcPower);
+    parts.push(hdmi1, hdmi2, usbcPower);
+
+    // 8. CSI-2 MIPI Camera Ribbon FPC Socket
+    const csiSocket = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.22, 0.88), matWhiteSocket);
+    csiSocket.position.set(0.65, 0.15, 0.15);
+    csiSocket.userData = { home: new THREE.Vector3(0.65, 0.15, 0.15), explodeDir: new THREE.Vector3(0, 1.6, 0), label: "[RPI-09] 22-Pin MIPI CSI-2 Camera Port", intensity: 1.3 };
+    group.add(csiSocket);
+    parts.push(csiSocket);
+
+    // 9. DSI Display Ribbon Socket & Underside MicroSD Slot
+    const dsiSocket = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.22, 0.88), matWhiteSocket);
+    dsiSocket.position.set(-1.45, 0.15, -0.15);
+    dsiSocket.userData = { home: new THREE.Vector3(-1.45, 0.15, -0.15), explodeDir: new THREE.Vector3(-1.2, 1.4, 0), label: "[RPI-10] 22-Pin MIPI DSI Display Port", intensity: 1.0 };
+    const sdSlot = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.07, 0.55), matMetalShield);
+    sdSlot.position.set(-1.65, -0.08, 0);
+    sdSlot.userData = { home: new THREE.Vector3(-1.65, -0.08, 0), explodeDir: new THREE.Vector3(-2.2, -0.6, 0), label: "[RPI-11] MicroSD Card Interface", intensity: 1.0 };
+    group.add(dsiSocket, sdSlot);
+    parts.push(dsiSocket, sdSlot);
+
+    group.userData = {
+      ports: {
+        csi: new THREE.Vector3(0.65, 0.26, 0.15),
+        power: new THREE.Vector3(-1.25, 0.15, 1.1),
+        gpio_vcc: new THREE.Vector3(0.3, 0.35, -1.07),
+        gpio_gnd: new THREE.Vector3(0.4, 0.35, -0.97),
+        gpio_sda: new THREE.Vector3(0.2, 0.35, -1.07),
+        gpio_scl: new THREE.Vector3(0.2, 0.35, -0.97)
+      }
+    };
+
+    return { group, parts, name: "raspberry_pi", type: "hardware" };
+  }
+
+  // ── HIGH-DETAIL EMBEDDED OPTICAL CONSTRUCT: CAMERA MODULE ──
+  static buildCameraModule() {
+    const group = new THREE.Group();
+    group.name = "construct_root";
+    const parts = [];
+
+    const matPcb = new THREE.MeshBasicMaterial({ color: 0x0a3d24, wireframe: false });
+    const matPcbWire = new THREE.MeshBasicMaterial({ color: 0x00e5ff, wireframe: true, transparent: true, opacity: 0.4 });
+    const matBarrel = new THREE.MeshBasicMaterial({ color: 0x263238, wireframe: false });
+    const matGlass = new THREE.MeshBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.75 });
+    const matSocket = new THREE.MeshBasicMaterial({ color: 0xf5f5f5, wireframe: false });
+
+    // 1. Camera PCB Substrate
+    const pcbGeo = new THREE.BoxGeometry(1.2, 0.08, 1.2);
+    const pcbMesh = new THREE.Mesh(pcbGeo, matPcb);
+    pcbMesh.add(new THREE.Mesh(pcbGeo, matPcbWire));
+    pcbMesh.userData = { home: new THREE.Vector3(0, 0, 0), explodeDir: new THREE.Vector3(0, -1.0, 0), label: "[CAM-01] Sony IMX Sensor PCB Substrate", intensity: 1.0 };
+    group.add(pcbMesh);
+    parts.push(pcbMesh);
+
+    // 2. Optical Sensor Barrel
+    const barrelGeo = new THREE.CylinderGeometry(0.38, 0.42, 0.52, 24);
+    const barrelMesh = new THREE.Mesh(barrelGeo, matBarrel);
+    barrelMesh.position.set(0, 0.3, 0);
+    barrelMesh.userData = { home: new THREE.Vector3(0, 0.3, 0), explodeDir: new THREE.Vector3(0, 1.5, 0), label: "[CAM-02] Voice Coil Autofocus Mechanism", intensity: 1.4 };
+    group.add(barrelMesh);
+    parts.push(barrelMesh);
+
+    // 3. Optical Glass Front Element
+    const lensGeo = new THREE.CylinderGeometry(0.25, 0.25, 0.06, 24);
+    const lensMesh = new THREE.Mesh(lensGeo, matGlass);
+    lensMesh.position.set(0, 0.58, 0);
+    lensMesh.userData = { home: new THREE.Vector3(0, 0.58, 0), explodeDir: new THREE.Vector3(0, 2.4, 0), label: "[CAM-03] 12MP f/1.8 Quad-Bayer Optical Lens", intensity: 1.6, isCore: true };
+    group.add(lensMesh);
+    parts.push(lensMesh);
+
+    // 4. CSI FPC Flex Ribbon Connector Port
+    const csiSocket = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.16, 0.72), matSocket);
+    csiSocket.position.set(-0.45, 0.12, 0);
+    csiSocket.userData = { home: new THREE.Vector3(-0.45, 0.12, 0), explodeDir: new THREE.Vector3(-1.4, 0.8, 0), label: "[CAM-04] MIPI CSI Flex Ribbon Receiver", intensity: 1.2 };
+    group.add(csiSocket);
+    parts.push(csiSocket);
+
+    group.userData = {
+      ports: {
+        csi: new THREE.Vector3(-0.45, 0.2, 0)
+      }
+    };
+
+    return { group, parts, name: "camera_module", type: "hardware" };
+  }
+
+  // ── HIGH-DETAIL POWER CONSTRUCT: RECHARGEABLE LIPO BATTERY MODULE ──
+  static buildBatteryPack() {
+    const group = new THREE.Group();
+    group.name = "construct_root";
+    const parts = [];
+
+    const matPouch = new THREE.MeshBasicMaterial({ color: 0x37474f, wireframe: false });
+    const matKapton = new THREE.MeshBasicMaterial({ color: 0xffa000, transparent: true, opacity: 0.85 });
+    const matBms = new THREE.MeshBasicMaterial({ color: 0x1b5e20, wireframe: false });
+    const matRedWire = new THREE.MeshBasicMaterial({ color: 0xff1744, wireframe: false });
+    const matBlackWire = new THREE.MeshBasicMaterial({ color: 0x212121, wireframe: false });
+
+    // 1. Lithium Polymer Cell Pouch
+    const pouchMesh = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.45, 1.4), matPouch);
+    pouchMesh.add(new THREE.Mesh(new THREE.BoxGeometry(2.62, 0.46, 1.42), matKapton));
+    pouchMesh.userData = { home: new THREE.Vector3(0, 0, 0), explodeDir: new THREE.Vector3(0, -1.0, 0), label: "[BAT-01] 3.7V 5000mAh LiPo Cell", intensity: 1.2 };
+    group.add(pouchMesh);
+    parts.push(pouchMesh);
+
+    // 2. Battery Protection Circuit Module (BMS)
+    const bmsMesh = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, 1.3), matBms);
+    bmsMesh.position.set(1.4, 0.05, 0);
+    bmsMesh.userData = { home: new THREE.Vector3(1.4, 0.05, 0), explodeDir: new THREE.Vector3(1.4, 0.5, 0), label: "[BAT-02] BMS Safety Regulator", intensity: 1.4 };
+    group.add(bmsMesh);
+    parts.push(bmsMesh);
+
+    // 3. Silicone Wire Leads
+    const redWire = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.6, 8), matRedWire);
+    redWire.rotation.z = Math.PI / 2;
+    redWire.position.set(1.8, 0.1, 0.2);
+    const blackWire = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.6, 8), matBlackWire);
+    blackWire.rotation.z = Math.PI / 2;
+    blackWire.position.set(1.8, 0.1, -0.2);
+    group.add(redWire, blackWire);
+    parts.push(redWire, blackWire);
+
+    group.userData = {
+      ports: {
+        power: new THREE.Vector3(2.1, 0.1, 0),
+        vcc: new THREE.Vector3(2.1, 0.1, 0.2),
+        gnd: new THREE.Vector3(2.1, 0.1, -0.2)
+      }
+    };
+
+    return { group, parts, name: "battery_pack", type: "hardware" };
+  }
+
+  // ── HIGH-DETAIL DISPLAY CONSTRUCT: 0.96" I2C OLED SCREEN ──
+  static buildOLEDDisplay() {
+    const group = new THREE.Group();
+    group.name = "construct_root";
+    const parts = [];
+
+    const matPcb = new THREE.MeshBasicMaterial({ color: 0x01579b, wireframe: false });
+    const matGlass = new THREE.MeshBasicMaterial({ color: 0x050515, wireframe: false });
+    const matPixelGlow = new THREE.MeshBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.9 });
+    const matGoldPins = new THREE.MeshBasicMaterial({ color: 0xffd700, wireframe: false });
+
+    // 1. OLED PCB Substrate
+    const pcb = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.06, 1.4), matPcb);
+    pcb.userData = { home: new THREE.Vector3(0, 0, 0), explodeDir: new THREE.Vector3(0, -1.0, 0), label: "[OLED-01] SSD1306 Controller Board · I2C Mode", intensity: 1.0 };
+    group.add(pcb);
+    parts.push(pcb);
+
+    // 2. Active Matrix OLED Glass Display
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.08, 0.8), matGlass);
+    const pixels = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.09, 0.7), matPixelGlow);
+    glass.add(pixels);
+    glass.position.set(0, 0.08, 0.15);
+    glass.userData = { home: new THREE.Vector3(0, 0.08, 0.15), explodeDir: new THREE.Vector3(0, 1.5, 0), label: "[OLED-02] 128x64 Monochrome Pixel Matrix", intensity: 1.5, isCore: true };
+    group.add(glass);
+    parts.push(glass);
+
+    // 3. 4-Pin I2C Header (VCC, GND, SCL, SDA)
+    const headerGroup = new THREE.Group();
+    for (let p = 0; p < 4; p++) {
+      const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.28, 8), matGoldPins);
+      pin.position.set(-0.35 + p * 0.23, 0.12, -0.55);
+      headerGroup.add(pin);
+    }
+    headerGroup.userData = { home: new THREE.Vector3(0, 0, 0), explodeDir: new THREE.Vector3(0, 1.2, -1.2), label: "[OLED-03] 4-Pin Header (GND, VCC, SCL, SDA)", intensity: 1.1 };
+    group.add(headerGroup);
+    parts.push(headerGroup);
+
+    group.userData = {
+      ports: {
+        i2c: new THREE.Vector3(0, 0.2, -0.55)
+      }
+    };
+
+    return { group, parts, name: "oled_display", type: "hardware" };
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 3b. PHYSICAL 3D INTERCONNECT ROUTING ENGINE (Ribbon Cables, Wires, Conduits)
+// ══════════════════════════════════════════════════════════════════════════════
+export class InterconnectRouter {
+  static createCsiRibbon(fromPos, toPos) {
+    const mid1 = new THREE.Vector3(fromPos.x + (toPos.x - fromPos.x) * 0.25, fromPos.y + 0.9, fromPos.z + 0.3);
+    const mid2 = new THREE.Vector3(fromPos.x + (toPos.x - fromPos.x) * 0.75, toPos.y + 0.9, toPos.z - 0.3);
+    const curve = new THREE.CatmullRomCurve3([fromPos, mid1, mid2, toPos]);
+
+    const tubeGeo = new THREE.TubeGeometry(curve, 36, 0.07, 8, false);
+    const ribbonMat = new THREE.MeshBasicMaterial({ color: 0x8ff0e4, transparent: true, opacity: 0.8, wireframe: false });
+    const ribbonMesh = new THREE.Mesh(tubeGeo, ribbonMat);
+
+    const pulseCount = 35;
+    const pulseGeo = new THREE.BufferGeometry();
+    const pulsePos = new Float32Array(pulseCount * 3);
+    for (let i = 0; i < pulseCount; i++) {
+      const pt = curve.getPointAt(i / pulseCount);
+      pulsePos[i * 3] = pt.x;
+      pulsePos[i * 3 + 1] = pt.y;
+      pulsePos[i * 3 + 2] = pt.z;
+    }
+    pulseGeo.setAttribute("position", new THREE.BufferAttribute(pulsePos, 3));
+    const pulseMat = new THREE.PointsMaterial({ color: 0x00ffff, size: 0.14, transparent: true, opacity: 0.95 });
+    const pulseSystem = new THREE.Points(pulseGeo, pulseMat);
+
+    const group = new THREE.Group();
+    group.add(ribbonMesh);
+    group.add(pulseSystem);
+
+    return { group, curve, pulseSystem, pulseCount, type: "csi_ribbon", label: "MIPI CSI-2 2-Lane Bus · 1.5 Gbps" };
+  }
+
+  static createJumperWire(fromPos, toPos, color = 0xff1744, label = "+5V VCC Rail") {
+    const dist = fromPos.distanceTo(toPos);
+    const mid = new THREE.Vector3(
+      (fromPos.x + toPos.x) / 2,
+      Math.max(fromPos.y, toPos.y) + Math.min(1.8, dist * 0.35 + 0.4),
+      (fromPos.z + toPos.z) / 2
+    );
+    const curve = new THREE.CatmullRomCurve3([fromPos, mid, toPos]);
+    const tubeGeo = new THREE.TubeGeometry(curve, 28, 0.035, 8, false);
+    const wireMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.88 });
+    const wireMesh = new THREE.Mesh(tubeGeo, wireMat);
+
+    const pulseCount = 20;
+    const pulseGeo = new THREE.BufferGeometry();
+    const pulsePos = new Float32Array(pulseCount * 3);
+    for (let i = 0; i < pulseCount; i++) {
+      const pt = curve.getPointAt(i / pulseCount);
+      pulsePos[i * 3] = pt.x;
+      pulsePos[i * 3 + 1] = pt.y;
+      pulsePos[i * 3 + 2] = pt.z;
+    }
+    pulseGeo.setAttribute("position", new THREE.BufferAttribute(pulsePos, 3));
+    const pulseMat = new THREE.PointsMaterial({ color, size: 0.10, transparent: true, opacity: 0.95 });
+    const pulseSystem = new THREE.Points(pulseGeo, pulseMat);
+
+    const group = new THREE.Group();
+    group.add(wireMesh);
+    group.add(pulseSystem);
+
+    return { group, curve, pulseSystem, pulseCount, type: "wire", label };
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -522,6 +873,65 @@ export class HolographicStudio {
   static _prevTwoHandDist = null;
   static _isDragging = false;
   static _dragAnchor = null;
+
+  static components = [];
+  static interconnects = [];
+
+  static setControlPosition(pos = "bottom") {
+    const bar = document.getElementById("holo_bottom_bar");
+    if (!bar) return;
+    HolographicAudio.playServo(1);
+    if (pos === "top") {
+      bar.style.top = "76px";
+      bar.style.bottom = "auto";
+      bar.style.left = "50%";
+      bar.style.right = "auto";
+      bar.style.transform = "translateX(-50%)";
+      bar.style.flexDirection = "row";
+    } else if (pos === "left") {
+      bar.style.top = "50%";
+      bar.style.bottom = "auto";
+      bar.style.left = "24px";
+      bar.style.right = "auto";
+      bar.style.transform = "translateY(-50%)";
+      bar.style.flexDirection = "column";
+    } else if (pos === "right") {
+      bar.style.top = "50%";
+      bar.style.bottom = "auto";
+      bar.style.right = "24px";
+      bar.style.left = "auto";
+      bar.style.transform = "translateY(-50%)";
+      bar.style.flexDirection = "column";
+    } else {
+      bar.style.top = "auto";
+      bar.style.bottom = "24px";
+      bar.style.left = "50%";
+      bar.style.right = "auto";
+      bar.style.transform = "translateX(-50%)";
+      bar.style.flexDirection = "row";
+    }
+  }
+
+  static setSimulationMode(mode) {
+    if (!mode) return;
+    this.simulator.mode = mode;
+    HolographicAudio.playClick();
+    if (this.hudEl) {
+      this.hudEl.querySelectorAll(".sim-btn").forEach(b => {
+        b.classList.toggle("active", b.getAttribute("data-sim") === mode);
+      });
+    }
+  }
+
+  static setExploded(exploded) {
+    this.isExploded = !!exploded;
+    const explodeBtn = document.getElementById("holo_explode_btn");
+    if (explodeBtn) {
+      explodeBtn.innerText = `EXPLODED: ${this.isExploded ? "ON" : "OFF"}`;
+      explodeBtn.style.color = this.isExploded ? "#ffb300" : "#00e5ff";
+    }
+    HolographicAudio.playServo(this.isExploded ? 1 : -1);
+  }
 
   static dock(mode = "center") {
     if (!this.currentConstruct || !this.camera) return;
@@ -619,11 +1029,14 @@ export class HolographicStudio {
       <div style="position: absolute; top: 18px; left: 24px; right: 190px; display: flex; align-items: center; gap: 12px; pointer-events: auto;">
         <div style="display: flex; gap: 8px; background: rgba(5,25,30,0.75); padding: 6px 14px; border-radius: 12px; border: 1px solid rgba(0,229,255,0.4); backdrop-filter: blur(10px);">
           <button class="holo-btn active" data-construct="arc_reactor">⚛ ARC REACTOR</button>
-          <button class="holo-btn" data-construct="dynamic" id="holo_dynamic_btn">🛠 DYNAMIC BLUEPRINT</button>
+          <button class="holo-btn" data-construct="raspberry_pi">🥧 RASPBERRY PI</button>
+          <button class="holo-btn" data-construct="camera_module">📷 CAMERA</button>
+          <button class="holo-btn" data-construct="battery_pack">🔋 BATTERY</button>
+          <button class="holo-btn" data-construct="dynamic" id="holo_dynamic_btn">🛠 DYNAMIC</button>
         </div>
 
         <div style="flex: 1; display: flex; gap: 8px; background: rgba(5,25,30,0.75); padding: 6px 14px; border-radius: 12px; border: 1px solid rgba(0,229,255,0.4); backdrop-filter: blur(10px);">
-          <input id="holo_prompt_input" type="text" placeholder="Instruct JARVIS to construct or modify (e.g. 'Build plasma cutter', 'Construct railgun', 'Add pressure gauge')..." style="flex: 1; background: rgba(0,0,0,0.5); border: 1px solid rgba(0,229,255,0.3); border-radius: 6px; padding: 6px 12px; color: #ffffff; font-family: monospace; font-size: 11px; outline: none;">
+          <input id="holo_prompt_input" type="text" placeholder="Instruct JARVIS (e.g. 'Load raspberry pi and camera', 'Connect them and simulate', 'Build railgun')..." style="flex: 1; background: rgba(0,0,0,0.5); border: 1px solid rgba(0,229,255,0.3); border-radius: 6px; padding: 6px 12px; color: #ffffff; font-family: monospace; font-size: 11px; outline: none;">
           <button id="holo_submit_btn" style="background: rgba(0,229,255,0.2); border: 1px solid #00e5ff; color: #00e5ff; padding: 6px 14px; border-radius: 6px; font-family: monospace; font-size: 11px; font-weight: 700; cursor: pointer;">⚡ CONSTRUCT / MODIFY</button>
         </div>
       </div>
@@ -634,7 +1047,7 @@ export class HolographicStudio {
       </div>
 
       <!-- LEFT PANEL: Real-World Science Telemetry & Formulas -->
-      <div style="position: absolute; top: 80px; left: 24px; width: 340px; background: rgba(5,25,30,0.75); border: 1px solid rgba(0,229,255,0.35); border-radius: 12px; padding: 18px; backdrop-filter: blur(12px);">
+      <div id="holo_telemetry_panel" style="position: absolute; top: 80px; left: 24px; width: 340px; background: rgba(5,25,30,0.75); border: 1px solid rgba(0,229,255,0.35); border-radius: 12px; padding: 18px; backdrop-filter: blur(12px); transition: all 0.3s;">
         <div style="font-size: 11px; letter-spacing: 0.16em; color: #00e5ff; margin-bottom: 6px;">PHYSICS SIMULATION TELEMETRY</div>
         <div id="holo_sim_formula" style="font-size: 12px; color: #ffb300; background: rgba(0,0,0,0.5); padding: 6px 10px; border-radius: 6px; margin-bottom: 14px; border: 1px solid rgba(255,179,0,0.3);">Q = -k∇T + εσ(T⁴ - T₀⁴)</div>
         
@@ -657,32 +1070,36 @@ export class HolographicStudio {
       </div>
 
       <!-- BOTTOM CONTROL BAR: Simulation Modes & Controls -->
-      <div style="position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 16px; pointer-events: auto; background: rgba(5,25,30,0.8); padding: 12px 24px; border-radius: 14px; border: 1px solid rgba(0,229,255,0.4); backdrop-filter: blur(14px);">
+      <div id="holo_bottom_bar" style="position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 16px; pointer-events: auto; background: rgba(5,25,30,0.8); padding: 12px 24px; border-radius: 14px; border: 1px solid rgba(0,229,255,0.4); backdrop-filter: blur(14px); transition: all 0.3s;">
         <div style="display: flex; gap: 6px;">
-          <button class="sim-btn active" data-sim="thermal">THERMAL DISSIPATION</button>
-          <button class="sim-btn" data-sim="stress">VON MISES STRESS</button>
+          <button class="sim-btn active" data-sim="thermal">THERMAL</button>
+          <button class="sim-btn" data-sim="stress">VON MISES</button>
           <button class="sim-btn" data-sim="em_field">EM CONFINEMENT</button>
-          <button class="sim-btn" data-sim="aerodynamics">AERODYNAMICS</button>
+          <button class="sim-btn" data-sim="aerodynamics">AERO</button>
         </div>
+
+        <div style="width: 1px; height: 32px; background: rgba(0,229,255,0.3);"></div>
+
+        <button id="holo_connect_btn" style="background: rgba(0,255,180,0.2); border: 1px solid #00ffb4; color: #00ffb4; padding: 7px 14px; border-radius: 8px; font-size: 11px; font-weight: 700; cursor: pointer; transition: all 0.2s;">🔗 CONNECT & SIMULATE</button>
 
         <div style="width: 1px; height: 32px; background: rgba(0,229,255,0.3);"></div>
 
         <div style="display: flex; align-items: center; gap: 8px;">
           <span style="font-size: 11px; color: #00e5ff;">STRESS:</span>
-          <input type="range" id="holo_stress_slider" min="0.5" max="2.0" step="0.05" value="1.0" style="width: 120px; cursor: pointer;">
-          <span id="holo_stress_val" style="font-size: 12px; font-weight: 700; width: 42px;">100%</span>
+          <input type="range" id="holo_stress_slider" min="0.5" max="2.0" step="0.05" value="1.0" style="width: 100px; cursor: pointer;">
+          <span id="holo_stress_val" style="font-size: 12px; font-weight: 700; width: 38px;">100%</span>
         </div>
 
         <div style="width: 1px; height: 32px; background: rgba(0,229,255,0.3);"></div>
 
-        <button id="holo_explode_btn" style="background: rgba(0,229,255,0.15); border: 1px solid #00e5ff; color: #00e5ff; padding: 8px 16px; border-radius: 8px; font-weight: 700; cursor: pointer;">EXPLODED VIEW: OFF</button>
+        <button id="holo_explode_btn" style="background: rgba(0,229,255,0.15); border: 1px solid #00e5ff; color: #00e5ff; padding: 7px 14px; border-radius: 8px; font-size: 11px; font-weight: 700; cursor: pointer;">EXPLODED: OFF</button>
 
         <div style="width: 1px; height: 32px; background: rgba(0,229,255,0.3);"></div>
 
         <div style="display: flex; gap: 6px;">
-          <button id="holo_dock_left" class="holo-dock-btn" title="Dock construct to Left of stage [key: [ ]">⇇ DOCK LEFT</button>
-          <button id="holo_center_btn" class="holo-dock-btn" title="Center construct on stage [key: C]">🎯 CENTER</button>
-          <button id="holo_dock_right" class="holo-dock-btn" title="Dock construct to Right of stage [key: ] ]">⇉ DOCK RIGHT</button>
+          <button id="holo_dock_left" class="holo-dock-btn" title="Dock construct to Left">⇇ LEFT</button>
+          <button id="holo_center_btn" class="holo-dock-btn" title="Center construct">🎯 CENTER</button>
+          <button id="holo_dock_right" class="holo-dock-btn" title="Dock construct to Right">⇉ RIGHT</button>
         </div>
       </div>
     `;
@@ -746,6 +1163,7 @@ export class HolographicStudio {
       HolographicAudio.playServo(this.isExploded ? 1 : -1);
     });
 
+    document.getElementById("holo_connect_btn")?.addEventListener("click", () => this.connectAndSimulate());
     document.getElementById("holo_dock_left")?.addEventListener("click", () => this.dock("left"));
     document.getElementById("holo_center_btn")?.addEventListener("click", () => this.dock("center"));
     document.getElementById("holo_dock_right")?.addEventListener("click", () => this.dock("right"));
@@ -843,6 +1261,16 @@ export class HolographicStudio {
           if (data.type === "RENDER_3D_BLUEPRINT" || data.type === "DYNAMIC_CONSTRUCT" || data.type === "MODIFY_CONSTRUCT") {
             this.show();
             this.loadConstruct(data.construct || (data.manifest ? data.manifest.id : "dynamic"), data.simulation || "fluid_dynamics", data.stress || 1.0, data.exploded || false, data.manifest);
+          } else if (data.type === "MULTI_CONSTRUCT") {
+            this.show();
+            this.loadMulti(data.items || [], data.connect || false, data.simulate || false);
+          } else if (data.type === "CONNECT_AND_SIMULATE") {
+            this.connectAndSimulate();
+          } else if (data.type === "UI_CONTROL") {
+            if (data.pos) this.setControlPosition(data.pos);
+            if (data.dock) this.dock(data.dock);
+            if (data.sim) this.setSimulationMode(data.sim);
+            if (data.exploded != null) this.setExploded(data.exploded);
           } else if (data.type === "ACTIVE_CONSTRUCT_STATE" && data.construct) {
             this.show();
             this.loadConstruct(data.construct, data.simulation || "thermal", data.stress || 1.0, data.exploded || false, data.manifest || null);
@@ -876,21 +1304,30 @@ export class HolographicStudio {
     if (this.container) this.container.style.display = "none";
   }
 
-  static loadConstruct(name = "arc_reactor", simMode = "thermal", stress = 1.0, exploded = false, manifest = null) {
+  static loadConstruct(name = "arc_reactor", simMode = "thermal", stress = 1.0, exploded = false, manifest = null, options = {}) {
     this.show();
     this.simulator.mode = simMode;
     this.simulator.stressLevel = stress;
     this.isExploded = exploded;
     HolographicAudio.playServo(1);
 
-    // Remove old construct
-    if (this.currentConstruct) {
-      this.scene.remove(this.currentConstruct.group);
+    if (!options.add) {
+      if (this.components && this.components.length > 0) {
+        this.components.forEach(c => {
+          if (c && c.group) this.scene.remove(c.group);
+        });
+      }
+      if (this.interconnects && this.interconnects.length > 0) {
+        this.interconnects.forEach(conn => {
+          if (conn && conn.group) this.scene.remove(conn.group);
+        });
+      }
+      this.components = [];
+      this.interconnects = [];
       this.currentConstruct = null;
+      this._clearCallouts();
     }
-    this._clearCallouts();
 
-    // Update active HUD buttons
     if (this.hudEl) {
       this.hudEl.querySelectorAll(".holo-btn").forEach(b => {
         b.classList.toggle("active", b.getAttribute("data-construct") === name);
@@ -904,67 +1341,172 @@ export class HolographicStudio {
       if (stressVal) stressVal.innerText = `${Math.round(stress * 100)}%`;
       const explodeBtn = document.getElementById("holo_explode_btn");
       if (explodeBtn) {
-        explodeBtn.innerText = `EXPLODED VIEW: ${this.isExploded ? "ON" : "OFF"}`;
+        explodeBtn.innerText = `EXPLODED: ${this.isExploded ? "ON" : "OFF"}`;
         explodeBtn.style.color = this.isExploded ? "#ffb300" : "#00e5ff";
       }
     }
 
-    // Build model: manifest, Arc Reactor, or dynamic construct
+    let construct = null;
+    const n = (name || "").toLowerCase();
+
     if (manifest) {
-      this.currentConstruct = BlueprintBuilder.buildFromManifest(manifest);
+      construct = BlueprintBuilder.buildFromManifest(manifest);
       this.activeManifest = manifest;
       this.simulator.activeManifest = manifest;
       const dynBtn = document.getElementById("holo_dynamic_btn");
       if (dynBtn) {
-        dynBtn.innerText = `🛠 DYNAMIC: ${manifest.name ? manifest.name.toUpperCase() : "CONSTRUCT"}`;
-        dynBtn.setAttribute("data-construct", "dynamic");
+        dynBtn.innerText = `🛠 ${manifest.name ? manifest.name.toUpperCase() : "DYNAMIC"}`;
         dynBtn.classList.add("active");
-        this.hudEl.querySelectorAll(".holo-btn").forEach(b => {
-          if (b !== dynBtn) b.classList.remove("active");
-        });
       }
-    } else if (name === "dynamic" && this.activeManifest) {
-      this.currentConstruct = BlueprintBuilder.buildFromManifest(this.activeManifest);
-      this.simulator.activeManifest = this.activeManifest;
-      const dynBtn = document.getElementById("holo_dynamic_btn");
-      if (dynBtn) {
-        dynBtn.innerText = `🛠 DYNAMIC: ${this.activeManifest.name ? this.activeManifest.name.toUpperCase() : "CONSTRUCT"}`;
-        dynBtn.classList.add("active");
-        this.hudEl.querySelectorAll(".holo-btn").forEach(b => {
-          if (b !== dynBtn) b.classList.remove("active");
-        });
-      }
-    } else if (name === "dynamic" && !this.activeManifest) {
-      const input = document.getElementById("holo_prompt_input");
-      if (input) {
-        input.focus();
-        input.placeholder = "Enter machine to construct (e.g. 'Build plasma cutter', 'Construct railgun')...";
-      }
-      this.currentConstruct = BlueprintBuilder.buildArcReactor();
+    } else if (n.includes("pi") || n.includes("raspberry")) {
+      construct = BlueprintBuilder.buildRaspberryPi();
       this.activeManifest = null;
-      this.simulator.activeManifest = null;
-      const arcBtn = this.hudEl ? this.hudEl.querySelector('[data-construct="arc_reactor"]') : null;
-      if (arcBtn) {
-        this.hudEl.querySelectorAll(".holo-btn").forEach(b => b.classList.remove("active"));
-        arcBtn.classList.add("active");
-      }
+    } else if (n.includes("camera") || n.includes("lens") || n.includes("optic")) {
+      construct = BlueprintBuilder.buildCameraModule();
+      this.activeManifest = null;
+    } else if (n.includes("battery") || n.includes("cell") || n.includes("power_pack")) {
+      construct = BlueprintBuilder.buildBatteryPack();
+      this.activeManifest = null;
+    } else if (n.includes("oled") || n.includes("display") || n.includes("screen")) {
+      construct = BlueprintBuilder.buildOLEDDisplay();
+      this.activeManifest = null;
+    } else if (n === "dynamic" && this.activeManifest) {
+      construct = BlueprintBuilder.buildFromManifest(this.activeManifest);
     } else {
-      // Default: Flagship Arc Reactor Core
-      this.currentConstruct = BlueprintBuilder.buildArcReactor();
+      construct = BlueprintBuilder.buildArcReactor();
       this.activeManifest = null;
-      this.simulator.activeManifest = null;
-      const arcBtn = this.hudEl ? this.hudEl.querySelector('[data-construct="arc_reactor"]') : null;
-      if (arcBtn) {
-        this.hudEl.querySelectorAll(".holo-btn").forEach(b => b.classList.remove("active"));
-        arcBtn.classList.add("active");
+    }
+
+    this.scene.add(construct.group);
+    this.components.push(construct);
+    this.currentConstruct = construct;
+
+    this._rearrangeComponents();
+    this._createCallouts();
+
+    if (options.connect) {
+      setTimeout(() => this.connectAndSimulate(), 250);
+    }
+  }
+
+  static _rearrangeComponents() {
+    const len = this.components.length;
+    if (len <= 1) {
+      if (this.components[0]) this.components[0].group.position.set(0, 0, 0);
+    } else if (len === 2) {
+      this.components[0].group.position.set(-2.0, 0, 0);
+      this.components[1].group.position.set(2.0, 0.4, 0);
+    } else if (len === 3) {
+      this.components[0].group.position.set(-2.2, 0.2, 0);
+      this.components[1].group.position.set(1.8, 0.6, 0);
+      this.components[2].group.position.set(0, -2.2, 0);
+    } else if (len >= 4) {
+      this.components.forEach((c, idx) => {
+        const angle = (idx / len) * Math.PI * 2;
+        c.group.position.set(Math.cos(angle) * 2.8, Math.sin(angle) * 2.0, 0);
+      });
+    }
+  }
+
+  static loadMulti(items = [], shouldConnect = false, shouldSimulate = false) {
+    this.show();
+    HolographicAudio.playBoot();
+    if (!items || items.length === 0) items = ["raspberry_pi", "camera_module"];
+
+    if (this.components) {
+      this.components.forEach(c => { if (c && c.group) this.scene.remove(c.group); });
+    }
+    if (this.interconnects) {
+      this.interconnects.forEach(conn => { if (conn && conn.group) this.scene.remove(conn.group); });
+    }
+    this.components = [];
+    this.interconnects = [];
+    this.currentConstruct = null;
+    this._clearCallouts();
+
+    items.forEach(it => {
+      if (typeof it === "string") {
+        this.loadConstruct(it, "fluid_dynamics", 1.0, false, null, { add: true });
+      } else if (it && typeof it === "object") {
+        this.loadConstruct(it.name || it.id || "dynamic", "fluid_dynamics", 1.0, false, it, { add: true });
+      }
+    });
+
+    if (shouldConnect || shouldSimulate) {
+      setTimeout(() => this.connectAndSimulate(), 350);
+    }
+  }
+
+  static connectAndSimulate() {
+    this.show();
+    HolographicAudio.playBoot();
+    HolographicAudio.playServo(1);
+
+    if (this.interconnects) {
+      this.interconnects.forEach(conn => {
+        if (conn && conn.group) this.scene.remove(conn.group);
+      });
+    }
+    this.interconnects = [];
+
+    if (this.components.length < 2) {
+      if (this.components.length === 1) {
+        const c0 = this.components[0].name;
+        const counterpart = c0.includes("pi") ? "camera_module" : (c0.includes("camera") ? "raspberry_pi" : "battery_pack");
+        this.loadConstruct(counterpart, "system_interconnect", 1.0, false, null, { add: true });
+      } else {
+        this.loadMulti(["raspberry_pi", "camera_module"], false, false);
       }
     }
 
-    this.scene.add(this.currentConstruct.group);
-    this.currentConstruct.group.position.set(0, 0, 0);
+    const pi = this.components.find(c => c.name.includes("pi"));
+    const cam = this.components.find(c => c.name.includes("camera"));
+    const bat = this.components.find(c => c.name.includes("battery"));
+    const oled = this.components.find(c => c.name.includes("oled") || c.name.includes("display"));
 
-    // Create callout tags for exploded view
-    this._createCallouts();
+    if (pi && cam) {
+      const piPos = pi.group.position.clone().add(new THREE.Vector3(0.65, 0.26, 0.15));
+      const camPos = cam.group.position.clone().add(new THREE.Vector3(-0.45, 0.2, 0));
+      const csiRibbon = InterconnectRouter.createCsiRibbon(piPos, camPos);
+      this.scene.add(csiRibbon.group);
+      this.interconnects.push(csiRibbon);
+    }
+
+    if (pi && bat) {
+      const batVcc = bat.group.position.clone().add(new THREE.Vector3(2.1, 0.1, 0.2));
+      const batGnd = bat.group.position.clone().add(new THREE.Vector3(2.1, 0.1, -0.2));
+      const piPower = pi.group.position.clone().add(new THREE.Vector3(-1.25, 0.15, 1.1));
+      const piGnd = pi.group.position.clone().add(new THREE.Vector3(0.4, 0.35, -0.97));
+
+      const vccWire = InterconnectRouter.createJumperWire(batVcc, piPower, 0xff1744, "+5V VCC Power Rail");
+      const gndWire = InterconnectRouter.createJumperWire(batGnd, piGnd, 0x212121, "GND Power Return");
+      this.scene.add(vccWire.group, gndWire.group);
+      this.interconnects.push(vccWire, gndWire);
+    }
+
+    if (pi && oled) {
+      const piSda = pi.group.position.clone().add(new THREE.Vector3(0.2, 0.35, -1.07));
+      const piScl = pi.group.position.clone().add(new THREE.Vector3(0.2, 0.35, -0.97));
+      const oledPort = oled.group.position.clone().add(new THREE.Vector3(0, 0.2, -0.55));
+
+      const sdaWire = InterconnectRouter.createJumperWire(piSda, oledPort, 0xffeb3b, "I2C SDA Serial Data");
+      const sclWire = InterconnectRouter.createJumperWire(piScl, oledPort, 0x4caf50, "I2C SCL Serial Clock");
+      this.scene.add(sdaWire.group, sclWire.group);
+      this.interconnects.push(sdaWire, sclWire);
+    }
+
+    if (this.interconnects.length === 0 && this.components.length >= 2) {
+      const c1Pos = this.components[0].group.position.clone();
+      const c2Pos = this.components[1].group.position.clone();
+      const conduit = InterconnectRouter.createCsiRibbon(c1Pos, c2Pos);
+      this.scene.add(conduit.group);
+      this.interconnects.push(conduit);
+    }
+
+    this.simulator.mode = "system_interconnect";
+    if (this.hudEl) {
+      this.hudEl.querySelectorAll(".sim-btn").forEach(b => b.classList.remove("active"));
+    }
   }
 
   static _createCallouts() {
@@ -1030,39 +1572,55 @@ export class HolographicStudio {
     const targetExp = this.isExploded ? 1.0 : 0.0;
     this.explodeAmount += (targetExp - this.explodeAmount) * 0.06;
 
-    if (this.currentConstruct && this.currentConstruct.parts) {
-      this.currentConstruct.parts.forEach(p => {
-        if (p.userData && p.userData.home && p.userData.explodeDir) {
-          p.position.copy(p.userData.home).addScaledVector(p.userData.explodeDir, this.explodeAmount);
+    const allConstructs = (this.components && this.components.length > 0) ? this.components : (this.currentConstruct ? [this.currentConstruct] : []);
+    allConstructs.forEach(c => {
+      if (c && c.parts) {
+        c.parts.forEach(p => {
+          if (p.userData && p.userData.home && p.userData.explodeDir) {
+            p.position.copy(p.userData.home).addScaledVector(p.userData.explodeDir, this.explodeAmount);
+          }
+          if (p.userData && p.userData.rotSpeed && p.rotation) {
+            p.rotation.z += p.userData.rotSpeed * dt;
+          }
+          if (p.material && p.userData && p.userData.intensity && p.userData.shiftColor) {
+            const col = this.simulator.getColor(0x00e5ff, p.userData.intensity);
+            if (p.material.color) p.material.color.copy(col);
+          }
+          if (p.userData && p.userData.isCore) {
+            const pulse = 1.0 + Math.sin(performance.now() * 0.005) * 0.04;
+            p.scale.set(pulse, pulse, 1.0);
+          }
+        });
+
+        // Ambient idle rotation
+        if (!this._isDragging && this._gestureState !== "INSPECT" && c.group) {
+          c.group.rotation.y += dt * 0.20;
         }
 
-        // Sub-component continuous rotations
-        if (p.userData && p.userData.rotSpeed) {
-          if (p.rotation) p.rotation.z += p.userData.rotSpeed * dt;
+        if (c.pSystem) {
+          c.pSystem.rotation.z += dt * 0.8;
         }
+      }
+    });
 
-        // Color shifting from Physics Simulator (only if explicitly marked for dynamic color shift)
-        if (p.material && p.userData && p.userData.intensity && p.userData.shiftColor) {
-          const col = this.simulator.getColor(0x00e5ff, p.userData.intensity);
-          if (p.material.color) p.material.color.copy(col);
-        }
-
-        // Core fusion breathing pulse
-        if (p.userData && p.userData.isCore) {
-          const pulse = 1.0 + Math.sin(performance.now() * 0.005) * 0.04;
-          p.scale.set(pulse, pulse, 1.0);
+    // 3b. Animate Physical Interconnect Signal & Electron Pulse Streams
+    if (this.interconnects && this.interconnects.length > 0) {
+      const nowSec = performance.now() * 0.001;
+      this.interconnects.forEach(conn => {
+        if (conn && conn.pulseSystem && conn.curve) {
+          const posAttr = conn.pulseSystem.geometry.attributes.position;
+          const arr = posAttr.array;
+          const count = conn.pulseCount;
+          for (let i = 0; i < count; i++) {
+            const tVal = ((nowSec * 0.85) + (i / count)) % 1.0;
+            const pt = conn.curve.getPointAt(tVal);
+            arr[i * 3] = pt.x;
+            arr[i * 3 + 1] = pt.y;
+            arr[i * 3 + 2] = pt.z;
+          }
+          posAttr.needsUpdate = true;
         }
       });
-
-      // Ambient idle rotation (pauses during active drag or inspection)
-      if (!this._isDragging && this._gestureState !== "INSPECT") {
-        this.currentConstruct.group.rotation.y += dt * 0.25;
-      }
-
-      // Particle rotations
-      if (this.currentConstruct.pSystem) {
-        this.currentConstruct.pSystem.rotation.z += dt * 0.8;
-      }
     }
 
     // 4. Update 3D Screen Space Callout Tags

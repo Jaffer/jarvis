@@ -237,7 +237,8 @@ class VoiceSentinel:
                 details=f"Audio replay presentation attack blocked: {replay_reason}"
             )
 
-        if confidence >= 0.78:
+        threshold = getattr(self, "confidence_threshold", 0.62)
+        if confidence >= threshold:
             return VoiceAuthResult(
                 status="ADMIN_VERIFIED",
                 confidence=round(confidence, 3),
@@ -249,5 +250,49 @@ class VoiceSentinel:
                 status="GUEST_DETECTED",
                 confidence=round(confidence, 3),
                 replay_score=round(replay_score, 3),
-                details="Acoustic voiceprint does not match Admin profile."
+                details=f"Acoustic voiceprint divergence (Score: {confidence * 100:.1f}% vs threshold {threshold * 100:.0f}%)."
             )
+
+    def adapt_voiceprint(self, audio_data: np.ndarray, sample_rate: int = 16000, learning_rate: float = 0.05) -> None:
+        """Continuously adapt the enrolled admin voiceprint using exponential moving average."""
+        if audio_data is None or len(audio_data) < sample_rate * 0.4:
+            return
+        try:
+            new_vp = self.extract_voiceprint(audio_data, sample_rate)
+            if self.admin_voiceprint is None:
+                self.admin_voiceprint = new_vp
+            else:
+                updated = (1.0 - learning_rate) * self.admin_voiceprint + learning_rate * new_vp
+                norm = np.linalg.norm(updated) + 1e-6
+                self.admin_voiceprint = updated / norm
+
+            # Persist back to profile
+            p = Path(self.profile_path)
+            if p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if "voice" not in data:
+                    data["voice"] = {}
+                data["voice"]["embedding"] = [round(float(x), 4) for x in self.admin_voiceprint]
+                data["voice"]["total_utterances_learned"] = data["voice"].get("total_utterances_learned", 0) + 1
+                p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as e:
+            log.debug("Voiceprint adaptation notice: %s", e)
+
+    def get_speaker_identification(self, audio_data: np.ndarray, sample_rate: int = 16000) -> dict:
+        """Returns structured speaker recognition metadata for HUD and neural prompt injection."""
+        eval_res = self.evaluate_voice(audio_data, sample_rate)
+        # Normalize confidence to clean 0-100%
+        raw_conf = max(0.0, min(1.0, eval_res.confidence))
+        # Scaled presentation confidence for UX
+        score_pct = round(min(99.0, max(50.0, raw_conf * 100.0 if raw_conf > 0.3 else 30.0)), 1)
+        is_admin = eval_res.status == "ADMIN_VERIFIED"
+        return {
+            "speaker": self.admin_name if is_admin else "Unknown Guest",
+            "is_admin": is_admin,
+            "status": eval_res.status,
+            "confidence_pct": score_pct,
+            "raw_confidence": eval_res.confidence,
+            "replay_score": eval_res.replay_score,
+            "details": eval_res.details
+        }
+
