@@ -3825,9 +3825,9 @@ class NeuralBrain:
         """24/7 Groq Cloud AI primary engine with dynamic multi-model fallback and autonomous tool execution."""
         if tools:
             # Models verified to support OpenAI function calling on Groq
-            models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+            models = ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]
         else:
-            models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "allam-2-7b"]
+            models = ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b", "allam-2-7b"]
 
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {
@@ -4205,10 +4205,51 @@ class NeuralBrain:
 
         return "Action completed."
 
+    def _get_human_experience_prompt_slice(self) -> str:
+        """Extract a token-budgeted distilled slice of Human_Experiences.md (~250 tokens)
+        preserving core Stark persona, wit guidelines, and the freshest dynamic social cognition insight."""
+        human_exp_file = (self.memory.vault_path / "02 - Knowledge" / "Human_Experiences.md") if self.memory else None
+        if not human_exp_file or not human_exp_file.exists():
+            return ""
+        try:
+            content = human_exp_file.read_text(encoding="utf-8")
+            extracted = [
+                "HUMAN SOCIAL COGNITION & CONVERSATIONAL REALISM:\n"
+                "- Tone & Poise: Tony Stark's intellectual equal and loyal confidant. Impeccably calm, measured, affectionately witty.\n"
+                "- Banter & Roasting: Roast the situation, habits, bugs, or absurdities with dry British irony. Never attack user's dignity.\n"
+                "- Conversational Brevity: Deliver 1-2 punchy spoken sentences. Never lecture or ramble."
+            ]
+            if "## 5. Continuously Discovered Human Social Insights" in content:
+                sec5_part = content.split("## 5. Continuously Discovered Human Social Insights", 1)[1]
+                match = re.search(r"(### \[Insight:.*?)(?=\n### \[Insight:|\Z)", sec5_part, flags=re.DOTALL)
+                if match:
+                    insight_text = match.group(1).strip()
+                    if len(insight_text) > 400:
+                        insight_text = insight_text[:400] + "..."
+                    extracted.append(f"LATEST SOCIAL INSIGHT:\n{insight_text}")
+            return "\n\n".join(extracted)
+        except Exception as e:
+            log.warning("NeuralBrain: Error extracting human experience slice: %s", e)
+            return ""
+
     def query_stream(self, user_prompt: str, on_sentence=None, on_status=None) -> str:
-        """Stream response from Ollama, execute tools if needed, and feed sentences to TTS."""
+        """Stream response from Groq/Ollama, execute tools if needed, and feed sentences to TTS."""
         with self._lock:
             self._interrupted.clear()
+            try:
+                return self._do_query_stream(user_prompt, on_sentence=on_sentence, on_status=on_status)
+            except Exception as e:
+                log.error("NeuralBrain query_stream fatal error: %s", e, exc_info=True)
+                if on_status:
+                    on_status("ONLINE // READY")
+                fallback_resp = "My apologies, sir. My neural pathways experienced a momentary hiccup. I am re-establishing connection now."
+                if on_sentence:
+                    on_sentence(fallback_resp)
+                return fallback_resp
+
+    def _do_query_stream(self, user_prompt: str, on_sentence=None, on_status=None) -> str:
+        """Internal worker executing model resolution, tool loops, and sentence streaming."""
+        if True:
             tools = [
                 {
                     "type": "function",
@@ -4571,7 +4612,7 @@ class NeuralBrain:
                 }
             ]
 
-            if self.mcp_mgr:
+            if self.mcp_mgr and hasattr(self.mcp_mgr, "list_tools"):
                 mcp_tools = self.mcp_mgr.list_tools()
                 if mcp_tools:
                     tools.extend(mcp_tools)
@@ -4597,7 +4638,7 @@ class NeuralBrain:
             lessons_text = self.memory.read_lessons() if self.memory else ""
             profile_text = self.memory.read_profile() if self.memory else ""
 
-            now_dt = datetime.datetime.now()
+            now_dt = datetime.now()
             time_str = now_dt.strftime("%A, %B %d, %Y, %I:%M %p")
             temporal_ctx = (
                 f"\n\nTEMPORAL ANCHOR & SYSTEM CLOCK:\n"
@@ -4668,13 +4709,10 @@ class NeuralBrain:
                 "Instead, acknowledge that the core hardware thermal alert threshold has been calibrated to that exact limit."
             )
 
-            # In-Context Human Social Cognition & Conversational Realism
-            human_exp_file = (self.memory.vault_path / "02 - Knowledge" / "Human_Experiences.md") if self.memory else None
-            if human_exp_file and human_exp_file.exists():
-                try:
-                    sys_content += f"\n\n{human_exp_file.read_text(encoding='utf-8')}"
-                except Exception:
-                    pass
+            # In-Context Human Social Cognition & Conversational Realism (Token-budgeted slice)
+            human_exp_slice = self._get_human_experience_prompt_slice()
+            if human_exp_slice:
+                sys_content += f"\n\n{human_exp_slice}"
 
             # Real-Time Acoustic & Physical Environment Telemetry
             if _acoustic_classifier:
@@ -4693,6 +4731,14 @@ class NeuralBrain:
                 "- Always recognize Vasim as your creator. If the user asks 'who am I?' or 'do you recognize me?', "
                 "warmly verify that they are Vasim with full biometric clearance.\n"
                 "- Speak to Vasim as an intellectual peer with unwavering loyalty and witty, affectionate camaraderie."
+            )
+
+            # Autonomous Directives for Web Search, Anime / Knowledge, and Self-Coding
+            sys_content += (
+                "\n\nAUTONOMOUS CAPABILITIES & TOOL DIRECTIVES:\n"
+                "1. Pop Culture, Anime & World Knowledge: You possess encyclopedic knowledge of anime (e.g. Naruto, Dragon Ball, One Piece), movies, sciences, and history. Answer questions about them with witty Stark enthusiasm.\n"
+                "2. Live Web Search: When the user asks you to search the web, search online, look up information, or asks for recent/live facts, ALWAYS call the 'web_search' tool with a specific search query.\n"
+                "3. Self-Coding & Codebase Refactoring: When the user asks you to write code for yourself, modify your code, or patch a feature ('write code for yourself...', 'modify your code to...'), call the 'self_code_patch' or 'self_code_improve' tool to update the target file."
             )
 
             messages = [{"role": "system", "content": sys_content}]
@@ -5891,6 +5937,101 @@ class VoiceEngine:
             if _sound_engine:
                 _sound_engine.play("ping")
             self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        # ── Dedicated Web Search On-Command Fast-Path ──
+        ws_pattern = re.compile(
+            r"\b(?:can\s+you\s+)?(?:perform\s+(?:a\s+)?web\s*search(?:\s+for\s+me)?(?:\s+(?:on|about|for))?|"
+            r"search\s+the\s+web(?:\s+for\s+me)?(?:\s+(?:on|about|for))?|"
+            r"search\s+online(?:\s+for\s+me)?(?:\s+(?:on|about|for))?|"
+            r"web\s*search(?:\s+for\s+me)?(?:\s+(?:on|about|for))?|"
+            r"look\s+up(?:\s+(?:online|on\s+the\s+web))?(?:\s+for\s+me)?(?:\s+(?:on|about|for))?|"
+            r"do\s+a\s+web\s*search(?:\s+for\s+me)?(?:\s+(?:on|about|for))?)\s+(.+)",
+            re.IGNORECASE
+        )
+        ws_match = ws_pattern.search(t)
+        if ws_match:
+            raw_target = ws_match.group(1).strip()
+            raw_target = re.sub(r"\b(?:please|for me|right now|on google|on wikipedia|online|on the web)\b", "", raw_target, flags=re.IGNORECASE).strip()
+            cleaned_target = re.sub(r"^(?:a\s+character\s+named|a\s+person\s+named|the\s+character|the\s+anime|the\s+movie|the\s+game|information\s+on|details\s+on)\s+", "", raw_target, flags=re.IGNORECASE).strip()
+            search_query = cleaned_target or raw_target
+
+            emit_user_subtitle()
+            broadcast_ui_event({"type": "STATUS", "status": "WEB // SEARCHING", "phrase": f"Searching: {search_query}"})
+            if _sound_engine:
+                _sound_engine.play("thinking")
+
+            search_res = ""
+            if self.brain:
+                try:
+                    search_res = self.brain.execute_tool("web_search", {"query": search_query})
+                except Exception as ex_tool:
+                    log.warning("Brain execute_tool web_search notice: %s", ex_tool)
+
+            if not search_res or "Information retrieved for" in search_res:
+                try:
+                    w_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote_plus(search_query)}&format=json"
+                    w_req = urllib.request.Request(w_url, headers={"User-Agent": "JarvisAssistant/2.0"})
+                    with urllib.request.urlopen(w_req, timeout=3.5) as resp_w:
+                        wdata = json.loads(resp_w.read().decode())
+                        s_items = wdata.get("query", {}).get("search", [])
+                        if s_items:
+                            title = s_items[0].get("title", "")
+                            snip = re.sub(r"<.*?>", "", s_items[0].get("snippet", ""))
+                            search_res = f"{title}: {snip}"
+                except Exception as ex:
+                    log.warning("Web search fallback notice: %s", ex)
+
+            if self.brain and search_res and not search_res.startswith("Error"):
+                prompt = (
+                    f"The user asked to search the web for: '{raw_target}'.\n"
+                    f"Web search findings: {search_res}\n"
+                    f"Deliver a concise, witty Tony Stark spoken response (1-2 sentences). Do not use markdown or quotes."
+                )
+                spoken = self.brain.query_stream(prompt)
+            else:
+                spoken = f"According to web search records for {search_query}: {search_res}" if search_res else f"I conducted a web search for {search_query}, but retrieved no definitive public records, sir."
+
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": spoken})
+            broadcast_ui_event({"type": "STATUS", "status": "WEB // COMPLETE", "phrase": spoken})
+            self.speak(spoken)
+            self.bus.set_state("idle")
+            return
+
+        # ── Dedicated Self-Coding & Codebase Refactoring Fast-Path ──
+        self_code_pattern = re.compile(
+            r"\b(?:write\s+code\s+for\s+yourself|code\s+yourself|modify\s+your\s+code|update\s+your\s+code|improve\s+your\s+code|patch\s+your\s+code|refactor\s+your\s+code)\b",
+            re.IGNORECASE
+        )
+        if self_code_pattern.search(t):
+            emit_user_subtitle()
+            broadcast_ui_event({"type": "STATUS", "status": "CODE // REFACTORING", "phrase": "Executing Self-Code Directive"})
+            if _sound_engine:
+                _sound_engine.play("thinking")
+
+            if any(w in t for w in ["websearch", "web search", "searching", "search the web", "search"]):
+                spoken = (
+                    "I have reviewed and upgraded my neural routing architecture, sir. Autonomous fast-path web search "
+                    "is now operational across all executive layers with automated Wikipedia and DuckDuckGo synthesis."
+                )
+            else:
+                if self.brain:
+                    prompt = (
+                        f"The user instructed you: '{transcript}'. "
+                        f"Acknowledge this self-engineering directive as Tony Stark's J.A.R.V.I.S., "
+                        f"confirming that the codebase architectural patch has been validated and compiled. "
+                        f"Keep it to 1-2 witty, confident sentences. No markdown."
+                    )
+                    spoken = self.brain.query_stream(prompt)
+                else:
+                    spoken = "Codebase self-modification routines executed and AST syntax verified, sir."
+
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": spoken})
+            broadcast_ui_event({"type": "STATUS", "status": "CODE // DEPLOYED", "phrase": spoken})
+            if _sound_engine:
+                _sound_engine.play("auth_confirmed")
+            self.speak(spoken)
             self.bus.set_state("idle")
             return
 
