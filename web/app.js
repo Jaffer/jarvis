@@ -783,18 +783,180 @@ function handleVoiceCommand(rawTranscript) {
 let ws = null;
 let wsReconnectTimer = null;
 
+let currentPlayingAudio = null;
+let pulseAnimFrame = null;
+
+if ('speechSynthesis' in window) {
+  window.speechSynthesis.onvoiceschanged = () => {
+    window.speechSynthesis.getVoices();
+  };
+}
+
+function stopActiveSpeech() {
+  if (currentPlayingAudio) {
+    try {
+      currentPlayingAudio.pause();
+      currentPlayingAudio.currentTime = 0;
+    } catch (e) {}
+    currentPlayingAudio = null;
+  }
+  if ('speechSynthesis' in window) {
+    try { window.speechSynthesis.cancel(); } catch (e) {}
+  }
+  if (pulseAnimFrame) {
+    cancelAnimationFrame(pulseAnimFrame);
+    pulseAnimFrame = null;
+  }
+  if (typeof scene !== "undefined" && scene) {
+    scene.setSpeaking(false);
+    scene.setAudioLevel(0);
+  }
+  setVoiceState("idle");
+}
+
+function startOrbPulseAnimation(getAudioLevelFn) {
+  if (pulseAnimFrame) cancelAnimationFrame(pulseAnimFrame);
+  function loop() {
+    const level = getAudioLevelFn ? getAudioLevelFn() : (0.28 + 0.22 * Math.sin(performance.now() * 0.009) * Math.cos(performance.now() * 0.013));
+    if (typeof scene !== "undefined" && scene) {
+      scene.setSpeaking(true);
+      scene.setAudioLevel(level);
+    }
+    setVoiceState("speaking");
+    pulseAnimFrame = requestAnimationFrame(loop);
+  }
+  pulseAnimFrame = requestAnimationFrame(loop);
+}
+
+function playAudioWithOrbPulsing(audioBase64, fallbackText) {
+  stopActiveSpeech();
+  try {
+    const audio = new Audio("data:audio/mp3;base64," + audioBase64);
+    currentPlayingAudio = audio;
+
+    let analyser = null;
+    let dataArray = null;
+    try {
+      const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+      if (AudioCtxClass) {
+        const actx = new AudioCtxClass();
+        const src = actx.createMediaElementSource(audio);
+        analyser = actx.createAnalyser();
+        analyser.fftSize = 64;
+        dataArray = new Uint8Array(analyser.frequencyBinCount);
+        src.connect(analyser);
+        analyser.connect(actx.destination);
+      }
+    } catch (e) {
+      console.debug("Web Audio Analyser setup notice:", e);
+    }
+
+    audio.onplay = () => {
+      startOrbPulseAnimation(() => {
+        if (analyser && dataArray) {
+          analyser.getByteTimeDomainData(dataArray);
+          let sum = 0;
+          const samples = [];
+          for (let i = 0; i < dataArray.length; i++) {
+            const v = (dataArray[i] - 128) / 128.0;
+            samples.push(v);
+            sum += Math.abs(v);
+          }
+          const rms = sum / dataArray.length;
+          if (typeof scene !== "undefined" && scene) scene.feedWaveform(samples);
+          return Math.min(1.0, rms * 3.2);
+        }
+        return 0.32 + 0.25 * Math.sin(performance.now() * 0.009);
+      });
+      if (soundscape) soundscape.duck();
+      const spBadge = document.getElementById("speech-status");
+      if (spBadge) {
+        spBadge.textContent = "VOICE: TRANSMITTING";
+        spBadge.className = "badge badge-active";
+      }
+    };
+
+    audio.onended = () => {
+      stopActiveSpeech();
+      if (soundscape) soundscape.unduck();
+      const spBadge = document.getElementById("speech-status");
+      if (spBadge) {
+        spBadge.textContent = "VOICE: READY";
+        spBadge.className = "badge badge-standby";
+      }
+    };
+
+    audio.onerror = (err) => {
+      console.warn("ElevenLabs audio play error; falling back to deep British male browser TTS:", err);
+      stopActiveSpeech();
+      if (fallbackText) speakTextBrowser(fallbackText);
+    };
+
+    const playPromise = audio.play();
+    if (playPromise !== undefined) {
+      playPromise.catch(err => {
+        console.warn("Audio autoplay blocked by browser policy:", err);
+        stopActiveSpeech();
+        if (fallbackText) speakTextBrowser(fallbackText);
+      });
+    }
+  } catch (err) {
+    console.warn("Could not initialize audio element:", err);
+    if (fallbackText) speakTextBrowser(fallbackText);
+  }
+}
+
 function speakTextBrowser(text) {
   if (!text || !('speechSynthesis' in window)) return;
+  stopActiveSpeech();
   try {
-    window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     const voices = window.speechSynthesis.getVoices() || [];
-    const jarvisVoice = voices.find(v => (v.lang.includes("en-GB") || v.lang.includes("en_GB")) && (v.name.toLowerCase().includes("male") || v.name.toLowerCase().includes("george") || v.name.toLowerCase().includes("daniel") || v.name.toLowerCase().includes("uk")))
-                     || voices.find(v => v.lang.includes("en-GB") || v.lang.includes("en_GB"))
-                     || voices.find(v => v.lang.includes("en"));
-    if (jarvisVoice) utterance.voice = jarvisVoice;
-    utterance.rate = 1.05;
-    utterance.pitch = 0.95;
+    
+    // Strictly filter for male voices — exclude any female/woman voice
+    const isMale = (v) => {
+      const n = (v.name || "").toLowerCase();
+      return (n.includes("male") || n.includes("george") || n.includes("daniel") || n.includes("oliver") || n.includes("rishi") || n.includes("guy") || n.includes("james") || n.includes("brian") || n.includes("arthur") || n.includes("david"))
+             && !n.includes("female") && !n.includes("woman") && !n.includes("girl") && !n.includes("samantha") && !n.includes("victoria");
+    };
+
+    let selectedVoice = voices.find(v => (v.lang.includes("en-GB") || v.lang.includes("en_GB")) && isMale(v))
+                     || voices.find(v => (v.lang.includes("en-US") || v.lang.includes("en_US")) && isMale(v))
+                     || voices.find(v => v.lang.startsWith("en") && isMale(v))
+                     || voices.find(v => (v.lang.includes("en-GB") || v.lang.includes("en_GB")) && !v.name.toLowerCase().includes("female"));
+
+    if (selectedVoice) {
+      utterance.voice = selectedVoice;
+    }
+
+    // Set pitch to 0.78 for deep, refined British masculine Tony Stark presence
+    utterance.pitch = 0.78;
+    utterance.rate = 1.02;
+
+    utterance.onstart = () => {
+      startOrbPulseAnimation();
+      if (soundscape) soundscape.duck();
+      const spBadge = document.getElementById("speech-status");
+      if (spBadge) {
+        spBadge.textContent = "VOICE: TRANSMITTING";
+        spBadge.className = "badge badge-active";
+      }
+    };
+
+    utterance.onend = () => {
+      stopActiveSpeech();
+      if (soundscape) soundscape.unduck();
+      const spBadge = document.getElementById("speech-status");
+      if (spBadge) {
+        spBadge.textContent = "VOICE: READY";
+        spBadge.className = "badge badge-standby";
+      }
+    };
+
+    utterance.onerror = () => {
+      stopActiveSpeech();
+    };
+
     window.speechSynthesis.speak(utterance);
   } catch (e) {
     console.debug("Browser speech error:", e);
@@ -821,6 +983,10 @@ function sendWsMessage(msg) {
           data.events.forEach(handleServerEvent);
         } else if (data.response) {
           handleServerEvent({ type: "SUBTITLE", role: "jarvis", text: data.response });
+        }
+        if (data.audio_base64) {
+          playAudioWithOrbPulsing(data.audio_base64, data.response);
+        } else if (data.response && !currentPlayingAudio) {
           speakTextBrowser(data.response);
         }
       })
@@ -1038,7 +1204,7 @@ function handleServerEvent(data) {
     case "SUBTITLE":
       if (data.role === "jarvis" && data.text) {
         lastJarvisSpokenText = (data.text || "").toLowerCase().replace(/[^\w\s]/g, " ").trim();
-        if ((window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") || (!ws || ws.readyState !== WebSocket.OPEN)) {
+        if (!currentPlayingAudio && (ws && ws.readyState === WebSocket.OPEN) && (window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1")) {
           speakTextBrowser(data.text);
         }
       }

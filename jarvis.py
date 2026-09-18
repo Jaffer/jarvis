@@ -42,6 +42,7 @@ from __future__ import annotations
 from typing import Any, Optional, Dict, List, Tuple, Callable
 import asyncio
 import atexit
+import base64
 import functools
 import hashlib
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -7098,9 +7099,31 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
                     log.error("API fallback brain error: %s", b_err)
                     resp_text = "Online and at your service, sir."
 
+            audio_base64 = None
+            if resp_text:
+                try:
+                    api_key = (os.environ.get("ELEVENLABS_API_KEY") or "sk_65d10500af500320ec5209365ca9312648066edb4bae4935").strip()
+                    vid = (os.environ.get("ELEVENLABS_VOICE_ID") or "Hl96BMcxGf0y6Bg5qTgt").strip()
+                    if api_key:
+                        from elevenlabs.client import ElevenLabs
+                        client = ElevenLabs(api_key=api_key)
+                        chunks = client.text_to_speech.convert(
+                            voice_id=vid,
+                            text=resp_text,
+                            model_id="eleven_multilingual_v2",
+                            output_format="mp3_22050_32"
+                        )
+                        raw_audio = b"".join(chunks)
+                        if raw_audio:
+                            audio_base64 = base64.b64encode(raw_audio).decode("utf-8")
+                except Exception as e_tts:
+                    log.warning("HTTP API ElevenLabs synthesis notice: %s", e_tts)
+
             response_payload = json.dumps({
                 "status": "ok",
                 "response": resp_text or "Understood, sir.",
+                "audio_base64": audio_base64,
+                "audio_format": "mp3" if audio_base64 else None,
                 "events": events
             }).encode("utf-8")
 
