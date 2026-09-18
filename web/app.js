@@ -69,6 +69,17 @@ if (barehandsPopoutBtn) {
   });
 }
 
+// Mobile QR Modal references
+const btnMobileQr = document.getElementById("btn-mobile-qr");
+const qrModal = document.getElementById("qr-modal");
+const qrBackdrop = document.getElementById("qr-backdrop");
+if (btnMobileQr && qrModal) {
+  btnMobileQr.addEventListener("click", () => qrModal.classList.remove("hidden"));
+}
+if (qrBackdrop && qrModal) {
+  qrBackdrop.addEventListener("click", () => qrModal.classList.add("hidden"));
+}
+
 // Subordinate Fleet Dock references
 const fleetDock = document.getElementById("fleet-dock");
 const fleetDockHeader = document.getElementById("fleet-dock-header");

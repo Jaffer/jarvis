@@ -1830,7 +1830,29 @@
       <button id="btn-voice" class="hud-btn btn-active">HANDS-FREE [V]: ON</button>
       <button id="btn-reset" class="hud-btn">RESET [R]</button>
       <button id="btn-fullscreen" class="hud-btn">FULLSCREEN [F]</button>
+      <button id="btn-mobile-qr" class="hud-btn" style="border-color:#38bdf8; color:#38bdf8;">MOBILE [QR]</button>
     </div>
+
+  <!-- Mobile Sync QR Code Modal -->
+  <div id="qr-modal" class="cmd-modal hidden">
+    <div class="cmd-modal-backdrop" id="qr-backdrop"></div>
+    <div class="cmd-modal-box" style="text-align: center; max-width: 380px;">
+      <div class="cmd-modal-header">
+        <div class="cmd-modal-title">
+          <span class="cmd-pulse-dot" style="background: #38bdf8; box-shadow: 0 0 8px #38bdf8;"></span>
+          <span>MOBILE LINK // NEURAL SYNC</span>
+        </div>
+        <div class="cmd-modal-keys"><span class="key">ESC</span> CLOSE</div>
+      </div>
+      <div style="padding: 16px 0; display: flex; flex-direction: column; align-items: center; gap: 14px;">
+        <img id="qr-image" src="https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=https%3A%2F%2Fjarvis-8ny0.onrender.com" alt="JARVIS Mobile Link QR Code" style="border: 2px solid #00e5ff; border-radius: 8px; box-shadow: 0 0 20px rgba(0,229,255,0.4); width: 220px; height: 220px;" />
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #a1a1aa; line-height: 1.5;">
+          Scan with your phone camera to launch J.A.R.V.I.S. on any device.<br>
+          <span style="color: #00e5ff; font-weight: bold; word-break: break-all;">https://jarvis-8ny0.onrender.com</span>
+        </div>
+      </div>
+    </div>
+  </div>
 
     <!-- Webcam Hand Tracking PIP Window -->
     <div id="pip-container" class="pip-wrapper">
