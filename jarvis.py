@@ -654,6 +654,11 @@ class HumanCognitionResearcher:
             if insight:
                 # 4. Safe non-destructive update of Human_Experiences.md
                 saved = self._persist_insight_to_markdown(insight)
+                if self.memory and saved:
+                    try:
+                        self.memory._push_git_memory(f"Human Cognition: {topic_title[:24]}")
+                    except Exception as e:
+                        log.debug("Memory git push for human experience notice: %s", e)
 
                 elapsed = round(time.monotonic() - start_time, 2)
                 self.latest_insight = insight
