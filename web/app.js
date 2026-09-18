@@ -783,16 +783,62 @@ function handleVoiceCommand(rawTranscript) {
 let ws = null;
 let wsReconnectTimer = null;
 
+function speakTextBrowser(text) {
+  if (!text || !('speechSynthesis' in window)) return;
+  try {
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    const voices = window.speechSynthesis.getVoices() || [];
+    const jarvisVoice = voices.find(v => (v.lang.includes("en-GB") || v.lang.includes("en_GB")) && (v.name.toLowerCase().includes("male") || v.name.toLowerCase().includes("george") || v.name.toLowerCase().includes("daniel") || v.name.toLowerCase().includes("uk")))
+                     || voices.find(v => v.lang.includes("en-GB") || v.lang.includes("en_GB"))
+                     || voices.find(v => v.lang.includes("en"));
+    if (jarvisVoice) utterance.voice = jarvisVoice;
+    utterance.rate = 1.05;
+    utterance.pitch = 0.95;
+    window.speechSynthesis.speak(utterance);
+  } catch (e) {
+    console.debug("Browser speech error:", e);
+  }
+}
+
 function sendWsMessage(msg) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
+  } else {
+    // Resilient Cloud HTTP fallback (e.g. Render deployments)
+    const textCmd = msg.text || msg.transcript || "";
+    if (textCmd && (msg.type === "VOICE_COMMAND" || msg.type === "TEXT_COMMAND")) {
+      const termStatus = document.getElementById("terminal-status");
+      if (termStatus) termStatus.textContent = "NEURAL // REASONING";
+      fetch("/api/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(msg)
+      })
+      .then(r => r.json())
+      .then(data => {
+        if (data.events && Array.isArray(data.events)) {
+          data.events.forEach(handleServerEvent);
+        } else if (data.response) {
+          handleServerEvent({ type: "SUBTITLE", role: "jarvis", text: data.response });
+          speakTextBrowser(data.response);
+        }
+      })
+      .catch(err => {
+        console.warn("API Command fallback notice:", err);
+        const termStatus = document.getElementById("terminal-status");
+        if (termStatus) termStatus.textContent = "STANDBY";
+      });
+    }
   }
 }
 
 function connectWebSocket() {
+  const isHttps = window.location.protocol === "https:";
+  const wsProto = isHttps ? "wss:" : "ws:";
   const host = window.location.hostname || "localhost";
-  const port = 8765;
-  const wsUrl = `ws://${host}:${port}`;
+  const isLocal = host === "localhost" || host === "127.0.0.1";
+  const wsUrl = isLocal ? `ws://${host}:8765` : `${wsProto}//${window.location.host}/ws`;
 
   try {
     ws = new WebSocket(wsUrl);
@@ -816,7 +862,7 @@ function connectWebSocket() {
       wsStatusEl.textContent = "STANDALONE";
       wsStatusEl.className = "badge badge-standby";
       clearTimeout(wsReconnectTimer);
-      wsReconnectTimer = setTimeout(connectWebSocket, 3000);
+      wsReconnectTimer = setTimeout(connectWebSocket, 5000);
     };
 
     ws.onerror = () => {
@@ -826,7 +872,7 @@ function connectWebSocket() {
     wsStatusEl.textContent = "STANDALONE";
     wsStatusEl.className = "badge badge-standby";
     clearTimeout(wsReconnectTimer);
-    wsReconnectTimer = setTimeout(connectWebSocket, 4000);
+    wsReconnectTimer = setTimeout(connectWebSocket, 5000);
   }
 }
 
@@ -992,6 +1038,9 @@ function handleServerEvent(data) {
     case "SUBTITLE":
       if (data.role === "jarvis" && data.text) {
         lastJarvisSpokenText = (data.text || "").toLowerCase().replace(/[^\w\s]/g, " ").trim();
+        if ((window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") || (!ws || ws.readyState !== WebSocket.OPEN)) {
+          speakTextBrowser(data.text);
+        }
       }
       addTerminalLine(data.role || "jarvis", data.text || "");
       if (terminalStatusEl) {

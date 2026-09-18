@@ -7020,10 +7020,17 @@ def _detect_and_route_bluetooth_audio() -> int | None:
 
 _ws_clients: set = set()
 _ws_loop: asyncio.AbstractEventLoop | None = None
+_ui_listeners: set = set()
 
 
 def broadcast_ui_event(event_dict: dict) -> None:
     """Broadcast real-time visualizer and status events to 3D Orb UI clients."""
+    for listener in list(_ui_listeners):
+        try:
+            listener(event_dict)
+        except Exception:
+            pass
+
     if not _ws_clients or _ws_loop is None:
         return
     msg = json.dumps(event_dict)
@@ -7040,12 +7047,73 @@ def broadcast_ui_event(event_dict: dict) -> None:
 
 
 class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
-    """HTTP handler that forcefully disables caching so HUD updates immediately apply."""
+    """HTTP handler that forcefully disables caching and provides /api/command REST endpoint."""
     def end_headers(self):
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
         super().end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_POST(self):
+        if self.path in ("/api/command", "/command"):
+            content_len = int(self.headers.get("Content-Length", 0))
+            post_data = self.rfile.read(content_len) if content_len > 0 else b"{}"
+            try:
+                data = json.loads(post_data.decode("utf-8"))
+            except Exception:
+                data = {}
+
+            cmd_text = (data.get("text") or data.get("transcript") or data.get("command") or "").strip()
+            resp_text = ""
+            events = []
+
+            def temp_listener(evt):
+                events.append(evt)
+
+            _ui_listeners.add(temp_listener)
+            try:
+                if cmd_text and _voice_engine:
+                    _voice_engine._route_voice_command(cmd_text, origin="http")
+            except Exception as e:
+                log.error("API command processing error: %s", e)
+            finally:
+                _ui_listeners.discard(temp_listener)
+
+            for ev in events:
+                if ev.get("type") == "SUBTITLE" and ev.get("role") == "jarvis":
+                    resp_text = ev.get("text", "")
+
+            if not resp_text and cmd_text and _neural_brain:
+                try:
+                    resp_text = _neural_brain.query_stream(cmd_text)
+                    events.append({"type": "SUBTITLE", "role": "jarvis", "text": resp_text})
+                except Exception as b_err:
+                    log.error("API fallback brain error: %s", b_err)
+                    resp_text = "Online and at your service, sir."
+
+            response_payload = json.dumps({
+                "status": "ok",
+                "response": resp_text or "Understood, sir.",
+                "events": events
+            }).encode("utf-8")
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+            self.wfile.write(response_payload)
+            return
+
+        self.send_response(404)
+        self.end_headers()
 
     def log_message(self, format, *args):
         pass
