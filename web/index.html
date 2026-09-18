@@ -1450,6 +1450,344 @@
       border-color: #00e5ff;
       color: #00e5ff;
     }
+
+    /* ══════════════════════════════════════════════════════════════════════
+       MOBILE RESPONSIVE DOCK & HUD OVERLAYS
+       ══════════════════════════════════════════════════════════════════════ */
+    .mobile-command-bar {
+      display: none; /* hidden on desktop */
+    }
+    .mobile-tools-sheet {
+      display: none; /* hidden on desktop */
+    }
+
+    @media (max-width: 768px) {
+      /* Hide desktop keyboard shortcut legend & oversized button bar */
+      .shortcuts-legend {
+        display: none !important;
+      }
+      .action-controls {
+        display: none !important;
+      }
+      .pip-wrapper {
+        display: none !important;
+      }
+      .hud-footer {
+        display: none !important;
+      }
+
+      /* Compact, sleek mobile header */
+      .hud-header {
+        top: 10px;
+        left: 14px;
+        right: 14px;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+      }
+      .brand-title {
+        font-size: 15px;
+        letter-spacing: 2px;
+      }
+      .brand-sub {
+        display: none;
+      }
+      .status-panel {
+        padding: 5px 10px;
+        gap: 8px;
+        overflow-x: auto;
+        max-width: 100%;
+        white-space: nowrap;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+      }
+      .status-panel::-webkit-scrollbar {
+        display: none;
+      }
+      /* Hide dense desktop metrics on mobile header */
+      .audio-meter-container,
+      #acoustic-status-item,
+      #vitals-cpu,
+      #vitals-ram,
+      #status-hands {
+        display: none !important;
+      }
+
+      /* Subordinate fleet dock responsive drawer */
+      .fleet-dock {
+        top: auto;
+        bottom: 110px;
+        right: 14px;
+        width: min(320px, calc(100vw - 28px));
+        max-height: 50vh;
+        transform: translateY(120%);
+        transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        z-index: 90;
+      }
+      .fleet-dock.mobile-open {
+        transform: translateY(0);
+      }
+
+      /* Responsive cybernetic dialogue terminal */
+      .cyber-terminal {
+        left: 12px;
+        right: 12px;
+        width: calc(100% - 24px);
+        bottom: 116px;
+        max-height: 125px;
+        font-size: 11px;
+        z-index: 60;
+      }
+      .terminal-feed {
+        max-height: 90px;
+        padding: 6px 10px;
+        font-size: 11px;
+      }
+
+      /* Mobile Touch-to-Type Command Bar */
+      .mobile-command-bar {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 100;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 6px 12px max(10px, env(safe-area-inset-bottom)) 12px;
+        background: rgba(8, 12, 20, 0.92);
+        backdrop-filter: blur(18px);
+        -webkit-backdrop-filter: blur(18px);
+        border-top: 1px solid rgba(0, 229, 255, 0.35);
+        box-shadow: 0 -4px 25px rgba(0, 0, 0, 0.75);
+        transition: transform 0.15s ease-out;
+      }
+
+      /* Suggestion Chips Horizontal Scroll */
+      .mobile-chips-wrapper {
+        width: 100%;
+        overflow-x: auto;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+        -webkit-overflow-scrolling: touch;
+      }
+      .mobile-chips-wrapper::-webkit-scrollbar {
+        display: none;
+      }
+      .mobile-chips-scroll {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        width: max-content;
+        padding: 2px 0;
+      }
+      .mobile-chip {
+        background: rgba(0, 229, 255, 0.08);
+        border: 1px solid rgba(0, 229, 255, 0.35);
+        color: #e0f7fa;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        padding: 4px 10px;
+        border-radius: 20px;
+        white-space: nowrap;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        touch-action: manipulation;
+      }
+      .mobile-chip:active {
+        background: rgba(0, 229, 255, 0.25);
+        transform: scale(0.95);
+        border-color: #00e5ff;
+      }
+
+      /* Input form row */
+      .mobile-cmd-form {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
+      }
+      .mobile-btn-icon {
+        width: 40px;
+        height: 40px;
+        border-radius: 8px;
+        background: rgba(255, 170, 48, 0.12);
+        border: 1px solid rgba(255, 170, 48, 0.4);
+        color: #ffaa30;
+        font-size: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        flex-shrink: 0;
+        touch-action: manipulation;
+      }
+      .mobile-btn-icon:active {
+        background: rgba(255, 170, 48, 0.3);
+        transform: scale(0.93);
+      }
+      .mobile-input-field-box {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(0, 0, 0, 0.6);
+        border: 1px solid rgba(0, 229, 255, 0.35);
+        border-radius: 8px;
+        padding: 0 10px;
+        height: 40px;
+        box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.6);
+        transition: border-color 0.2s, box-shadow 0.2s;
+      }
+      .mobile-input-field-box:focus-within {
+        border-color: #00e5ff;
+        box-shadow: 0 0 12px rgba(0, 229, 255, 0.4), inset 0 1px 4px rgba(0, 0, 0, 0.6);
+      }
+      .mobile-prompt-tag {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: #00e5ff;
+        font-weight: 700;
+        flex-shrink: 0;
+        opacity: 0.8;
+      }
+      .mobile-cmd-input {
+        flex: 1;
+        background: transparent;
+        border: none;
+        outline: none;
+        color: #ffffff;
+        font-family: var(--font-mono);
+        font-size: 16px !important; /* CRITICAL: 16px prevents iOS/Android viewport zoom */
+        caret-color: #00e5ff;
+        letter-spacing: 0.5px;
+      }
+      .mobile-cmd-input::placeholder {
+        color: rgba(255, 255, 255, 0.35);
+        font-size: 13px;
+        font-style: italic;
+      }
+      .mobile-send-btn {
+        width: 42px;
+        height: 40px;
+        border-radius: 8px;
+        background: linear-gradient(135deg, #00e5ff, #0088cc);
+        border: 1px solid #00e5ff;
+        color: #040810;
+        font-size: 17px;
+        font-weight: 900;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        flex-shrink: 0;
+        box-shadow: 0 0 14px rgba(0, 229, 255, 0.4);
+        touch-action: manipulation;
+      }
+      .mobile-send-btn:active {
+        transform: scale(0.92);
+        filter: brightness(1.2);
+      }
+
+      /* Mobile Controls Sheet */
+      .mobile-tools-sheet {
+        position: fixed;
+        inset: 0;
+        z-index: 300;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        transition: opacity 0.25s ease, visibility 0.25s ease;
+      }
+      .mobile-tools-sheet.hidden {
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+      }
+      .mobile-sheet-backdrop {
+        position: absolute;
+        inset: 0;
+        background: rgba(3, 6, 12, 0.7);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+      }
+      .mobile-sheet-card {
+        position: relative;
+        z-index: 1;
+        background: rgba(10, 16, 26, 0.95);
+        border-top: 2px solid #00e5ff;
+        border-radius: 16px 16px 0 0;
+        padding: 16px 16px max(24px, env(safe-area-inset-bottom)) 16px;
+        box-shadow: 0 -8px 36px rgba(0, 0, 0, 0.8), 0 0 20px rgba(0, 229, 255, 0.2);
+        animation: sheetSlideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      }
+      @keyframes sheetSlideUp {
+        from { transform: translateY(100%); }
+        to { transform: translateY(0); }
+      }
+      .mobile-sheet-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 14px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      .mobile-sheet-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 2px;
+        color: #00e5ff;
+      }
+      .mobile-sheet-close-btn {
+        background: transparent;
+        border: none;
+        color: rgba(255, 255, 255, 0.6);
+        font-size: 16px;
+        cursor: pointer;
+        padding: 4px 8px;
+      }
+      .mobile-sheet-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
+      }
+      .mob-ctrl-btn {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 8px;
+        padding: 12px 10px;
+        color: #fff;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 1px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        touch-action: manipulation;
+      }
+      .mob-ctrl-btn:active {
+        background: rgba(0, 229, 255, 0.15);
+        border-color: var(--accent, #00e5ff);
+        transform: scale(0.96);
+      }
+      .mob-ctrl-btn.btn-active {
+        background: rgba(0, 229, 255, 0.15);
+        border-color: #00e5ff;
+        color: #00e5ff;
+        box-shadow: 0 0 10px rgba(0, 229, 255, 0.3);
+      }
+      .mob-ctrl-icon {
+        font-size: 15px;
+      }
+    }
   </style>
 </head>
 <body>
@@ -1862,6 +2200,93 @@
     </div>
   </footer>
 
-  <script type="module" src="./app.js?v=3.0.0"></script>
+  <!-- ══════════════════════════════════════════════════════════════════════
+       MOBILE COMMAND DOCK & TOUCH CONTROLS (Displayed on screens <= 768px)
+       ══════════════════════════════════════════════════════════════════════ -->
+  <div id="mobile-command-bar" class="mobile-command-bar">
+    <!-- Quick-Action Suggestion Chips -->
+    <div class="mobile-chips-wrapper">
+      <div class="mobile-chips-scroll">
+        <button type="button" class="mobile-chip" data-cmd="Will it rain today?">🌧️ Rain?</button>
+        <button type="button" class="mobile-chip" data-cmd="How far is Bangalore?">🚗 Distance</button>
+        <button type="button" class="mobile-chip" data-cmd="Open barehands board">🖐️ Barehands</button>
+        <button type="button" class="mobile-chip" data-cmd="System status report">⚡ Status</button>
+        <button type="button" class="mobile-chip" data-cmd="Arc reactor holographic blueprint">📐 Arc Reactor</button>
+        <button type="button" class="mobile-chip" data-cmd="Who are you?">🤖 Identity</button>
+      </div>
+    </div>
+
+    <!-- Holographic Touch-to-Type Input Row -->
+    <form id="mobile-cmd-form" class="mobile-cmd-form" action="javascript:void(0);">
+      <button type="button" id="mobile-tools-btn" class="mobile-btn-icon" aria-label="System Controls" title="System Controls">⚙️</button>
+      <div class="mobile-input-field-box">
+        <span class="mobile-prompt-tag">// STARK_OS &gt;</span>
+        <input
+          type="text"
+          id="mobile-cmd-input"
+          class="mobile-cmd-input"
+          placeholder="Type command for JARVIS..."
+          enterkeyhint="send"
+          autocomplete="off"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
+        />
+      </div>
+      <button type="submit" id="mobile-cmd-send" class="mobile-send-btn" aria-label="Transmit Command" title="Transmit Command">
+        <span>➔</span>
+      </button>
+    </form>
+  </div>
+
+  <!-- Mobile Tactical Controls Sheet Modal -->
+  <div id="mobile-tools-sheet" class="mobile-tools-sheet hidden">
+    <div class="mobile-sheet-backdrop" id="mobile-sheet-backdrop"></div>
+    <div class="mobile-sheet-card">
+      <div class="mobile-sheet-header">
+        <div class="mobile-sheet-title">
+          <span class="cmd-pulse-dot" style="background:#00e5ff; box-shadow:0 0 8px #00e5ff;"></span>
+          <span>STARK_OS // MOBILE HUD CONTROLS</span>
+        </div>
+        <button type="button" id="mobile-sheet-close" class="mobile-sheet-close-btn">✕</button>
+      </div>
+      <div class="mobile-sheet-grid">
+        <button type="button" id="mob-btn-persona" class="mob-ctrl-btn" style="--accent:#00e5ff;">
+          <span class="mob-ctrl-icon">🔬</span>
+          <span class="mob-ctrl-label">PERSONA [P]</span>
+        </button>
+        <button type="button" id="mob-btn-fleet" class="mob-ctrl-btn" style="--accent:#38bdf8;">
+          <span class="mob-ctrl-icon">🛸</span>
+          <span class="mob-ctrl-label">FLEET BAY [B]</span>
+        </button>
+        <button type="button" id="mob-btn-barehands" class="mob-ctrl-btn" style="--accent:#ffaa30;">
+          <span class="mob-ctrl-icon">🖐️</span>
+          <span class="mob-ctrl-label">BAREHANDS</span>
+        </button>
+        <button type="button" id="mob-btn-theme" class="mob-ctrl-btn" style="--accent:#ffaa30;">
+          <span class="mob-ctrl-icon">🎨</span>
+          <span class="mob-ctrl-label">THEME [T]</span>
+        </button>
+        <button type="button" id="mob-btn-voice" class="mob-ctrl-btn btn-active" style="--accent:#00e5ff;">
+          <span class="mob-ctrl-icon">🎙️</span>
+          <span class="mob-ctrl-label">VOICE [V]</span>
+        </button>
+        <button type="button" id="mob-btn-soundscape" class="mob-ctrl-btn btn-active" style="--accent:#00e5ff;">
+          <span class="mob-ctrl-icon">🔊</span>
+          <span class="mob-ctrl-label">AUDIO [S]</span>
+        </button>
+        <button type="button" id="mob-btn-gestures" class="mob-ctrl-btn" style="--accent:#ffaa30;">
+          <span class="mob-ctrl-icon">📷</span>
+          <span class="mob-ctrl-label">GESTURES [G]</span>
+        </button>
+        <button type="button" id="mob-btn-reset" class="mob-ctrl-btn" style="--accent:#ff4444;">
+          <span class="mob-ctrl-icon">🔄</span>
+          <span class="mob-ctrl-label">RESET HUD [R]</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./app.js?v=3.1.0"></script>
 </body>
 </html>

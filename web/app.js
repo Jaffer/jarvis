@@ -1774,6 +1774,15 @@ function closeCmdModal() {
   if (cmdInput) cmdInput.blur();
 }
 
+function executeTextCommand(text) {
+  if (!text) return;
+  addTerminalLine("user", text);
+  showToast(`⌨ "${text}"`, 3000);
+  soundscape.play("thinking");
+  scene.triggerBurst();
+  sendWsMessage({ type: "TEXT_COMMAND", text });
+}
+
 function submitCmd() {
   if (!cmdInput) return;
   const text = cmdInput.value.trim();
@@ -1783,11 +1792,7 @@ function submitCmd() {
   }
   closeCmdModal();
   cmdInput.value = "";
-  addTerminalLine("user", text);
-  showToast(`⌨ "${text}"`, 3000);
-  soundscape.play("thinking");
-  scene.triggerBurst();
-  sendWsMessage({ type: "TEXT_COMMAND", text });
+  executeTextCommand(text);
 }
 
 cmdTriggerBtn?.addEventListener("click", openCmdModal);
@@ -1802,6 +1807,93 @@ cmdInput?.addEventListener("keydown", (e) => {
     e.preventDefault();
     closeCmdModal();
   }
+});
+
+// ——— MOBILE TOUCH COMMAND BAR & CONTROLS SHEET ———
+const mobileCmdForm = document.getElementById("mobile-cmd-form");
+const mobileCmdInput = document.getElementById("mobile-cmd-input");
+const mobileToolsBtn = document.getElementById("mobile-tools-btn");
+const mobileToolsSheet = document.getElementById("mobile-tools-sheet");
+const mobileSheetBackdrop = document.getElementById("mobile-sheet-backdrop");
+const mobileSheetClose = document.getElementById("mobile-sheet-close");
+
+mobileCmdForm?.addEventListener("submit", (e) => {
+  e.preventDefault();
+  if (!mobileCmdInput) return;
+  const text = mobileCmdInput.value.trim();
+  if (text) {
+    executeTextCommand(text);
+    mobileCmdInput.value = "";
+    mobileCmdInput.blur();
+  }
+});
+
+// Quick tactical chips
+document.querySelectorAll(".mobile-chip").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    const cmd = chip.dataset.cmd;
+    if (cmd) {
+      executeTextCommand(cmd);
+    }
+  });
+});
+
+// Virtual Keyboard resize handler (dynamically anchors command bar above soft keyboard)
+if (window.visualViewport) {
+  const mobileBar = document.getElementById("mobile-command-bar");
+  window.visualViewport.addEventListener("resize", () => {
+    if (!mobileBar) return;
+    const offsetFromBottom = window.innerHeight - (window.visualViewport.height + window.visualViewport.offsetTop);
+    mobileBar.style.transform = `translateY(-${Math.max(0, offsetFromBottom)}px)`;
+  });
+}
+
+// Mobile Controls Sheet
+function openMobileSheet() {
+  if (!mobileToolsSheet) return;
+  mobileToolsSheet.classList.remove("hidden");
+}
+function closeMobileSheet() {
+  if (!mobileToolsSheet) return;
+  mobileToolsSheet.classList.add("hidden");
+}
+mobileToolsBtn?.addEventListener("click", openMobileSheet);
+mobileSheetBackdrop?.addEventListener("click", closeMobileSheet);
+mobileSheetClose?.addEventListener("click", closeMobileSheet);
+
+// Mobile Sheet Quick Action Buttons
+document.getElementById("mob-btn-persona")?.addEventListener("click", () => {
+  closeMobileSheet();
+  openPersonaModal();
+});
+document.getElementById("mob-btn-fleet")?.addEventListener("click", () => {
+  closeMobileSheet();
+  const fleet = document.getElementById("fleet-dock");
+  fleet?.classList.toggle("mobile-open");
+});
+document.getElementById("mob-btn-barehands")?.addEventListener("click", () => {
+  closeMobileSheet();
+  openBarehandsStage();
+});
+document.getElementById("mob-btn-theme")?.addEventListener("click", () => {
+  closeMobileSheet();
+  document.getElementById("btn-theme")?.click();
+});
+document.getElementById("mob-btn-voice")?.addEventListener("click", () => {
+  closeMobileSheet();
+  document.getElementById("btn-voice")?.click();
+});
+document.getElementById("mob-btn-soundscape")?.addEventListener("click", () => {
+  closeMobileSheet();
+  document.getElementById("btn-soundscape")?.click();
+});
+document.getElementById("mob-btn-gestures")?.addEventListener("click", () => {
+  closeMobileSheet();
+  document.getElementById("btn-toggle-gesture")?.click();
+});
+document.getElementById("mob-btn-reset")?.addEventListener("click", () => {
+  closeMobileSheet();
+  document.getElementById("btn-reset")?.click();
 });
 
 // ——— BIOMETRIC ADMIN FACE ENROLLMENT MODAL ———

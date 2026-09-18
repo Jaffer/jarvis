@@ -48,6 +48,7 @@ import hashlib
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -2931,6 +2932,110 @@ def fetch_rain_answer(city: str | None = None, time_context: str = "tonight") ->
         return f"No significant rain is indicated on the radar for {target_city.capitalize()} {time_context}, sir."
 
 
+
+# ── LOCATION DISTANCE & NAVIGATION TELEMETRY ENGINE ─────────────────────────
+_distance_cache: dict[tuple[str, str], tuple[float, str]] = {}
+
+def fetch_location_distance(origin: str, destination: str, default_origin: str = "Hyderabad") -> str:
+    """Calculates driving distance and travel time between two locations using Google Maps API or OSM/OSRM."""
+    orig = (origin or "").strip().lower()
+    dest = (destination or "").strip().lower()
+    for phrase in ["please", "jarvis", "right now", "?", ".", "can you", "tell me", "how far", "distance", "driving"]:
+        orig = orig.replace(phrase, "").strip()
+        dest = dest.replace(phrase, "").strip()
+    if not orig or orig in ["here", "current location", "my location", "our location", "this place"]:
+        orig = default_origin
+    if not dest:
+        return "Please specify the target destination, sir."
+
+    cache_key = (orig, dest)
+    now = time.monotonic()
+    if cache_key in _distance_cache:
+        t_saved, cached_text = _distance_cache[cache_key]
+        if now - t_saved < 3600:
+            return cached_text
+
+    # 1. Google Maps Distance Matrix API (if GOOGLE_MAPS_API_KEY is configured in .env)
+    gmaps_key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+    if gmaps_key:
+        try:
+            g_url = f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={urllib.parse.quote_plus(orig)}&destinations={urllib.parse.quote_plus(dest)}&mode=driving&key={gmaps_key}"
+            req = urllib.request.Request(g_url, headers={"User-Agent": "JARVIS-AI-Core/3.0 (Stark-Industries)"})
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                g_data = json.loads(resp.read().decode())
+                if g_data.get("status") == "OK":
+                    elem = g_data["rows"][0]["elements"][0]
+                    if elem.get("status") == "OK":
+                        dist_txt = elem["distance"]["text"]
+                        dur_elem = elem.get("duration_in_traffic") or elem.get("duration")
+                        dur_txt = dur_elem["text"]
+                        ans = f"According to Google Maps telemetry, driving distance from {orig.title()} to {dest.title()} is {dist_txt}, with an estimated transit duration of {dur_txt}, sir."
+                        _distance_cache[cache_key] = (now, ans)
+                        return ans
+        except Exception as e:
+            log.warning("Google Maps Distance Matrix API notice: %s; falling back to OSM/OSRM", e)
+
+    # 2. Autonomous Zero-Key Engine: OpenStreetMap (Nominatim) + OSRM High-Speed Routing Engine
+    try:
+        def geocode_osm(place: str):
+            url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote_plus(place)}&format=json&limit=1"
+            req = urllib.request.Request(url, headers={"User-Agent": "JARVIS-Tactical-AI/3.0 (Stark-Core-OS)"})
+            with urllib.request.urlopen(req, timeout=4) as r:
+                data = json.loads(r.read().decode())
+                if data:
+                    raw_name = data[0].get("display_name", place)
+                    short_name = raw_name.split(",")[0].strip()
+                    return float(data[0]["lat"]), float(data[0]["lon"]), short_name
+            return None
+
+        p1 = geocode_osm(orig)
+        p2 = geocode_osm(dest)
+        if not p1:
+            return f"I was unable to locate coordinates for {orig.title()}, sir."
+        if not p2:
+            return f"I was unable to locate coordinates for {dest.title()}, sir."
+
+        lat1, lon1, name1 = p1
+        lat2, lon2, name2 = p2
+
+        # Try driving route via OSRM
+        try:
+            osrm_url = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
+            req_osrm = urllib.request.Request(osrm_url, headers={"User-Agent": "JARVIS-Tactical-AI/3.0 (Stark-Core-OS)"})
+            with urllib.request.urlopen(req_osrm, timeout=4) as resp_osrm:
+                osrm_data = json.loads(resp_osrm.read().decode())
+                routes = osrm_data.get("routes", [])
+                if routes:
+                    dist_km = routes[0]["distance"] / 1000.0
+                    dist_mi = dist_km * 0.621371
+                    dur_mins = routes[0]["duration"] / 60.0
+                    hrs = int(dur_mins // 60)
+                    mins = int(dur_mins % 60)
+                    time_str = f"{hrs} hours and {mins} minutes" if hrs > 0 else f"{mins} minutes"
+                    ans = f"The driving distance between {name1} and {name2} is approximately {dist_km:.0f} kilometers ({dist_mi:.0f} miles). Estimated travel time is {time_str}, sir."
+                    _distance_cache[cache_key] = (now, ans)
+                    return ans
+        except Exception:
+            pass
+
+        # Fallback to geodesic Haversine formula (for cross-oceanic / non-road routes)
+        r_lat1, r_lon1 = math.radians(lat1), math.radians(lon1)
+        r_lat2, r_lon2 = math.radians(lat2), math.radians(lon2)
+        dlat = r_lat2 - r_lat1
+        dlon = r_lon2 - r_lon1
+        a = math.sin(dlat / 2)**2 + math.cos(r_lat1) * math.cos(r_lat2) * math.sin(dlon / 2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        km = 6371.0 * c
+        mi = km * 0.621371
+        ans = f"The direct geodesic distance between {name1} and {name2} is approximately {km:,.0f} kilometers, or {mi:,.0f} miles across the globe, sir."
+        _distance_cache[cache_key] = (now, ans)
+        return ans
+
+    except Exception as ex:
+        log.warning("Distance engine error: %s", ex)
+        return f"Navigation telemetry unavailable: unable to calculate distance between {orig.title()} and {dest.title()} at this time, sir."
+
+
 # ── VOICE INPUT DEDUPLICATION CACHE ──────────────────────────────────────────
 _recent_voice_commands: dict[str, float] = {}
 
@@ -5792,6 +5897,70 @@ class VoiceEngine:
             self.speak(report)
             self.bus.set_state("idle")
             return
+
+        # ── Real-Time Distance & Navigation Telemetry (Google Maps + OSM/OSRM) ──
+        # Handles queries like "distance between Hyderabad and Bangalore", "how far is Mumbai",
+        # "driving distance to Delhi", "how long does it take to drive to Chennai", "distance from Paris to Rome"
+        is_distance_query = (
+            any(w in t for w in ["distance", "how far", "how long to drive", "driving time", "drive to", "drive from"])
+            and not any(w in t for w in ["camera", "hand", "finger", "gesture", "zoom", "orb", "mesh"])
+        )
+        if is_distance_query:
+            clean_q = t
+            clean_q = re.sub(r"^(?:can you\s+)?(?:please\s+)?(?:tell me\s+)?(?:what(?:\'s| is)\s+(?:the\s+)?)?", "", clean_q).strip()
+            orig_dest = None
+
+            # Pattern 1: distance between X and Y / distance from X to Y
+            m = re.search(r"(?:driving\s+)?distance\s+(?:between|from)\s+(.+?)\s+(?:and|to)\s+(.+)", clean_q)
+            if m:
+                orig_dest = (m.group(1).strip(), m.group(2).strip())
+
+            # Pattern 2: how far is Y from X
+            if not orig_dest:
+                m = re.search(r"how\s+far\s+is\s+(.+?)\s+from\s+(.+)", clean_q)
+                if m:
+                    orig_dest = (m.group(2).strip(), m.group(1).strip())
+
+            # Pattern 3: how long does it take to drive from X to Y
+            if not orig_dest:
+                m = re.search(r"how\s+long\s+(?:does\s+it\s+take\s+)?(?:to\s+drive\s+)?from\s+(.+?)\s+to\s+(.+)", clean_q)
+                if m:
+                    orig_dest = (m.group(1).strip(), m.group(2).strip())
+
+            # Pattern 4: how far is Y (defaults origin to user location)
+            if not orig_dest:
+                m = re.search(r"how\s+far\s+is\s+(.+)", clean_q)
+                if m:
+                    orig_dest = ("", m.group(1).strip())
+
+            # Pattern 5: (driving )?distance to Y / how long to drive to Y
+            if not orig_dest:
+                m = re.search(r"(?:(?:driving\s+)?distance|how\s+long\s+(?:to\s+drive\s+)?)\s+to\s+(.+)", clean_q)
+                if m:
+                    orig_dest = ("", m.group(1).strip())
+
+            if orig_dest:
+                raw_orig, raw_dest = orig_dest
+                # Read user profile location for default origin
+                user_loc = "Hyderabad"
+                if _memory_manager:
+                    try:
+                        p_txt = _memory_manager.read_profile()
+                        m_loc = re.search(r"location\*\*:\s*([^\n\r]+)", p_txt, re.IGNORECASE)
+                        if m_loc:
+                            user_loc = m_loc.group(1).strip()
+                    except Exception:
+                        pass
+
+                broadcast_ui_event({"type": "STATUS", "status": "NAV // ROUTING TELEMETRY", "phrase": "Calculating route coordinates..."})
+                emit_user_subtitle()
+                report = fetch_location_distance(raw_orig, raw_dest, default_origin=user_loc)
+                broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": report})
+                if _sound_engine:
+                    _sound_engine.play("whoosh")
+                self.speak(report)
+                self.bus.set_state("idle")
+                return
 
         # ── Webcam 3D Gestures Mode (handles 'gestures mode', 'on the gestures', 'justice mode', etc.) ──
         if any(q in t for q in ["gesture", "gestures", "hand track", "justice mode", "gesture mode", "gestures mode"]):
