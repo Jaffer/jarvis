@@ -13,3 +13,4 @@ Whenever the user provides corrections, feedback, or personal preferences, JARVI
 - [BEHAVIOR] When reporting progress on long-running tasks, ensure the percentage reflects actual real-time status and does not remain static; if stuck, explicitly diagnose the issue rather than silently freezing or manually forcing completion without user awareness.
 - [BEHAVIOR] Only report system temperature when it exceeds 100 degrees Celsius; otherwise ignore thermal sensor readings.
 - [BEHAVIOR] Ignore thermal sensor readings unless the system temperature exceeds 100 degrees; do not report lower temperatures.
+- [PREFERENCE] Ignore thermal sensor data unless the system temperature exceeds 100 degrees; do not report lower temperatures.
