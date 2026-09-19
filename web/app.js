@@ -8,6 +8,7 @@ const overlayEl = document.getElementById("webcam-overlay");
 const statusModeEl = document.getElementById("status-mode");
 const statusHandsEl = document.getElementById("status-hands");
 const wsStatusEl = document.getElementById("ws-status");
+const gpsBadgeEl = document.getElementById("gps-badge");
 const audioMeterBar = document.getElementById("audio-meter-bar");
 const gestureBtn = document.getElementById("btn-toggle-gesture");
 const themeBtn = document.getElementById("btn-theme");
@@ -69,12 +70,66 @@ if (barehandsPopoutBtn) {
   });
 }
 
-// Mobile QR Modal references
+// Session and Token security helpers
+function getJarvisToken() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("token") || localStorage.getItem("jarvis_token") || "";
+  if (token) localStorage.setItem("jarvis_token", token);
+  return token;
+}
+
+const clientSessionId = (() => {
+  let id = localStorage.getItem("jarvis_session_id");
+  if (!id) {
+    id = "sess_" + Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
+    localStorage.setItem("jarvis_session_id", id);
+  }
+  return id;
+})();
+
+// Dynamic Mobile QR Modal with live host & token sync
 const btnMobileQr = document.getElementById("btn-mobile-qr");
 const qrModal = document.getElementById("qr-modal");
 const qrBackdrop = document.getElementById("qr-backdrop");
+
+function updateDynamicQR() {
+  const qrImage = document.getElementById("qr-image");
+  const qrLinkText = document.getElementById("qr-link-text");
+  const token = getJarvisToken();
+  let baseUrl = window.location.origin;
+
+  const applyLink = (url) => {
+    const fullUrl = token ? `${url}/?token=${encodeURIComponent(token)}` : url;
+    if (qrImage) {
+      qrImage.src = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(fullUrl)}`;
+    }
+    if (qrLinkText) {
+      qrLinkText.textContent = fullUrl;
+    }
+  };
+
+  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
+    fetch("/api/system_info", { headers: { "X-Jarvis-Token": token } })
+      .then(r => r.json())
+      .then(info => {
+        if (info.lan_ip && info.lan_ip !== "127.0.0.1") {
+          const portStr = window.location.port ? `:${window.location.port}` : "";
+          applyLink(`${window.location.protocol}//${info.lan_ip}${portStr}`);
+        } else {
+          applyLink(baseUrl);
+        }
+      })
+      .catch(() => applyLink(baseUrl));
+  } else {
+    applyLink(baseUrl);
+  }
+}
+
 if (btnMobileQr && qrModal) {
-  btnMobileQr.addEventListener("click", () => qrModal.classList.remove("hidden"));
+  btnMobileQr.addEventListener("click", () => {
+    updateDynamicQR();
+    qrModal.classList.remove("hidden");
+  });
 }
 if (qrBackdrop && qrModal) {
   qrBackdrop.addEventListener("click", () => qrModal.classList.add("hidden"));
@@ -1058,8 +1113,11 @@ function sendWsMessage(msg) {
       if (termStatus) termStatus.textContent = "NEURAL // REASONING";
       fetch("/api/command", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(msg)
+        headers: {
+          "Content-Type": "application/json",
+          "X-Jarvis-Token": getJarvisToken()
+        },
+        body: JSON.stringify({ ...msg, session_id: clientSessionId })
       })
       .then(r => r.json())
       .then(data => {
@@ -1083,12 +1141,82 @@ function sendWsMessage(msg) {
   }
 }
 
+// ——— MOBILE GPS TELEMETRY ———
+let gpsWatchId = null;
+let lastGpsTransmissionAt = 0;
+
+function setGpsBadge(label, accuracy, connected = true) {
+  if (!gpsBadgeEl) return;
+  const suffix = Number.isFinite(Number(accuracy)) ? ` (±${Math.round(Number(accuracy))}m)` : "";
+  gpsBadgeEl.textContent = `📍 GPS: ${label || "LOCATING..."}${suffix}`;
+  gpsBadgeEl.className = `badge ${connected ? "badge-connected" : "badge-standby"}`;
+}
+
+function startGpsWatcher() {
+  if (!gpsBadgeEl || !navigator.geolocation || gpsWatchId !== null) {
+    if (!navigator.geolocation) setGpsBadge("UNAVAILABLE", null, false);
+    return;
+  }
+  gpsWatchId = navigator.geolocation.watchPosition(
+    (position) => {
+      const { latitude: lat, longitude: lon, accuracy } = position.coords;
+      setGpsBadge("LOCATING...", accuracy, true);
+      const now = Date.now();
+      // Browser callbacks can be rapid; the backend reverse-geocoder is deliberately debounced too.
+      if (now - lastGpsTransmissionAt >= 2500) {
+        lastGpsTransmissionAt = now;
+        sendWsMessage({ type: "GPS_TELEMETRY", lat, lon, accuracy, session_id: clientSessionId });
+      }
+    },
+    (error) => {
+      const denied = error && error.code === error.PERMISSION_DENIED;
+      setGpsBadge(denied ? "PERMISSION REQUIRED" : "SIGNAL LOST", null, false);
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
+  );
+}
+
+// ——— LIVE HUD COMPONENT INJECTOR ———
+function injectHudComponent(data) {
+  const featureId = String(data.feature_id || "dynamic-widget").replace(/[^a-z0-9_-]/gi, "-");
+  const target = document.querySelector(data.target_selector || "#dynamic-hud-stage");
+  if (!target) return;
+  let styleEl = document.getElementById("dynamic-hud-styles");
+  if (!styleEl) {
+    styleEl = document.createElement("style");
+    styleEl.id = "dynamic-hud-styles";
+    document.head.appendChild(styleEl);
+  }
+  const cssStart = `/* JARVIS:${featureId}:START */`;
+  const cssEnd = `/* JARVIS:${featureId}:END */`;
+  const cssPattern = new RegExp(`${cssStart.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}[\\s\\S]*?${cssEnd.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}`, "g");
+  styleEl.textContent = styleEl.textContent.replace(cssPattern, "") + `\n${cssStart}\n${String(data.css || "")}\n${cssEnd}`;
+  let mount = target.querySelector(`[data-jarvis-live-feature="${CSS.escape(featureId)}"]`);
+  if (!mount) {
+    mount = document.createElement("div");
+    mount.dataset.jarvisLiveFeature = featureId;
+    target.appendChild(mount);
+  }
+  mount.classList.remove("jarvis-hud-injected");
+  mount.innerHTML = String(data.html || "");
+  requestAnimationFrame(() => mount.classList.add("jarvis-hud-injected"));
+  if (data.js) {
+    try {
+      // Controllers receive only their own mount and the event payload.
+      new Function("mount", "payload", `"use strict";\n${data.js}`)(mount, data);
+    } catch (error) {
+      console.warn("Dynamic HUD controller failed:", error);
+    }
+  }
+  soundscape?.play("chime_positive");
+}
+
 function connectWebSocket() {
   const isHttps = window.location.protocol === "https:";
   const wsProto = isHttps ? "wss:" : "ws:";
-  const host = window.location.hostname || "localhost";
-  const isLocal = host === "localhost" || host === "127.0.0.1";
-  const wsUrl = isLocal ? `ws://${host}:8765` : `${wsProto}//${window.location.host}/ws`;
+  const token = getJarvisToken();
+  const queryParams = `?token=${encodeURIComponent(token)}&session_id=${encodeURIComponent(clientSessionId)}`;
+  const wsUrl = `${wsProto}//${window.location.host}/ws${queryParams}`;
 
   try {
     ws = new WebSocket(wsUrl);
@@ -1128,6 +1256,14 @@ function connectWebSocket() {
 
 function handleServerEvent(data) {
   switch (data.type) {
+    case "GPS_LOCATION":
+      setGpsBadge(data.area || "LOCATING...", data.accuracy, true);
+      break;
+
+    case "INJECT_HUD_COMPONENT":
+      injectHudComponent(data);
+      break;
+
     case "ACTIVATED":
       scene.triggerBurst();
       soundscape.play("wake");
@@ -2400,6 +2536,14 @@ window.addEventListener("keydown", (e) => {
 // Start
 loadSavedUIMutations();
 connectWebSocket();
+startGpsWatcher();
+// Persisted feature manifests are appended by the autonomous architect. Re-mount after
+// the full module has evaluated so those appended manifests are available.
+setTimeout(() => {
+  Object.entries(window.__jarvisPersistedHudFeatures || {}).forEach(([feature_id, component]) => {
+    injectHudComponent({ feature_id, ...component });
+  });
+}, 0);
 showToast("JARVIS Holographic HUD Initialized", 3000);
 
 // Auto-start hands-free voice listening
@@ -2417,3 +2561,6 @@ window.addEventListener("keydown", () => {
   if (!speechActive) startVoiceCommands();
 }, { once: true });
 
+// JARVIS_DYNAMIC_HUD_COMPONENTS
+window.__jarvisPersistedHudFeatures = window.__jarvisPersistedHudFeatures || {};
+window.__jarvisPersistedHudFeatures["progress-bar-widget"] = {html: "<div id=\"progress-bar-container\"><div id=\"progress-bar\"></div><div class=\"progress-text\" id=\"progress-text\">0%</div></div>", css: "#progress-bar-container{position:fixed;bottom:10px;left:10px;width:300px;height:20px;background:#222;border-radius:10px;overflow:hidden;box-shadow:0 0 5px rgba(0,0,0,0.5)}#progress-bar{height:100%;background:#4caf50;width:0%;transition:width 0.3s ease;}.progress-text{position:absolute;top:-25px;left:0;color:#fff;font-size:12px;}.", js: "function updateProgress(percent){document.getElementById('progress-bar').style.width=percent+'%';document.getElementById('progress-text').innerText=percent+'%';}", target_selector: "#dynamic-hud-stage"};

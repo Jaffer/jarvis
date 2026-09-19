@@ -58,6 +58,29 @@
       z-index: 1;
     }
 
+    #dynamic-hud-stage {
+      position: fixed;
+      left: 50%;
+      top: 54%;
+      transform: translate(-50%, -50%);
+      z-index: 20;
+      width: min(420px, 82vw);
+      pointer-events: none;
+    }
+
+    #dynamic-hud-stage > * {
+      pointer-events: auto;
+    }
+
+    .jarvis-hud-injected {
+      animation: jarvis-hud-materialize 520ms ease-out both;
+    }
+
+    @keyframes jarvis-hud-materialize {
+      from { opacity: 0; transform: translateY(12px) scale(.96); filter: brightness(2); }
+      to { opacity: 1; transform: translateY(0) scale(1); filter: brightness(1); }
+    }
+
     /* AR Vision Scanner HUD Sweep Overlay */
     @keyframes vision-sweep-line {
       0% { top: 0%; opacity: 0.9; }
@@ -1794,6 +1817,7 @@
 
   <!-- 3D Canvas container -->
   <div id="canvas-container"></div>
+  <section id="dynamic-hud-stage" aria-live="polite" aria-label="Dynamic holographic HUD widgets"></section>
   <div class="vignette-overlay"></div>
   <div class="overlay-scanlines"></div>
   <div class="overlay-grain"></div>
@@ -1843,6 +1867,11 @@
       <div class="status-item">
         <span class="status-label">Link:</span>
         <span id="ws-status" class="badge badge-standby">CONNECTING</span>
+      </div>
+
+      <div class="status-item" id="gps-status-item" title="Live Satellite GPS Telemetry">
+        <span class="status-label">GPS:</span>
+        <span id="gps-badge" class="badge badge-standby">📍 ACQUIRING...</span>
       </div>
 
       <div class="status-item">
@@ -2183,10 +2212,10 @@
         <div class="cmd-modal-keys"><span class="key">ESC</span> CLOSE</div>
       </div>
       <div style="padding: 16px 0; display: flex; flex-direction: column; align-items: center; gap: 14px;">
-        <img id="qr-image" src="https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=https%3A%2F%2Fjarvis-8ny0.onrender.com" alt="JARVIS Mobile Link QR Code" style="border: 2px solid #00e5ff; border-radius: 8px; box-shadow: 0 0 20px rgba(0,229,255,0.4); width: 220px; height: 220px;" />
+        <img id="qr-image" src="" alt="JARVIS Mobile Link QR Code" style="border: 2px solid #00e5ff; border-radius: 8px; box-shadow: 0 0 20px rgba(0,229,255,0.4); width: 220px; height: 220px; background: #071326;" />
         <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #a1a1aa; line-height: 1.5;">
           Scan with your phone camera to launch J.A.R.V.I.S. on any device.<br>
-          <span style="color: #00e5ff; font-weight: bold; word-break: break-all;">https://jarvis-8ny0.onrender.com</span>
+          <span id="qr-link-text" style="color: #00e5ff; font-weight: bold; word-break: break-all;">Generating link...</span>
         </div>
       </div>
     </div>
@@ -2291,3 +2320,6 @@
   <script type="module" src="./app.js?v=3.1.0"></script>
 </body>
 </html>
+
+<!-- JARVIS_DYNAMIC_HUD_COMPONENTS -->
+<template data-jarvis-feature="progress-bar-widget"><div id="progress-bar-container"><div id="progress-bar"></div><div class="progress-text" id="progress-text">0%</div></div></template>
