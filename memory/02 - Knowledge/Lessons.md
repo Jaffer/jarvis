@@ -20,3 +20,4 @@ Whenever the user provides corrections, feedback, or personal preferences, JARVI
 - [CODE_IMPROVEMENT] Refactored [index.html]: Persist HUD feature progress-bar-widget
 - [CODE_IMPROVEMENT] Refactored [app.js]: Persist HUD controller progress-bar-widget
 - [PREFERENCE] When reporting on long-running tasks, the user prefers frequent, granular progress updates (e.g., every 2%) over sparse milestone-based updates, even if technically difficult to achieve precisely.
+- [CORRECTION] When the user requests progress updates, ensure the visual progress bar is actually rendered and visible in the UI before claiming deployment; do not report success if the user cannot see the progress.
