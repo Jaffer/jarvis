@@ -24,3 +24,4 @@
 - **assistant_name**: Janice
 - **language_preference**: English
 - **preferred_language**: English
+- **active_project**: Barehands
