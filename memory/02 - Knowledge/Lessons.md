@@ -18,3 +18,4 @@ Whenever the user provides corrections, feedback, or personal preferences, JARVI
 - [BEHAVIOR] When the user issues a vague command like 'Deploy all the support' or 'Open the website page' without specific details, and then immediately follows up with a short confirmation like 'now', interpret this as an instruction to proceed with the most likely default action or to stop asking for clarification and execute the best guess immediately.
 - [PREFERENCE] User prefers a more serious tone and may not appreciate jokes.
 - [CODE_IMPROVEMENT] Refactored [index.html]: Persist HUD feature progress-bar-widget
+- [CODE_IMPROVEMENT] Refactored [app.js]: Persist HUD controller progress-bar-widget
