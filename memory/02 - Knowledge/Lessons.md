@@ -19,3 +19,4 @@ Whenever the user provides corrections, feedback, or personal preferences, JARVI
 - [PREFERENCE] User prefers a more serious tone and may not appreciate jokes.
 - [CODE_IMPROVEMENT] Refactored [index.html]: Persist HUD feature progress-bar-widget
 - [CODE_IMPROVEMENT] Refactored [app.js]: Persist HUD controller progress-bar-widget
+- [PREFERENCE] When reporting on long-running tasks, the user prefers frequent, granular progress updates (e.g., every 2%) over sparse milestone-based updates, even if technically difficult to achieve precisely.
