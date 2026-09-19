@@ -22,3 +22,4 @@
 - **admin_enrollment_status**: in_progress_75_percent
 - **role**: driver
 - **assistant_name**: Janice
+- **language_preference**: Telugu
