@@ -26,3 +26,4 @@
 - **preferred_language**: English
 - **active_project**: Barehands
 - **workspace_context**: User works with a 'Barehands' board and expects 'character models office' to be a visible/accessible component within it.
+- **work_context**: Barehands board
