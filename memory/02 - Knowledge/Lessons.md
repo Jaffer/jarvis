@@ -14,3 +14,4 @@ Whenever the user provides corrections, feedback, or personal preferences, JARVI
 - [BEHAVIOR] Only report system temperature when it exceeds 100 degrees Celsius; otherwise ignore thermal sensor readings.
 - [BEHAVIOR] Ignore thermal sensor readings unless the system temperature exceeds 100 degrees; do not report lower temperatures.
 - [PREFERENCE] Ignore thermal sensor data unless the system temperature exceeds 100 degrees; do not report lower temperatures.
+- [CORRECTION] The user has a calendar MCP server available. Do not claim lack of access to calendar tools; use the provided MCP server to query calendar events when requested.
