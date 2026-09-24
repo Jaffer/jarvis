@@ -7,3 +7,10 @@ scratch/
 state/
 barehands/state/
 .gdrive-server-credentials.json
+credentials*.json
+!credentials.json.example
+client_secret*.json
+memory/00 - Biometrics/admin_profile.json
+memory/00 - Biometrics/*.npy
+*.token
+.jarvis_token

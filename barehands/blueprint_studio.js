@@ -1029,14 +1029,11 @@ export class HolographicStudio {
       <div style="position: absolute; top: 18px; left: 24px; right: 190px; display: flex; align-items: center; gap: 12px; pointer-events: auto;">
         <div style="display: flex; gap: 8px; background: rgba(5,25,30,0.75); padding: 6px 14px; border-radius: 12px; border: 1px solid rgba(0,229,255,0.4); backdrop-filter: blur(10px);">
           <button class="holo-btn active" data-construct="arc_reactor">⚛ ARC REACTOR</button>
-          <button class="holo-btn" data-construct="raspberry_pi">🥧 RASPBERRY PI</button>
-          <button class="holo-btn" data-construct="camera_module">📷 CAMERA</button>
-          <button class="holo-btn" data-construct="battery_pack">🔋 BATTERY</button>
           <button class="holo-btn" data-construct="dynamic" id="holo_dynamic_btn">🛠 DYNAMIC</button>
         </div>
 
         <div style="flex: 1; display: flex; gap: 8px; background: rgba(5,25,30,0.75); padding: 6px 14px; border-radius: 12px; border: 1px solid rgba(0,229,255,0.4); backdrop-filter: blur(10px);">
-          <input id="holo_prompt_input" type="text" placeholder="Instruct JARVIS (e.g. 'Load raspberry pi and camera', 'Connect them and simulate', 'Build railgun')..." style="flex: 1; background: rgba(0,0,0,0.5); border: 1px solid rgba(0,229,255,0.3); border-radius: 6px; padding: 6px 12px; color: #ffffff; font-family: monospace; font-size: 11px; outline: none;">
+          <input id="holo_prompt_input" type="text" placeholder="Ask JARVIS for ANY construct (e.g. '3D model of a Toyota Supra', 'iPhone 15 Pro', 'jet engine')..." style="flex: 1; background: rgba(0,0,0,0.5); border: 1px solid rgba(0,229,255,0.3); border-radius: 6px; padding: 6px 12px; color: #ffffff; font-family: monospace; font-size: 11px; outline: none;">
           <button id="holo_submit_btn" style="background: rgba(0,229,255,0.2); border: 1px solid #00e5ff; color: #00e5ff; padding: 6px 14px; border-radius: 6px; font-family: monospace; font-size: 11px; font-weight: 700; cursor: pointer;">⚡ CONSTRUCT / MODIFY</button>
         </div>
       </div>
@@ -1411,7 +1408,9 @@ export class HolographicStudio {
   static loadMulti(items = [], shouldConnect = false, shouldSimulate = false) {
     this.show();
     HolographicAudio.playBoot();
-    if (!items || items.length === 0) items = ["raspberry_pi", "camera_module"];
+    // No preloaded hardware catalog: the user names what they want and JARVIS
+    // synthesizes it. Default to the Arc Reactor when nothing is specified.
+    if (!items || items.length === 0) items = ["arc_reactor"];
 
     if (this.components) {
       this.components.forEach(c => { if (c && c.group) this.scene.remove(c.group); });
@@ -1451,11 +1450,11 @@ export class HolographicStudio {
 
     if (this.components.length < 2) {
       if (this.components.length === 1) {
-        const c0 = this.components[0].name;
-        const counterpart = c0.includes("pi") ? "camera_module" : (c0.includes("camera") ? "raspberry_pi" : "battery_pack");
-        this.loadConstruct(counterpart, "system_interconnect", 1.0, false, null, { add: true });
+        // Interconnect the existing part with a power/distribution module
+        // synthesized generically (no preloaded hardware catalog).
+        this.loadConstruct("power_distribution_module", "system_interconnect", 1.0, false, null, { add: true });
       } else {
-        this.loadMulti(["raspberry_pi", "camera_module"], false, false);
+        this.loadMulti(["arc_reactor"], false, false);
       }
     }
 

@@ -4,12 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>J.A.R.V.I.S. // Live Mobile Voice Call</title>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: 'Outfit', sans-serif;
-      background: #030712;
+      background: radial-gradient(circle at center, #071326 0%, #030712 100%);
       color: #06b6d4;
       height: 100vh;
       display: flex;
@@ -21,24 +21,25 @@
     }
     .header {
       text-align: center;
-      margin-top: 1rem;
+      margin-top: 0.5rem;
     }
     .header h1 {
-      font-size: 1.5rem;
-      letter-spacing: 4px;
+      font-size: 1.6rem;
+      letter-spacing: 5px;
       text-transform: uppercase;
       color: #38bdf8;
-      text-shadow: 0 0 15px rgba(56, 189, 248, 0.4);
+      text-shadow: 0 0 18px rgba(56, 189, 248, 0.5);
     }
     .header p {
-      font-size: 0.85rem;
+      font-size: 0.8rem;
       color: #94a3b8;
+      letter-spacing: 2px;
       margin-top: 0.25rem;
     }
     .call-core {
       position: relative;
-      width: 220px;
-      height: 220px;
+      width: 240px;
+      height: 240px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -51,94 +52,428 @@
       border: 2px dashed rgba(6, 182, 212, 0.4);
       animation: rotateRing 15s linear infinite;
     }
+    .orb-ring-inner {
+      position: absolute;
+      width: 82%;
+      height: 82%;
+      border-radius: 50%;
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      animation: rotateRingRev 10s linear infinite;
+    }
     .orb-glow {
       position: absolute;
-      width: 160px;
-      height: 160px;
+      width: 150px;
+      height: 150px;
       border-radius: 50%;
-      background: radial-gradient(circle, rgba(6, 182, 212, 0.8) 0%, rgba(14, 165, 233, 0.3) 50%, transparent 70%);
-      box-shadow: 0 0 40px rgba(6, 182, 212, 0.6), inset 0 0 20px rgba(255, 255, 255, 0.8);
+      background: radial-gradient(circle, rgba(6, 182, 212, 0.85) 0%, rgba(14, 165, 233, 0.35) 55%, transparent 70%);
+      box-shadow: 0 0 45px rgba(6, 182, 212, 0.6), inset 0 0 25px rgba(255, 255, 255, 0.9);
       animation: pulseGlow 2.5s ease-in-out infinite alternate;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      -webkit-tap-highlight-color: transparent;
+    }
+    .orb-glow.listening {
+      background: radial-gradient(circle, rgba(16, 185, 129, 0.9) 0%, rgba(5, 150, 105, 0.4) 60%, transparent 75%);
+      box-shadow: 0 0 60px rgba(16, 185, 129, 0.8), inset 0 0 30px rgba(255, 255, 255, 0.9);
+      transform: scale(1.08);
+      animation: pulseGreen 1.2s infinite alternate;
+    }
+    .orb-glow.speaking {
+      background: radial-gradient(circle, rgba(234, 179, 8, 0.9) 0%, rgba(202, 138, 4, 0.4) 60%, transparent 75%);
+      box-shadow: 0 0 60px rgba(234, 179, 8, 0.8), inset 0 0 30px rgba(255, 255, 255, 0.9);
+      animation: pulseGold 0.8s infinite alternate;
+    }
+    .orb-glow.thinking {
+      background: radial-gradient(circle, rgba(168, 85, 247, 0.9) 0%, rgba(147, 51, 234, 0.4) 60%, transparent 75%);
+      box-shadow: 0 0 60px rgba(168, 85, 247, 0.8), inset 0 0 30px rgba(255, 255, 255, 0.9);
+      animation: pulsePurple 1s infinite alternate;
     }
     .orb-glow svg {
-      width: 48px;
-      height: 48px;
+      width: 46px;
+      height: 46px;
       fill: #ffffff;
-      filter: drop-shadow(0 0 8px rgba(255,255,255,0.8));
+      filter: drop-shadow(0 0 8px rgba(255,255,255,0.9));
+      transition: transform 0.2s ease;
+    }
+    .orb-glow:active svg {
+      transform: scale(0.92);
+    }
+    .audio-visualizer {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      height: 30px;
+      margin-top: 10px;
+    }
+    .audio-bar {
+      width: 3px;
+      height: 6px;
+      background: #00e5ff;
+      border-radius: 2px;
+      transition: height 0.1s ease;
+    }
+    .status-container {
+      text-align: center;
+      max-width: 90%;
+      min-height: 90px;
     }
     .status-text {
-      text-align: center;
-      font-size: 1.1rem;
+      font-size: 1.15rem;
       color: #f8fafc;
       font-weight: 600;
-      letter-spacing: 1px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      text-shadow: 0 0 10px rgba(255,255,255,0.3);
     }
     .sub-status {
-      font-size: 0.85rem;
+      font-size: 0.9rem;
       color: #38bdf8;
-      margin-top: 0.4rem;
+      margin-top: 0.5rem;
+      line-height: 1.4;
+      font-family: 'JetBrains Mono', monospace;
+      word-break: break-word;
+      max-height: 65px;
+      overflow-y: auto;
     }
     .controls {
       display: flex;
-      gap: 1.5rem;
-      margin-bottom: 2rem;
+      gap: 1.2rem;
+      margin-bottom: 1.5rem;
+      width: 100%;
+      justify-content: center;
+      align-items: center;
+    }
+    .btn-action {
+      background: rgba(15, 23, 42, 0.8);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      padding: 0.85rem 1.4rem;
+      border-radius: 50px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      letter-spacing: 1px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.2s ease;
+      box-shadow: 0 0 15px rgba(6, 182, 212, 0.2);
+    }
+    .btn-action:active {
+      transform: scale(0.96);
     }
     .btn-end {
       background: #ef4444;
       color: white;
       border: none;
-      padding: 0.9rem 2rem;
+      padding: 0.85rem 1.8rem;
       border-radius: 50px;
-      font-size: 1rem;
-      font-weight: 600;
+      font-size: 0.95rem;
+      font-weight: 700;
       letter-spacing: 1px;
-      box-shadow: 0 0 20px rgba(239, 68, 68, 0.5);
+      box-shadow: 0 0 25px rgba(239, 68, 68, 0.5);
       cursor: pointer;
+      transition: transform 0.2s ease;
+    }
+    .btn-end:active {
+      transform: scale(0.96);
     }
     @keyframes rotateRing { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-    @keyframes pulseGlow { 0% { transform: scale(0.95); opacity: 0.8; } 100% { transform: scale(1.05); opacity: 1; } }
+    @keyframes rotateRingRev { 0% { transform: rotate(360deg); } 100% { transform: rotate(0deg); } }
+    @keyframes pulseGlow { 0% { transform: scale(0.96); opacity: 0.85; } 100% { transform: scale(1.04); opacity: 1; } }
+    @keyframes pulseGreen { 0% { transform: scale(1.02); } 100% { transform: scale(1.12); } }
+    @keyframes pulseGold { 0% { transform: scale(1.0); } 100% { transform: scale(1.09); } }
+    @keyframes pulsePurple { 0% { transform: scale(0.98); } 100% { transform: scale(1.06); } }
   </style>
 </head>
 <body>
   <div class="header">
     <h1>J.A.R.V.I.S.</h1>
-    <p>SECURE DIRECT VOICE CALL</p>
+    <p>SECURE DIRECT VOICE CALL // MARK VII</p>
   </div>
 
   <div class="call-core">
     <div class="orb-ring"></div>
-    <div class="orb-glow" id="micBtn">
-      <svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/></svg>
+    <div class="orb-ring-inner"></div>
+    <div class="orb-glow" id="micBtn" title="Tap to Speak / Mute">
+      <svg id="micIcon" viewBox="0 0 24 24">
+        <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/>
+      </svg>
     </div>
   </div>
 
-  <div>
-    <div class="status-text" id="statusLabel">CALL CONNECTED</div>
-    <div class="sub-status" id="subStatus">Tap orb to speak or end call</div>
+  <div class="status-container">
+    <div class="status-text" id="statusLabel">INITIALIZING SECURE LINK...</div>
+    <div class="sub-status" id="subStatus">Connecting to Jarvis Core...</div>
+    <div class="audio-visualizer" id="visualizer">
+      <div class="audio-bar"></div><div class="audio-bar"></div><div class="audio-bar"></div>
+      <div class="audio-bar"></div><div class="audio-bar"></div><div class="audio-bar"></div>
+      <div class="audio-bar"></div><div class="audio-bar"></div><div class="audio-bar"></div>
+    </div>
   </div>
 
   <div class="controls">
-    <button class="btn-end" onclick="window.close(); history.back();">END CALL</button>
+    <button class="btn-action" id="muteBtn" onclick="toggleMute()">
+      <span id="muteIcon">🎙️</span> <span id="muteLabel">MIC ACTIVE</span>
+    </button>
+    <button class="btn-end" onclick="endCall()">END CALL</button>
   </div>
 
   <script>
-    const wsUrl = `ws://${window.location.hostname}:8765`;
+    const urlParams = new URLSearchParams(window.location.search);
+    const token = urlParams.get("token") || localStorage.getItem("jarvis_token") || "";
+    if (token) localStorage.setItem("jarvis_token", token);
+
+    const isHttps = window.location.protocol === "https:";
+    const wsProto = isHttps ? "wss:" : "ws:";
+    const wsUrl = `${wsProto}//${window.location.host}/ws?token=${encodeURIComponent(token)}`;
+
     let ws = null;
-    function connectWS() {
-      ws = new WebSocket(wsUrl);
-      ws.onopen = () => {
-        document.getElementById('statusLabel').innerText = "ONLINE // ENCRYPTED";
-        document.getElementById('subStatus').innerText = "J.A.R.V.I.S. is listening";
+    let recognition = null;
+    let isListening = false;
+    let isMuted = false;
+    let isJarvisSpeaking = false;
+    let reconnectTimeout = null;
+    let visualizerInterval = null;
+
+    const micBtn = document.getElementById("micBtn");
+    const statusLabel = document.getElementById("statusLabel");
+    const subStatus = document.getElementById("subStatus");
+    const muteIcon = document.getElementById("muteIcon");
+    const muteLabel = document.getElementById("muteLabel");
+    const visualizerBars = document.querySelectorAll(".audio-bar");
+
+    // Initialize Web Speech Recognition
+    function initSpeech() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        subStatus.innerText = "Notice: Speech recognition requires Chrome/Safari on mobile.";
+        return;
+      }
+      recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      recognition.lang = "en-US";
+
+      recognition.onstart = () => {
+        isListening = true;
+        if (!isJarvisSpeaking) {
+          setOrbState("listening", "LISTENING...", "Speak your command, sir...");
+        }
       };
-      ws.onclose = () => {
-        document.getElementById('statusLabel').innerText = "DISCONNECTED";
-        setTimeout(connectWS, 2000);
+
+      recognition.onresult = (event) => {
+        const last = event.results.length - 1;
+        const transcript = event.results[last][0].transcript.trim();
+        if (transcript) {
+          handleUserSpeech(transcript);
+        }
+      };
+
+      recognition.onerror = (e) => {
+        if (e.error !== "no-speech") {
+          console.debug("Speech recognition event:", e.error);
+        }
+      };
+
+      recognition.onend = () => {
+        isListening = false;
+        if (!isMuted && !isJarvisSpeaking) {
+          try { recognition.start(); } catch (e) {}
+        }
       };
     }
+
+    function setOrbState(state, title, desc) {
+      micBtn.className = "orb-glow " + state;
+      statusLabel.innerText = title;
+      if (desc) subStatus.innerText = desc;
+      animateVisualizer(state);
+    }
+
+    function animateVisualizer(state) {
+      clearInterval(visualizerInterval);
+      if (state === "listening" || state === "speaking") {
+        visualizerInterval = setInterval(() => {
+          visualizerBars.forEach(bar => {
+            const h = Math.floor(Math.random() * 24) + 6;
+            bar.style.height = `${h}px`;
+          });
+        }, 100);
+      } else {
+        visualizerBars.forEach(bar => { bar.style.height = "6px"; });
+      }
+    }
+
+    function handleUserSpeech(transcript) {
+      setOrbState("thinking", "PROCESSING...", `"${transcript}"`);
+      sendVoiceCommand(transcript);
+    }
+
+    function sendVoiceCommand(text) {
+      const payload = {
+        type: "VOICE_COMMAND",
+        transcript: text,
+        channel: "mobile_voice_call",
+        timestamp: Date.now()
+      };
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(payload));
+      } else {
+        // Resilient HTTP fallback
+        fetch("/api/command", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Jarvis-Token": token
+          },
+          body: JSON.stringify(payload)
+        })
+        .then(r => r.json())
+        .then(data => {
+          if (data.response) {
+            speakResponse(data.response);
+          }
+        })
+        .catch(err => {
+          setOrbState("", "CONNECTION ERROR", "Command delivery failed.");
+        });
+      }
+    }
+
+    function speakResponse(text) {
+      if (!text) return;
+      isJarvisSpeaking = true;
+      setOrbState("speaking", "J.A.R.V.I.S. SPEAKING", text);
+
+      if (recognition && isListening) {
+        try { recognition.stop(); } catch (e) {}
+      }
+
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 1.05;
+        utterance.pitch = 0.95;
+        
+        // Pick natural voice if available
+        const voices = window.speechSynthesis.getVoices();
+        const britishVoice = voices.find(v => v.lang === "en-GB") || voices.find(v => v.lang.includes("en"));
+        if (britishVoice) utterance.voice = britishVoice;
+
+        utterance.onend = () => {
+          isJarvisSpeaking = false;
+          if (!isMuted) {
+            startListening();
+          } else {
+            setOrbState("", "MUTED", "Tap orb or mic to unmute");
+          }
+        };
+        utterance.onerror = () => {
+          isJarvisSpeaking = false;
+          if (!isMuted) startListening();
+        };
+        window.speechSynthesis.speak(utterance);
+      } else {
+        setTimeout(() => {
+          isJarvisSpeaking = false;
+          if (!isMuted) startListening();
+        }, 3000);
+      }
+    }
+
+    function startListening() {
+      if (isMuted) return;
+      setOrbState("listening", "ONLINE // LISTENING", "Tap orb or speak command");
+      if (recognition) {
+        try { recognition.start(); } catch (e) {}
+      }
+    }
+
+    function toggleMute() {
+      isMuted = !isMuted;
+      if (isMuted) {
+        if (recognition) {
+          try { recognition.stop(); } catch (e) {}
+        }
+        muteIcon.innerText = "🔇";
+        muteLabel.innerText = "MUTED";
+        setOrbState("", "MICROPHONE MUTED", "Tap orb to resume listening");
+      } else {
+        muteIcon.innerText = "🎙️";
+        muteLabel.innerText = "MIC ACTIVE";
+        startListening();
+      }
+    }
+
+    micBtn.addEventListener("click", () => {
+      if (isJarvisSpeaking) {
+        window.speechSynthesis.cancel();
+        isJarvisSpeaking = false;
+        startListening();
+      } else {
+        toggleMute();
+      }
+    });
+
+    function connectWS() {
+      try {
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+          setOrbState("listening", "CALL CONNECTED", "Holographic voice link established.");
+          startListening();
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === "SUBTITLE" && data.role === "jarvis" && data.text) {
+              speakResponse(data.text);
+            }
+          } catch (e) {}
+        };
+
+        ws.onclose = () => {
+          setOrbState("", "LINK RECONNECTING", "Attempting secure handoff...");
+          clearTimeout(reconnectTimeout);
+          reconnectTimeout = setTimeout(connectWS, 2500);
+        };
+
+        ws.onerror = () => {
+          if (ws) ws.close();
+        };
+      } catch (e) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = setTimeout(connectWS, 3000);
+      }
+    }
+
+    function endCall() {
+      if (recognition) {
+        try { recognition.stop(); } catch (e) {}
+      }
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+      if (ws) {
+        try { ws.close(); } catch (e) {}
+      }
+      window.close();
+      if (history.length > 1) {
+        history.back();
+      } else {
+        window.location.href = "/";
+      }
+    }
+
+    // Initialize speech recognition & WebSocket
+    initSpeech();
     connectWS();
   </script>
 </body>

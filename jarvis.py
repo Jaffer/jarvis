@@ -54,6 +54,8 @@ import queue
 import re
 import select
 import shutil
+import secrets
+import hmac
 import subprocess
 import sys
 import tempfile
@@ -69,7 +71,8 @@ from pathlib import Path
 
 # Auto-switch to local virtualenv if available and not already inside it
 _venv_py = Path(__file__).resolve().parent / ".venv" / "bin" / "python3"
-if _venv_py.exists() and sys.executable != str(_venv_py) and not os.environ.get("_JARVIS_VENV_BOOTSTRAPPED"):
+if (__name__ == "__main__" and _venv_py.exists() and sys.executable != str(_venv_py)
+        and not os.environ.get("_JARVIS_VENV_BOOTSTRAPPED")):
     os.environ["_JARVIS_VENV_BOOTSTRAPPED"] = "1"
     os.execv(str(_venv_py), [str(_venv_py)] + sys.argv)
 
@@ -118,8 +121,13 @@ if sd is None or not hasattr(sd, "PortAudioError"):
 
 try:
     from pynput import keyboard as pynput_keyboard
-except ImportError:
+except Exception:
     pynput_keyboard = None
+
+try:
+    from pynput import mouse as pynput_mouse
+except Exception:
+    pynput_mouse = None
 
 try:
     os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
@@ -162,6 +170,25 @@ KEY_DOUBLE_TAP_MIN_GAP_S = 0.05  # debounce time to avoid key-repeat triggers
 OPEN_ORB_UI_ON_TRIGGER = os.environ.get("OPEN_ORB_UI", "true").lower() in ("true", "1", "yes")
 ORB_HTTP_PORT = int(os.environ.get("PORT") or os.environ.get("ORB_HTTP_PORT") or "5050")
 ORB_WS_PORT = int(os.environ.get("ORB_WS_PORT", "8765"))
+JARVIS_BIND_HOST = os.environ.get("JARVIS_BIND_HOST", "0.0.0.0" if (os.environ.get("RENDER") or os.environ.get("PORT")) else "127.0.0.1").strip()
+JARVIS_ACCESS_TOKEN = os.environ.get("JARVIS_ACCESS_TOKEN", "").strip()
+if not JARVIS_ACCESS_TOKEN:
+    _token_cache_file = Path(__file__).resolve().parent / ".cache" / "jarvis_token.txt"
+    if _token_cache_file.exists():
+        try:
+            JARVIS_ACCESS_TOKEN = _token_cache_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+    if not JARVIS_ACCESS_TOKEN:
+        JARVIS_ACCESS_TOKEN = secrets.token_hex(24)
+        try:
+            _token_cache_file.parent.mkdir(parents=True, exist_ok=True)
+            _token_cache_file.write_text(JARVIS_ACCESS_TOKEN, encoding="utf-8")
+        except Exception:
+            pass
+
+JARVIS_PUBLIC_DEPLOYMENT = bool(os.environ.get("RENDER") or os.environ.get("PORT")) or (JARVIS_BIND_HOST not in ("127.0.0.1", "localhost", "::1"))
+
 
 # Song: Spotify or YouTube URL/URI (empty = disabled until chosen)
 SONG_URI = os.environ.get("SONG_URI", "").strip()
@@ -210,6 +237,50 @@ def _load_jarvis_config() -> dict:
         return {}
 
 JARVIS_CFG = _load_jarvis_config()
+
+def _get_lan_ip() -> str:
+    """Determine the primary local network IPv4 address for mobile sync."""
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+class SubsystemHealthRegistry:
+    """Tracks verified real-time readiness and bind health of all J.A.R.V.I.S. subsystems."""
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._registry: dict[str, dict] = {
+            "http_server": {"status": "INITIALIZING", "port": ORB_HTTP_PORT, "error": None},
+            "websocket_server": {"status": "INITIALIZING", "port": ORB_WS_PORT, "error": None},
+            "barehands_server": {"status": "INITIALIZING", "port": 8794, "error": None},
+            "neural_brain": {"status": "STANDBY", "error": None},
+            "voice_engine": {"status": "STANDBY", "error": None},
+            "biometrics": {"status": "STANDBY", "error": None},
+            "telegram_bridge": {"status": "STANDBY", "error": None},
+        }
+
+    def set_status(self, subsystem: str, status: str, error: str | None = None, **extra) -> None:
+        with self._lock:
+            if subsystem not in self._registry:
+                self._registry[subsystem] = {}
+            self._registry[subsystem].update({"status": status, "error": error, "updated_at": time.time(), **extra})
+
+    def get_all(self) -> dict[str, dict]:
+        with self._lock:
+            return {k: dict(v) for k, v in self._registry.items()}
+
+    def is_overall_healthy(self) -> bool:
+        with self._lock:
+            return all(v.get("status") not in ("FAILED", "ERROR") for v in self._registry.values())
+
+_subsystem_health = SubsystemHealthRegistry()
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MEMORY VAULT MANAGER
@@ -678,7 +749,7 @@ class HumanCognitionResearcher:
                         "type": "HUMAN_EXPERIENCE_UPDATED",
                         "topic": insight.get("topic", topic_title),
                         "summary": insight.get("directive", ""),
-                        "exemplar": f"User: \"{insight.get('exemplar_user', '')}\" -> J.A.V.I.S.: \"{insight.get('exemplar_jarvis', '')}\"",
+                        "exemplar": f"User: \"{insight.get('exemplar_user', '')}\" -> J.A.R.V.I.S.: \"{insight.get('exemplar_jarvis', '')}\"",
                         "saved": saved
                     })
 
@@ -695,40 +766,81 @@ class HumanCognitionResearcher:
             self._cycle_lock.release()
 
     def _fetch_online_intelligence(self, query: str) -> str:
-        """Fetch online research from DuckDuckGo Instant Answer and Wikipedia search."""
+        """Fetch online research from Wikipedia + DuckDuckGo.
+
+        Long natural-language queries return zero Wikipedia hits, so we degrade
+        the query to shorter keyword sets until results are found, then pull the
+        top article's plain-text summary for real substance.
+        """
         collected: list[str] = []
 
-        # DuckDuckGo Instant Answer API
-        try:
-            url = f"https://api.duckduckgo.com/?q={urllib.parse.quote_plus(query)}&format=json&no_html=1&skip_disambig=1"
-            req = urllib.request.Request(url, headers={"User-Agent": "Jarvis-Cognition/2.0 (Linux; x86_64)"})
-            with urllib.request.urlopen(req, timeout=4.0) as resp:
-                data = json.loads(resp.read().decode())
-                ans = data.get("AbstractText") or data.get("Answer")
-                if ans:
-                    collected.append(f"Abstract: {ans}")
-                for topic in data.get("RelatedTopics", [])[:3]:
-                    if isinstance(topic, dict) and "Text" in topic:
-                        collected.append(f"Related: {topic['Text']}")
-        except Exception as ddg_err:
-            log.debug("DDG research error: %s", ddg_err)
+        # Build progressively simpler queries so research never silently no-ops.
+        words = [w for w in re.split(r"\W+", query) if len(w) > 3]
+        candidates = [query]
+        if words:
+            candidates.append(" ".join(words[:4]))
+            candidates.append(" ".join(words[:3]))
+            candidates.append(" ".join(words[:2]))
+            candidates.append(words[0])
 
-        # Wikipedia Knowledge API
-        try:
-            wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote_plus(query)}&format=json"
-            req_w = urllib.request.Request(wiki_url, headers={"User-Agent": "Jarvis-Cognition/2.0"})
-            with urllib.request.urlopen(req_w, timeout=4.0) as resp_w:
-                wdata = json.loads(resp_w.read().decode())
+        top_title = ""
+        for q in candidates:
+            if not q.strip():
+                continue
+            try:
+                url = (f"https://en.wikipedia.org/w/api.php?action=query&list=search"
+                       f"&srsearch={urllib.parse.quote_plus(q)}&format=json&srlimit=2")
+                req = urllib.request.Request(url, headers={"User-Agent": "Jarvis-Cognition/2.0"})
+                with urllib.request.urlopen(req, timeout=5.0) as resp:
+                    wdata = json.loads(resp.read().decode())
                 search_res = wdata.get("query", {}).get("search", [])
+                if not search_res:
+                    continue
                 for item in search_res[:2]:
                     title = item.get("title", "")
                     snip = re.sub(r"<.*?>", "", item.get("snippet", "")).strip()
                     if title and snip:
                         collected.append(f"{title}: {snip}")
-        except Exception as wiki_err:
-            log.debug("Wikipedia research error: %s", wiki_err)
+                top_title = search_res[0].get("title", "")
+                if collected:
+                    break
+            except Exception as wiki_err:
+                log.debug("Wikipedia research error for %r: %s", q, wiki_err)
 
-        return "\n".join(collected) if collected else "Online search completed with standard psychological telemetry."
+        # Pull the full intro extract of the best-matching article (real content).
+        if top_title:
+            try:
+                ex_url = (f"https://en.wikipedia.org/w/api.php?action=query&prop=extracts"
+                          f"&exintro=1&explaintext=1&redirects=1&format=json"
+                          f"&titles={urllib.parse.quote_plus(top_title)}")
+                req_e = urllib.request.Request(ex_url, headers={"User-Agent": "Jarvis-Cognition/2.0"})
+                with urllib.request.urlopen(req_e, timeout=5.0) as resp_e:
+                    edata = json.loads(resp_e.read().decode())
+                pages = edata.get("query", {}).get("pages", {})
+                for _, page in pages.items():
+                    extract = (page.get("extract") or "").strip()
+                    if extract:
+                        collected.append(f"Article ({top_title}): {extract[:900]}")
+                        break
+            except Exception as ex_err:
+                log.debug("Wikipedia extract error: %s", ex_err)
+
+        # DuckDuckGo Instant Answer (bonus — only fires for entity-style queries)
+        try:
+            url = f"https://api.duckduckgo.com/?q={urllib.parse.quote_plus(query)}&format=json&no_html=1&skip_disambig=1"
+            req = urllib.request.Request(url, headers={"User-Agent": "Jarvis-Cognition/2.0 (Linux; x86_64)"})
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                data = json.loads(resp.read().decode())
+            ans = data.get("AbstractText") or data.get("Answer")
+            if ans:
+                collected.append(f"Abstract: {ans}")
+            for topic in data.get("RelatedTopics", [])[:3]:
+                if isinstance(topic, dict) and "Text" in topic:
+                    collected.append(f"Related: {topic['Text']}")
+        except Exception as ddg_err:
+            log.debug("DDG research error: %s", ddg_err)
+
+        return "\n".join(collected) if collected else "Online search returned no indexed sources for this topic."
 
     def _synthesize_insight(self, topic: str, query: str, web_data: str) -> dict | None:
         """Synthesize online intelligence into a structured human cognition entry via Groq or Ollama."""
@@ -870,10 +982,17 @@ class HumanCognitionResearcher:
             if section_header not in content:
                 content = content.rstrip() + f"\n\n---\n\n{section_header}\n\n"
 
-            # Split file into base content and section 5 content
+            # Split file into base content, section 5 content, and anything after it
             parts = content.split(section_header)
             base_content = parts[0] + section_header + "\n\n"
             sec5_content = parts[1] if len(parts) > 1 else ""
+            # Preserve any sections that follow Section 5 so future edits never
+            # destroy content appended after the insights block.
+            trailing_content = ""
+            next_sec = sec5_content.find("\n## ")
+            if next_sec != -1:
+                trailing_content = sec5_content[next_sec:]
+                sec5_content = sec5_content[:next_sec]
 
             # Parse existing entries in section 5
             entries: list[dict] = []
@@ -917,7 +1036,7 @@ class HumanCognitionResearcher:
 
             # Recombine
             combined_sec5 = "\n\n".join(e["raw"] for e in entries) + "\n"
-            final_content = base_content + combined_sec5
+            final_content = base_content + combined_sec5 + trailing_content
 
             self.file_path.write_text(final_content, encoding="utf-8")
             log.info("🧠 Saved human experience insight to %s (Section 5 entries: %d).", self.file_path.name, len(entries))
@@ -950,19 +1069,53 @@ class SelfCodeManager:
         self.root_dir = root_dir.resolve()
         self.memory = memory_mgr
 
+    FORBIDDEN_PATTERNS = {".env", ".gitignore", "credentials", "client_secret", "profile.md", ".git"}
+
+    def _resolve_target_path(self, file_path_str: str) -> Path:
+        """Resolve tool paths from the codebase root and reject traversal or protected file editing."""
+        raw_path = Path(file_path_str)
+        target_path = (raw_path if raw_path.is_absolute() else self.root_dir / raw_path).resolve()
+        if target_path == self.root_dir or self.root_dir not in target_path.parents:
+            raise ValueError(f"Code editing is restricted to codebase root directory {self.root_dir}.")
+        rel_lower = str(target_path.relative_to(self.root_dir)).lower()
+        for forbidden in self.FORBIDDEN_PATTERNS:
+            if forbidden in rel_lower:
+                raise ValueError(f"Editing protected file '{target_path.name}' is strictly prohibited.")
+        return target_path
+
     def _sync_to_github_and_deploy(self, target_path: Path, instruction: str, edit_type: str = "Code") -> bool:
-        """Auto-commit code edit to GitHub repository and trigger Render live deployment."""
+        """Auto-commit code edit to GitHub repository safely and trigger Render live deployment."""
         github_token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "").strip()
-        if not github_token:
+        allow_deploy = os.environ.get("JARVIS_ALLOW_SELF_DEPLOY", "true").lower() in ("true", "1", "yes")
+        if not allow_deploy or not github_token or not (self.root_dir / ".git").is_dir():
             return False
+
+        askpass_path = None
         try:
-            subprocess.run(["git", "config", "user.name", "JARVIS AI Assistant"], cwd=self.root_dir, check=False)
-            subprocess.run(["git", "config", "user.email", "jarvis@ai.assistant"], cwd=self.root_dir, check=False)
-            remote_url = f"https://x-access-token:{github_token}@github.com/Jaffer/jarvis.git"
-            subprocess.run(["git", "add", str(target_path)], cwd=self.root_dir, check=False)
-            subprocess.run(["git", "commit", "-m", f"⚡ [JARVIS Self-{edit_type}] {instruction[:60]}"], cwd=self.root_dir, check=False)
-            subprocess.run(["git", "push", remote_url, "main"], cwd=self.root_dir, check=False)
-            log.info("⚡ [SELF CODE %s] Pushed code change directly to GitHub Jaffer/jarvis main branch!", edit_type.upper())
+            subprocess.run(["git", "config", "user.name", "JARVIS AI Assistant"], cwd=self.root_dir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "jarvis@ai.assistant"], cwd=self.root_dir, check=True, capture_output=True)
+
+            # Security: Use GIT_ASKPASS to prevent token exposure in process argv table (/proc/pid/cmdline)
+            askpass_path = Path(tempfile.gettempdir()) / f"jarvis_askpass_{os.getpid()}_{int(time.time())}.sh"
+            askpass_path.write_text(f"#!/bin/sh\necho '{github_token}'\n", encoding="utf-8")
+            askpass_path.chmod(0o700)
+
+            env = os.environ.copy()
+            env["GIT_ASKPASS"] = str(askpass_path)
+            env["GIT_TERMINAL_PROMPT"] = "0"
+
+            subprocess.run(["git", "add", str(target_path)], cwd=self.root_dir, check=True, capture_output=True)
+            commit = subprocess.run(["git", "commit", "-m", f"⚡ [JARVIS Self-{edit_type}] {instruction[:60]}"], cwd=self.root_dir, check=False, capture_output=True)
+            if commit.returncode != 0 and b"nothing to commit" not in commit.stdout.lower():
+                return False
+
+            # Safe push without token in URL argv string
+            # Remote configurable via JARVIS_GIT_REMOTE (defaults to upstream repo)
+            _remote = (os.environ.get("JARVIS_GIT_REMOTE") or "https://github.com/Jaffer/jarvis.git").strip()
+            safe_remote = _remote.replace("https://github.com/", "https://x-access-token@github.com/")
+            subprocess.run(["git", "push", safe_remote, "main"], cwd=self.root_dir, env=env, check=True, capture_output=True)
+            log.info("⚡ [SELF CODE %s] Pushed code change to GitHub main branch!", edit_type.upper())
+
             deploy_hook = os.environ.get("RENDER_DEPLOY_HOOK", "").strip()
             if deploy_hook:
                 try:
@@ -974,12 +1127,16 @@ class SelfCodeManager:
         except Exception as push_err:
             log.warning("Self-code git push notice: %s", push_err)
             return False
+        finally:
+            if askpass_path and askpass_path.exists():
+                try:
+                    askpass_path.unlink()
+                except Exception:
+                    pass
 
     def apply_code_change(self, file_path_str: str, instruction: str, code_content: str) -> str:
         try:
-            target_path = Path(file_path_str).resolve()
-            if not str(target_path).startswith(str(self.root_dir)):
-                return f"Error: Code editing restricted to codebase root directory {self.root_dir}."
+            target_path = self._resolve_target_path(file_path_str)
 
             if target_path.suffix == ".py":
                 try:
@@ -1013,9 +1170,7 @@ class SelfCodeManager:
     def apply_code_patch(self, file_path_str: str, target_snippet: str, replacement_snippet: str, instruction: str) -> str:
         """Surgically replace a specific code block/snippet within an existing file, with AST verification."""
         try:
-            target_path = Path(file_path_str).resolve()
-            if not str(target_path).startswith(str(self.root_dir)):
-                return f"Error: Code editing restricted to codebase root directory {self.root_dir}."
+            target_path = self._resolve_target_path(file_path_str)
 
             if not target_path.exists():
                 return f"Error: Target file {target_path.name} does not exist for patching."
@@ -1071,6 +1226,151 @@ class SelfCodeManager:
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
+class AutonomousCodeArchitect:
+    """Inspects and safely persists modular HUD additions made during a session."""
+
+    _HUD_MARKER = "<!-- JARVIS_DYNAMIC_HUD_COMPONENTS -->"
+    _JS_MARKER = "// JARVIS_DYNAMIC_HUD_COMPONENTS"
+
+    def __init__(self, root_dir: Path, code_mgr: SelfCodeManager | None = None):
+        self.root_dir = root_dir.resolve()
+        self.code_mgr = code_mgr or SelfCodeManager(self.root_dir)
+
+    def _path(self, file_path: str) -> Path:
+        path = (self.root_dir / file_path).resolve()
+        if path != self.root_dir and self.root_dir not in path.parents:
+            raise ValueError("Code inspection is restricted to the JARVIS workspace.")
+        return path
+
+    def inspect_codebase(self, file_path: str, search_query: str) -> dict:
+        """Return a compact, deterministic capability report without exposing whole source files."""
+        try:
+            path = self._path(file_path)
+            if not path.is_file():
+                return {"ok": False, "error": f"File not found: {file_path}"}
+            source = path.read_text(encoding="utf-8")
+            query = (search_query or "").strip()
+            return {
+                "ok": True,
+                "file": str(path.relative_to(self.root_dir)),
+                "query": query,
+                "exists": query.lower() in source.lower() if query else True,
+                "matches": source.lower().count(query.lower()) if query else 0,
+                "bytes": len(source.encode("utf-8")),
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @staticmethod
+    def _validate_hud_code(html_code: str, css_code: str, js_code: str) -> str | None:
+        if not html_code.strip():
+            return "HUD HTML cannot be empty."
+        # Components must remain fragments: document-level tags break a live HUD mount.
+        if re.search(r"<\s*/?\s*(?:html|head|body|style|script)\b", html_code, re.I):
+            return "HUD HTML must be a fragment and cannot include document, style, or script tags."
+        tags = re.findall(r"<(/?)([A-Za-z][\w:-]*)(?:\s[^<>]*)?/?>", html_code)
+        stack: list[str] = []
+        void_tags = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+        for closing, tag in tags:
+            tag = tag.lower()
+            if tag in void_tags:
+                continue
+            if closing:
+                if not stack or stack.pop() != tag:
+                    return f"Unbalanced HTML tag: {tag}."
+            elif not re.search(rf"<\s*{re.escape(tag)}\b[^<>]*/\s*>", html_code, re.I):
+                stack.append(tag)
+        if stack:
+            return f"Unclosed HTML tag: {stack[-1]}."
+        if "</style" in css_code.lower() or "</script" in js_code.lower():
+            return "Component code contains an unsafe closing tag."
+        return None
+
+    def self_code_patch(self, file_path: str, target_snippet: str, replacement_snippet: str, instruction: str) -> dict:
+        result = self.code_mgr.apply_code_patch(file_path, target_snippet, replacement_snippet, instruction)
+        return {"ok": result.startswith("Successfully"), "result": result}
+
+    def synthesize_and_inject_hud_feature(self, feature_id: str, html_code: str, css_code: str,
+                                          js_code: str, target_selector: str = "#dynamic-hud-stage") -> dict:
+        """Broadcast immediately, then append a recoverable component manifest to the HUD files."""
+        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "-", feature_id).strip("-")[:80]
+        if not safe_id:
+            return {"ok": False, "error": "A feature identifier is required."}
+        validation_error = self._validate_hud_code(html_code, css_code, js_code)
+        if validation_error:
+            return {"ok": False, "error": validation_error}
+
+        payload = {"type": "INJECT_HUD_COMPONENT", "feature_id": safe_id,
+                   "html": html_code, "css": css_code, "js": js_code,
+                   "target_selector": target_selector}
+        broadcast_ui_event(payload)
+        try:
+            index_path, js_path = self._path("web/index.html"), self._path("web/app.js")
+            component = f'\n{self._HUD_MARKER}\n<template data-jarvis-feature="{safe_id}">{html_code}</template>\n'
+            controller = (f'\n{self._JS_MARKER}\nwindow.__jarvisPersistedHudFeatures = '
+                          f'window.__jarvisPersistedHudFeatures || {{}};\n'
+                          f'window.__jarvisPersistedHudFeatures[{json.dumps(safe_id)}] = '
+                          f'{{html: {json.dumps(html_code)}, css: {json.dumps(css_code)}, js: {json.dumps(js_code)}, '
+                          f'target_selector: {json.dumps(target_selector)}}};\n')
+            html_source = index_path.read_text(encoding="utf-8")
+            js_source = js_path.read_text(encoding="utf-8")
+            if f'data-jarvis-feature="{safe_id}"' not in html_source:
+                self.code_mgr.apply_code_change(str(index_path), f"Persist HUD feature {safe_id}", html_source + component)
+            if f'__jarvisPersistedHudFeatures[{json.dumps(safe_id)}]' not in js_source:
+                self.code_mgr.apply_code_change(str(js_path), f"Persist HUD controller {safe_id}", js_source + controller)
+            return {"ok": True, "feature_id": safe_id, "injected": True,
+                    "persisted": True, "backup_dir": ".cache/code_backups"}
+        except Exception as exc:
+            log.warning("HUD component %s broadcast but persistence failed: %s", safe_id, exc)
+            return {"ok": False, "feature_id": safe_id, "injected": True, "error": str(exc)}
+
+    def remove_hud_feature(self, feature_id: str) -> dict:
+        """Remove a dynamic HUD component permanently: unbinds it live, then
+        deletes its persisted manifest from web/app.js and its <template> from
+        web/index.html so it does NOT come back after a page refresh."""
+        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "-", str(feature_id or "")).strip("-")[:80]
+        if not safe_id:
+            return {"ok": False, "error": "A feature identifier is required."}
+
+        # 1. Live removal in every connected HUD tab
+        broadcast_ui_event({"type": "REMOVE_HUD_COMPONENT", "feature_id": safe_id})
+
+        # 2. Strip the persisted controller from web/app.js
+        js_path, html_path = self._path("web/app.js"), self._path("web/index.html")
+        removed_js = removed_html = False
+        try:
+            js_source = js_path.read_text(encoding="utf-8")
+            pattern = re.compile(
+                r"^[ \t]*window\.__jarvisPersistedHudFeatures\["
+                + re.escape(json.dumps(safe_id))
+                + r"\][^\n]*\n?",
+                re.MULTILINE,
+            )
+            new_js, n_js = pattern.subn("", js_source)
+            if n_js:
+                self.code_mgr.apply_code_change(str(js_path), f"Remove HUD controller {safe_id}", new_js)
+                removed_js = True
+
+            html_source = html_path.read_text(encoding="utf-8")
+            tpl = re.compile(
+                r"[^\n]*<template data-jarvis-feature=\"" + re.escape(safe_id) + r"\">.*?</template>\s*\n?",
+                re.DOTALL,
+            )
+            new_html, n_html = tpl.subn("", html_source)
+            if n_html:
+                self.code_mgr.apply_code_change(str(html_path), f"Remove HUD feature {safe_id}", new_html)
+                removed_html = True
+        except Exception as exc:
+            log.warning("HUD component %s live-removed but persistence cleanup failed: %s", safe_id, exc)
+            return {"ok": True, "feature_id": safe_id, "removed": True,
+                    "persisted_cleanup": False, "error": str(exc)}
+
+        log.info("🧹 [HUD] Removed dynamic feature '%s' (app.js=%s index.html=%s)",
+                 safe_id, removed_js, removed_html)
+        return {"ok": True, "feature_id": safe_id, "removed": True,
+                "persisted_cleanup": removed_js or removed_html}
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # MODEL CONTEXT PROTOCOL (MCP) ENGINE (JSON-RPC 2.0)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1101,7 +1401,16 @@ class MCPSession:
             if "env" in self.cfg:
                 for k, v in self.cfg["env"].items():
                     if isinstance(v, str) and v.startswith("$"):
-                        v = os.environ.get(v[1:], v)
+                        # Expand $VAR; if the shell env lacks it, leave a clear
+                        # marker so logs show exactly which credential is missing.
+                        expanded = os.environ.get(v[1:], "")
+                        if not expanded:
+                            log.warning(
+                                "MCP session '%s': environment variable %s is not set "
+                                "(add it to your .env file). The server may fail to authenticate.",
+                                self.name, v[1:],
+                            )
+                        v = expanded or v
                     env[k] = str(v)
 
             try:
@@ -1198,16 +1507,37 @@ class MCPSession:
         with self._lock:
             if not self.initialized:
                 if not self.start(timeout=6.0):
-                    return f"MCP server '{self.name}' failed to start or initialize."
+                    # One automatic retry — npx cold-start downloads can exceed
+                    # the initial 6s warm-up window on first ever use.
+                    time.sleep(1.5)
+                    if not self.start(timeout=15.0):
+                        return (
+                            f"MCP server '{self.name}' failed to start or initialize. "
+                            f"Check that command '{self.cfg.get('command')}' exists and that "
+                            f"required credentials in mcp_config.json are set in your .env."
+                        )
+            if self.proc and self.proc.poll() is not None:
+                # Process died between calls; restart and re-init before retrying.
+                log.warning("MCP session '%s' died; restarting.", self.name)
+                self.initialized = False
+                if not self.start(timeout=10.0):
+                    return f"MCP server '{self.name}' crashed and could not be restarted."
 
             call_id = self._get_id()
+            tool_args = dict(arguments or {})
+            # Headless servers (Render/cloud have no DISPLAY) cannot open a real
+            # browser window: the NPX Puppeteer server launches headless:false by
+            # default, so force headless mode automatically in that environment.
+            if tool_name == "puppeteer_navigate" and "launchOptions" not in tool_args:
+                if sys.platform != "win32" and not os.environ.get("DISPLAY"):
+                    tool_args["launchOptions"] = {"headless": True}
             payload = {
                 "jsonrpc": "2.0",
                 "id": call_id,
                 "method": "tools/call",
                 "params": {
                     "name": tool_name,
-                    "arguments": arguments or {}
+                    "arguments": tool_args
                 }
             }
             resp = self._send_raw_request_locked(payload, timeout=timeout)
@@ -1219,10 +1549,7 @@ class MCPSession:
 
             res = resp.get("result", {})
             content_items = res.get("content", [])
-            out_texts = []
-            for c in content_items:
-                if isinstance(c, dict) and "text" in c:
-                    out_texts.append(c["text"])
+            out_texts = _mcp_content_to_text(content_items)
             if out_texts:
                 return "\n".join(out_texts)
             return json.dumps(res, indent=2)
@@ -1249,27 +1576,31 @@ class MCPSession:
                 target = m.group(0) if m else "README.md"
                 return self.call_tool("read_text_file", {"path": str(self.cwd / target)}, timeout=timeout)
 
-        elif self.name == "spotify":
-            ql = q_strip.lower()
-            if "pause" in ql or "stop" in ql:
-                return self.call_tool("spotify_pause", {}, timeout=timeout)
-            elif "next" in ql or "skip" in ql:
-                return self.call_tool("spotify_next", {}, timeout=timeout)
-            elif "prev" in ql or "back" in ql:
-                return self.call_tool("spotify_previous", {}, timeout=timeout)
-            elif "status" in ql or "now playing" in ql or "what" in ql:
-                return self.call_tool("spotify_get_playback_state", {}, timeout=timeout)
-            elif "search" in ql or "play" in ql:
-                search_term = re.sub(r'^(search|play|find)\s+', '', q_strip, flags=re.I)
-                return self.call_tool("spotify_search", {"query": search_term, "types": ["track"]}, timeout=timeout)
-
         elif self.name == "github":
             return self.call_tool("search_repositories", {"query": q_strip}, timeout=timeout)
 
+        # NOTE: The Spotify MCP server was removed — Spotify's Web API now
+        # requires a Premium subscription. Music playback is handled by the
+        # YouTube fast-path in VoiceEngine._route_voice_command instead.
+
         elif self.name == "puppeteer":
+            # Deep browser agent: parse natural-language actions (click / type /
+            # scroll / screenshot / page state / reload / back / navigate) first,
+            # then fall back to raw URL navigation.
+            cmd = _puppeteer_nl_command(q_strip)
+            if cmd:
+                tool_name, tool_args = cmd
+                return self.call_tool(tool_name, tool_args, timeout=timeout)
             m = re.search(r'https?://[^\s]+', q_strip)
             if m:
                 return self.call_tool("puppeteer_navigate", {"url": m.group(0)}, timeout=timeout)
+            return (
+                "Puppeteer browser agent ready. Natural-language commands: "
+                "'open <url>', 'click <text or css>', 'type <text> into <field>', "
+                "'select <value> in <field>', 'scroll down', 'press enter', "
+                "'page state', 'screenshot', 'reload', 'go back' — or JSON: "
+                '{"tool": "puppeteer_click", "arguments": {"selector": "..."}}.'
+            )
 
         elif self.name == "memory":
             return self.call_tool("read_graph", {}, timeout=timeout)
@@ -1300,6 +1631,73 @@ class MCPSession:
     def close(self):
         with self._lock:
             self._close_locked()
+
+
+def _mcp_content_to_text(content_items: list, image_dir: Path | None = None) -> list[str]:
+    """Convert MCP tool-call content items to context-safe text.
+
+    Image items (e.g. Puppeteer screenshots) are persisted to disk and replaced
+    with a short file-path reference — dumping raw base64 into the LLM context
+    would blow the Groq token budget instantly.
+    """
+    out_texts: list[str] = []
+    for c in content_items:
+        if not isinstance(c, dict):
+            continue
+        if "text" in c:
+            out_texts.append(str(c["text"]))
+        elif c.get("type") == "image" and c.get("data"):
+            try:
+                if image_dir is None:
+                    image_dir = Path(__file__).resolve().parent / "state" / "screenshots"
+                image_dir.mkdir(parents=True, exist_ok=True)
+                ext = "jpg" if "jpeg" in str(c.get("mimeType", "")) else "png"
+                img_path = image_dir / f"mcp_capture_{int(time.time() * 1000)}.{ext}"
+                img_path.write_bytes(base64.b64decode(c["data"]))
+                out_texts.append(f"[Image captured and saved to {img_path}]")
+            except Exception as img_err:
+                out_texts.append(f"[Image content could not be decoded: {img_err}]")
+    return out_texts
+
+
+# ── Puppeteer natural-language browser agent helpers ───────────────────────
+# Page-state script: URL, title, body-text excerpt, and the real list of
+# visible clickable elements/inputs so the LLM can decide its next action
+# from page state (decide-from-state loop without requiring vision).
+_PUPPETEER_PAGE_STATE_JS = (
+    "JSON.stringify({url:location.href,title:document.title,"
+    "text:(document.body?document.body.innerText:'').replace(/\\s+/g,' ').slice(0,1200),"
+    "clickables:[...document.querySelectorAll('a,button,input,textarea,select,[role=button],[role=link]')]"
+    ".filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0})"
+    ".slice(0,40).map(e=>({tag:e.tagName.toLowerCase(),"
+    "text:((e.innerText||e.value||e.getAttribute('aria-label')||e.placeholder||'').trim().slice(0,60)),"
+    "id:e.id||'',cls:(typeof e.className==='string'?e.className:'').slice(0,40),href:e.href||''}))})"
+)
+
+
+def _puppeteer_click_js(target: str) -> str:
+    """JS: click the first visible element whose text matches *target*.
+
+    When nothing matches, return the real list of clickable elements so the LLM
+    can re-decide from actual page state instead of guessing selectors.
+    """
+    t = json.dumps(target)
+    return (
+        "(()=>{const target=" + t + ";"
+        "const norm=s=>(s||'').replace(/\\s+/g,' ').trim().toLowerCase();"
+        "const val=e=>e.value||e.getAttribute('aria-label')||'';"
+        "const cands=[...document.querySelectorAll('a,button,[role=button],[role=link],"
+        "input[type=submit],input[type=button],label,summary,option')]"
+        ".filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0});"
+        "let el=cands.find(e=>norm(e.innerText||val(e))===target)"
+        "||cands.find(e=>norm(e.innerText||e.getAttribute('aria-label')).includes(target));"
+        "if(el){try{el.scrollIntoView({block:'center'});}catch(_){}"
+        "el.click();return 'CLICKED '+el.tagName.toLowerCase()+' :: '"
+        "+((el.innerText||val(el)||'').trim().slice(0,60));}"
+        "return 'NOT_FOUND. Visible clickable elements: '+JSON.stringify(cands.slice(0,30)"
+        ".map(e=>e.tagName.toLowerCase()+(e.id?'#'+e.id:'')+':'+"
+        "+((e.innerText||val(e)||'').trim().slice(0,40))));})()"
+    )
 
 
 class MCPManager:
@@ -1336,18 +1734,30 @@ class MCPManager:
                     log.debug("MCP warmup exception for '%s': %s", name, ex)
         threading.Thread(target=_warm, daemon=True, name="MCPWarmupThread").start()
 
-    def list_tools(self, include_native: bool = False) -> list[dict]:
+    def list_tools(self, include_native: bool = False, native_servers: set | None = None) -> list[dict]:
         """Exposes MCP tools to J.A.R.V.I.S.'s LLM tool registry in OpenAI Tool format.
-        By default, exposes the 6 concise natural language query tools (mcp_{name}_query)
-        to keep total token payload well within Groq's 8,000 TPM limit (~500 tokens vs 13,000+ tokens)."""
+        By default, exposes the concise natural language query tools (mcp_{name}_query)
+        plus native tool schemas for *native_servers* only (default: puppeteer via
+        JARVIS_MCP_NATIVE_SERVERS), to keep total token payload well within
+        Groq's 8,000 TPM limit (~500 tokens vs 13,000+ tokens)."""
         tools = []
         for name, session in self.sessions.items():
             # 1. Always provide the resilient query tool
+            if name == "puppeteer":
+                q_desc = (
+                    "Deep browser agent (Puppeteer MCP). Send natural-language commands: "
+                    "'open <url>', 'click <text or css selector>', 'type <text> into <field>', "
+                    "'select <value> in <field>', 'scroll down', 'press enter', 'page state', "
+                    "'screenshot', 'reload', 'go back' — or JSON "
+                    '{"tool": "puppeteer_click", "arguments": {"selector": "..."}}.'
+                )
+            else:
+                q_desc = f"Query external MCP server '{name}'. Send natural language or JSON command."
             tools.append({
                 "type": "function",
                 "function": {
                     "name": f"mcp_{name}_query",
-                    "description": f"Query external MCP server '{name}'. Send natural language or JSON command.",
+                    "description": q_desc,
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -1357,8 +1767,8 @@ class MCPManager:
                     }
                 }
             })
-            # 2. Expose discovered native tools only if explicitly requested
-            if include_native:
+            # 2. Expose native tool schemas only for explicitly selected servers
+            if include_native or (native_servers and name in native_servers):
                 for t in session.tools:
                     t_name = t.get("name")
                     desc = t.get("description", f"{name} {t_name}")
@@ -1795,9 +2205,31 @@ class BiometricSentinelDaemon:
             if frame is not None and frame.size > 0:
                 with self._lock:
                     self._latest_frame = frame.copy()
+                    # Truthful vision tracking: record exactly when a real frame
+                    # arrived, so the brain can answer "can you see me?" honestly.
+                    self._last_frame_ts = time.time()
+                    try:
+                        has_face = bool(self.face_sentinel.extract_landmarks(frame))
+                    except Exception:
+                        has_face = False
+                    if has_face:
+                        self._last_face_seen_ts = time.time()
                 self._process_frame(frame)
         except Exception as e:
             log.debug("External frame processing error: %s", e)
+
+    def is_currently_seeing(self, max_age_s: float = 12.0) -> bool:
+        """Return True ONLY if a live camera frame with a detected face arrived
+        within max_age_s. Used so the brain never falsely claims it can see the user."""
+        with self._lock:
+            ts = getattr(self, "_last_face_seen_ts", 0.0)
+        return bool(ts) and (time.time() - ts) <= max_age_s
+
+    def is_camera_receiving_frames(self, max_age_s: float = 12.0) -> bool:
+        """True if ANY live frames are arriving (even without a detectable face)."""
+        with self._lock:
+            ts = getattr(self, "_last_frame_ts", 0.0)
+        return bool(ts) and (time.time() - ts) <= max_age_s
 
     def start_face_enrollment(self, admin_name: str = "Admin") -> dict:
         """Initiate real-time in-Orb biometric face enrollment session."""
@@ -2139,8 +2571,10 @@ _bh_cmds = []
 _BH_ALLOWED = ("add_img", "add_card", "clear", "reset", "hand", "give",
                "yank", "hover", "scroll_note", "widget", "explode", "assemble",
                "present", "blueprint", "simulate", "stress", "construct",
-               "dynamic_construct", "modify_construct")
+               "dynamic_construct", "modify_construct", "multi_construct",
+               "connect_and_simulate", "ui_control")
 _global_voice_engine = None
+_code_architect = None
 _biometric_sentinel = None
 _vision_scanner = None
 _human_researcher = None
@@ -2347,7 +2781,72 @@ def _procedural_construct_synthesizer(prompt: str) -> dict:
             ]
         }
 
-    # 6. Universal Mechanical Construct Default
+    # 6. Vehicles / Automobiles / Aircraft / Drones
+    #    (so offline synthesis of a "car" looks like the real thing)
+    elif any(w in p_lower for w in ["car", "vehicle", "automobile", "sedan", "suv", "coupe",
+                                     "mustang", "supra", "ferrari", "lamborghini", "tesla",
+                                     "bike", "motorcycle", "truck", "bus", "aeroplane",
+                                     "airplane", "aircraft", "jet", "drone", "helicopter"]):
+        return {
+            "id": construct_id,
+            "name": clean_name,
+            "description": f"Full 3D automotive engineering schematic of {clean_name} with powertrain, chassis and aero surfaces",
+            "physics": {
+                "solver": "aerodynamics",
+                "formula": "F_d = ½·ρ·v²·C_d·A  |  P = F·v  |  a = F/m",
+                "primaryLabel": "PEAK POWER",
+                "primaryVal": "478 kW (641 hp)",
+                "secondaryLabel": "DRAG COEFFICIENT",
+                "secondaryVal": "0.31 Cd",
+                "tertiaryLabel": "0-100 km/h",
+                "tertiaryVal": "3.4 s",
+                "nominal": True
+            },
+            "parts": [
+                {"id": "body_shell", "name": "Aerodynamic Monocoque Body Shell", "geo": "box", "args": [4.4, 0.75, 1.9], "pos": [0, 0, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff"}, "explodeDir": [0, 1.8, 0], "callout": f"[AU-01] {clean_name} Body-in-White · CFRP Monocoque"},
+                {"id": "cabin", "name": "Glazed Passenger Cabin Canopy", "geo": "box", "args": [2.1, 0.6, 1.6], "pos": [-0.15, 0.72, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#8ff0e4", "opacity": 0.45}, "explodeDir": [0, 2.6, 0], "callout": "[AU-02] Laminated Safety Glass Cabin"},
+                {"id": "engine", "name": "Longitudinal Powertrain Assembly", "geo": "cylinder", "args": [0.42, 0.42, 1.9, 20], "pos": [1.55, -0.1, 0], "rot": [0, 0, 1.57], "mat": {"wireframe": False, "color": "#ffb300", "opacity": 0.95}, "explodeDir": [3.0, 1.0, 0], "callout": "[AU-03] Powertrain · Forced-Induction Unit"},
+                {"id": "wheel_fl", "name": "Front-Left Alloy Wheel & Brake Rotor", "geo": "cylinder", "args": [0.38, 0.38, 0.28, 20], "pos": [1.35, -0.45, 0.95], "rot": [1.57, 0, 0], "mat": {"wireframe": True, "color": "#3d5afe"}, "explodeDir": [1.2, -1.8, 1.6], "callout": "[AU-04A] Forged Alloy Wheel · Carbon-Ceramic Disc"},
+                {"id": "wheel_fr", "name": "Front-Right Alloy Wheel & Brake Rotor", "geo": "cylinder", "args": [0.38, 0.38, 0.28, 20], "pos": [1.35, -0.45, -0.95], "rot": [1.57, 0, 0], "mat": {"wireframe": True, "color": "#3d5afe"}, "explodeDir": [1.2, -1.8, -1.6], "callout": "[AU-04B] Forged Alloy Wheel · Carbon-Ceramic Disc"},
+                {"id": "wheel_rl", "name": "Rear-Left Drive Wheel Assembly", "geo": "cylinder", "args": [0.40, 0.40, 0.32, 20], "pos": [-1.35, -0.45, 0.95], "rot": [1.57, 0, 0], "mat": {"wireframe": True, "color": "#3d5afe"}, "explodeDir": [-1.2, -1.8, 1.6], "callout": "[AU-05A] Driven Rear Wheel · Torque Vectoring Hub"},
+                {"id": "wheel_rr", "name": "Rear-Right Drive Wheel Assembly", "geo": "cylinder", "args": [0.40, 0.40, 0.32, 20], "pos": [-1.35, -0.45, -0.95], "rot": [1.57, 0, 0], "mat": {"wireframe": True, "color": "#3d5afe"}, "explodeDir": [-1.2, -1.8, -1.6], "callout": "[AU-05B] Driven Rear Wheel · Torque Vectoring Hub"},
+                {"id": "rear_wing", "name": "Active Rear Aero Wing", "geo": "box", "args": [0.35, 0.09, 1.7], "pos": [-2.1, 0.85, 0], "rot": [-0.18, 0, 0], "mat": {"wireframe": True, "color": "#ffb300"}, "explodeDir": [-2.6, 2.2, 0], "callout": "[AU-06] Active DRS Rear Wing · Downforce Trim"},
+                {"id": "headlights", "name": "Adaptive LED Headlight Cluster", "geo": "capsule", "args": [0.12, 0.5, 8, 16], "pos": [2.2, 0.15, 0.72], "rot": [0, 0, 1.57], "mat": {"wireframe": False, "color": "#8ff0e4", "opacity": 0.9}, "explodeDir": [3.4, 0.6, 1.2], "callout": "[AU-07] Matrix LED Headlamp Array"},
+                {"id": "underbody", "name": "Battery Pack & Flat Floor Diffuser", "geo": "box", "args": [3.2, 0.3, 1.6], "pos": [0, -0.5, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#ff1744", "opacity": 0.85}, "explodeDir": [0, -2.6, 0], "callout": "[AU-08] Structural Battery Floor · Low Cg"}
+            ]
+        }
+
+    # 7. Consumer Electronics: phones, tablets, laptops, wearables
+    elif any(w in p_lower for w in ["phone", "mobile", "smartphone", "iphone", "android", "pixel",
+                                     "tablet", "ipad", "laptop", "macbook", "notebook",
+                                     "watch", "smartwatch", "earbuds", "headphone", "console"]):
+        return {
+            "id": construct_id,
+            "name": clean_name,
+            "description": f"Exploded 3D hardware teardown schematic of {clean_name} with internal module stack",
+            "physics": {
+                "solver": "em_field",
+                "formula": "P = V·I  |  E = ½·C·V²  |  η = P_out / P_in",
+                "primaryLabel": "BATTERY CAPACITY",
+                "primaryVal": "4,441 mAh (17.0 Wh)",
+                "secondaryLabel": "PEAK DISPLAY NITS",
+                "secondaryVal": "2,000 nits",
+                "tertiaryLabel": "THERMAL HEADROOM",
+                "tertiaryVal": "42 °C (NOMINAL)",
+                "nominal": True
+            },
+            "parts": [
+                {"id": "display", "name": "OLED Display Panel Stack", "geo": "box", "args": [4.2, 2.3, 0.06], "pos": [0, 1.05, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff", "opacity": 0.6}, "explodeDir": [0, 2.6, 0], "callout": f"[DE-01] {clean_name} OLED Panel · 460 ppi LTPO"},
+                {"id": "midframe", "name": "Machined Aluminium Mid-Frame Chassis", "geo": "box", "args": [4.0, 2.1, 0.18], "pos": [0, 0.6, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#8ff0e4"}, "explodeDir": [0, 1.6, 0], "callout": "[DE-02] 7000-Series Aluminium Unibody"},
+                {"id": "mainboard", "name": "System-on-Chip Logic Mainboard", "geo": "box", "args": [2.0, 1.2, 0.07], "pos": [0, 0.25, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#ffb300"}, "explodeDir": [1.6, 0.9, 0], "callout": "[DE-03] 3nm SoC · Unified LPDDR5X Memory"},
+                {"id": "battery", "name": "Laminated Lithium-Polymer Energy Cell", "geo": "box", "args": [3.6, 1.8, 0.32], "pos": [0, -0.5, 0], "rot": [0, 0, 0], "mat": {"wireframe": False, "color": "#ff1744", "opacity": 0.9}, "explodeDir": [0, -2.2, 0], "callout": "[DE-04] Dual-Cell Li-Po · 17.0 Wh"},
+                {"id": "camera_array", "name": "Multi-Lens Optical Camera Array", "geo": "cylinder", "args": [0.3, 0.3, 0.16, 20], "pos": [-1.5, 1.35, -0.05], "rot": [1.57, 0, 0], "mat": {"wireframe": True, "color": "#00e5ff"}, "explodeDir": [-2.2, 2.4, 0], "callout": "[DE-05] 48 MP Triple Camera · Sensor-Shift OIS"},
+                {"id": "speaker", "name": "Stereo Acoustic Driver Module", "geo": "cylinder", "args": [0.22, 0.22, 0.5, 16], "pos": [1.6, -0.6, 0], "rot": [0, 0, 1.57], "mat": {"wireframe": True, "color": "#3d5afe"}, "explodeDir": [2.8, -1.4, 0], "callout": "[DE-06] Stereo Speaker · Spatial Audio Drivers"},
+                {"id": "thermal", "name": "Graphite Thermal Diffusion Layer", "geo": "box", "args": [2.6, 1.5, 0.03], "pos": [0, 0.0, 0], "rot": [0, 0, 0], "mat": {"wireframe": True, "color": "#8ff0e4", "opacity": 0.5}, "explodeDir": [0, 0.6, 1.6], "callout": "[DE-07] Vapour-Chamber & Graphite Heat Spreader"}
+            ]
+        }
+
+    # 8. Universal Mechanical Construct Default
     return {
         "id": construct_id,
         "name": clean_name,
@@ -2578,7 +3077,18 @@ class BarrehandsHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _check_auth(self) -> bool:
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        token = self.headers.get("X-Jarvis-Token") or (query.get("token") or [""])[0]
+        return _is_authorized_token(token, self.client_address)
+
     def do_POST(self):
+        if not self._check_auth():
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error": "Unauthorized"}\n')
+            return
         global _bh_state
         n = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(n) if 0 < n < 262144 else b"{}"
@@ -2627,6 +3137,12 @@ class BarrehandsHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if not self._check_auth():
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error": "Unauthorized"}\n')
+            return
         if self.path == "/config":
             bh_cfg = JARVIS_CFG.get("barehands", {})
             self._json_response({
@@ -2735,20 +3251,27 @@ class BarrehandsHandler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
 
-def _start_barehands_server(port: int = 8794) -> None:
+def _start_barehands_server(port: int = 8794) -> bool:
     """Start the barehands board HTTP server in a daemon thread."""
     board_root = Path(__file__).resolve().parent / "barehands"
     if not board_root.is_dir():
         log.info("Barehands board directory not found; skipping barehands server.")
-        return
+        _subsystem_health.set_status("barehands_server", "OFFLINE", reason="directory not found")
+        return False
     try:
+        bind_host = os.environ.get("BAREHANDS_HOST", "127.0.0.1").strip()
         handler = functools.partial(BarrehandsHandler, board_root=board_root)
-        server = ThreadingHTTPServer(("0.0.0.0", port), handler)
-        t = threading.Thread(target=server.serve_forever, daemon=True)
+        server = ThreadingHTTPServer((bind_host, port), handler)
+        server.allow_reuse_address = True
+        t = threading.Thread(target=server.serve_forever, daemon=True, name="jarvis-barehands")
         t.start()
-        log.info("Barehands Board running at: http://localhost:%d", port)
+        _subsystem_health.set_status("barehands_server", "RUNNING", host=bind_host, port=port)
+        log.info("Barehands Board running at: http://%s:%d", bind_host, port)
+        return True
     except Exception as e:
+        _subsystem_health.set_status("barehands_server", "FAILED", error=str(e), port=port)
         log.warning("Could not start Barehands server on port %d: %s", port, e)
+        return False
 
 
 
@@ -2940,8 +3463,80 @@ def fetch_rain_answer(city: str | None = None, time_context: str = "tonight") ->
 
 # ── LOCATION DISTANCE & NAVIGATION TELEMETRY ENGINE ─────────────────────────
 _distance_cache: dict[tuple[str, str], tuple[float, str]] = {}
+_session_gps: dict[str, dict] = {}
+_session_gps_lock = threading.RLock()
+_gps_reverse_cache: dict[tuple[float, float], tuple[float, str]] = {}
+_reverse_lookup_lock = threading.Lock()
+_reverse_lookup_in_flight: set[tuple[float, float]] = set()
 
-def fetch_location_distance(origin: str, destination: str, default_origin: str = "Hyderabad") -> str:
+
+def _reverse_geocode_live_gps(lat: float, lon: float) -> str:
+    """Resolve a coarse neighbourhood label. GPS coordinates never leave process memory."""
+    cache_key = (round(lat, 3), round(lon, 3))
+    cached = _gps_reverse_cache.get(cache_key)
+    if cached and time.monotonic() - cached[0] < 900:
+        return cached[1]
+    try:
+        url = ("https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=16&lat="
+               f"{lat:.6f}&lon={lon:.6f}")
+        req = urllib.request.Request(url, headers={"User-Agent": "JARVIS-HUD/1.0 (live GPS telemetry)"})
+        with urllib.request.urlopen(req, timeout=4) as response:
+            address = json.loads(response.read().decode("utf-8")).get("address", {})
+        label = address.get("suburb") or address.get("neighbourhood") or address.get("city_district") or address.get("city") or "LOCATION LOCKED"
+        _gps_reverse_cache[cache_key] = (time.monotonic(), label)
+        return label
+    except Exception as exc:
+        log.debug("GPS reverse geocode notice: %s", exc)
+        return f"{lat:.4f}, {lon:.4f}"
+
+
+def update_live_gps_telemetry(lat: object, lon: object, accuracy: object, session_id: str = "default") -> dict:
+    """Accept a browser GPS update and resolve a readable area asynchronously, scoped per session."""
+    try:
+        lat_f, lon_f = float(lat), float(lon)
+        accuracy_f = max(0.0, float(accuracy))
+        if not (-90 <= lat_f <= 90 and -180 <= lon_f <= 180):
+            raise ValueError("coordinates are outside valid latitude/longitude ranges")
+    except (TypeError, ValueError) as exc:
+        return {"ok": False, "error": f"Invalid GPS telemetry: {exc}"}
+
+    safe_sess = re.sub(r"[^a-zA-Z0-9_-]", "", str(session_id))[:64] or "default"
+    with _session_gps_lock:
+        prior = dict(_session_gps.get(safe_sess, {}))
+        _session_gps[safe_sess] = {
+            "lat": lat_f,
+            "lon": lon_f,
+            "accuracy": accuracy_f,
+            "area": prior.get("area", "LOCATING..."),
+            "updated_at": time.time(),
+            "reverse_at": prior.get("reverse_at", 0)
+        }
+
+    # Single-flight reverse lookup to prevent concurrent fan-out to Nominatim
+    cache_key = (round(lat_f, 3), round(lon_f, 3))
+    should_reverse = False
+    with _reverse_lookup_lock:
+        if cache_key not in _reverse_lookup_in_flight:
+            if not prior.get("area") or (time.monotonic() - float(prior.get("reverse_at", 0))) > 60:
+                _reverse_lookup_in_flight.add(cache_key)
+                should_reverse = True
+
+    if should_reverse:
+        def resolve_area():
+            try:
+                area = _reverse_geocode_live_gps(lat_f, lon_f)
+                with _session_gps_lock:
+                    if safe_sess in _session_gps:
+                        _session_gps[safe_sess]["area"] = area
+                        _session_gps[safe_sess]["reverse_at"] = time.monotonic()
+            finally:
+                with _reverse_lookup_lock:
+                    _reverse_lookup_in_flight.discard(cache_key)
+        threading.Thread(target=resolve_area, daemon=True, name="gps-reverse-geocode").start()
+
+    return {"ok": True, "lat": lat_f, "lon": lon_f, "accuracy": accuracy_f, "area": prior.get("area", "LOCATING..."), "session_id": safe_sess}
+
+def fetch_location_distance(origin: str, destination: str, default_origin: str = "Hyderabad", session_id: str | None = None) -> str:
     """Calculates driving distance and travel time between two locations using Google Maps API or OSM/OSRM."""
     orig = (origin or "").strip().lower()
     dest = (destination or "").strip().lower()
@@ -2949,7 +3544,15 @@ def fetch_location_distance(origin: str, destination: str, default_origin: str =
         orig = orig.replace(phrase, "").strip()
         dest = dest.replace(phrase, "").strip()
     if not orig or orig in ["here", "current location", "my location", "our location", "this place"]:
-        orig = default_origin
+        with _session_gps_lock:
+            sess_data = _session_gps.get(session_id) if session_id else None
+            if not sess_data and _session_gps:
+                # Resolve most recently active session
+                sess_data = max(_session_gps.values(), key=lambda s: s.get("updated_at", 0))
+        if sess_data and sess_data.get("lat") is not None and sess_data.get("lon") is not None:
+            orig = f"{float(sess_data['lat']):.6f},{float(sess_data['lon']):.6f}"
+        else:
+            orig = default_origin
     if not dest:
         return "Please specify the target destination, sir."
 
@@ -2983,6 +3586,14 @@ def fetch_location_distance(origin: str, destination: str, default_origin: str =
     # 2. Autonomous Zero-Key Engine: OpenStreetMap (Nominatim) + OSRM High-Speed Routing Engine
     try:
         def geocode_osm(place: str):
+            coordinate_match = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*", place)
+            if coordinate_match:
+                with _session_gps_lock:
+                    sess_data = _session_gps.get(session_id) if session_id else None
+                    if not sess_data and _session_gps:
+                        sess_data = max(_session_gps.values(), key=lambda s: s.get("updated_at", 0))
+                    gps_area = sess_data.get("area", "Live GPS location") if sess_data else "Live GPS location"
+                return float(coordinate_match.group(1)), float(coordinate_match.group(2)), str(gps_area)
             url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote_plus(place)}&format=json&limit=1"
             req = urllib.request.Request(url, headers={"User-Agent": "JARVIS-Tactical-AI/3.0 (Stark-Core-OS)"})
             with urllib.request.urlopen(req, timeout=4) as r:
@@ -3885,6 +4496,7 @@ class NeuralBrain:
         self.bus = signal_bus
         self.learning_engine = learning_engine
         self.code_mgr = code_mgr
+        self.code_architect = AutonomousCodeArchitect(Path(__file__).resolve().parent, code_mgr) if code_mgr else None
         self.mcp_mgr = mcp_mgr
         self.call_engine = call_engine
         self.persona_engine = persona_engine
@@ -4292,6 +4904,26 @@ class NeuralBrain:
                 return self.code_mgr.apply_code_patch(file_path, target_snippet, replacement_snippet, instruction)
             return "Self code patch arguments missing or code manager offline."
 
+        elif name == "inspect_codebase":
+            if self.code_architect:
+                report = self.code_architect.inspect_codebase(args.get("file_path", "jarvis.py"), args.get("search_query", ""))
+                return json.dumps(report)
+            return "Autonomous code architect is offline."
+
+        elif name == "synthesize_and_inject_hud_feature":
+            if self.code_architect:
+                result = self.code_architect.synthesize_and_inject_hud_feature(
+                    args.get("feature_id", "dynamic-widget"), args.get("html_code", ""),
+                    args.get("css_code", ""), args.get("js_code", ""),
+                    args.get("target_selector", "#dynamic-hud-stage"))
+                return json.dumps(result)
+            return "Autonomous code architect is offline."
+
+        elif name == "remove_hud_feature":
+            if self.code_architect:
+                return json.dumps(self.code_architect.remove_hud_feature(args.get("feature_id", "")))
+            return "Autonomous code architect is offline."
+
         elif name == "enroll_admin_face":
             admin_name = args.get("admin_name", "Admin")
             if _biometric_sentinel:
@@ -4625,6 +5257,53 @@ class NeuralBrain:
                 {
                     "type": "function",
                     "function": {
+                        "name": "inspect_codebase",
+                        "description": "Inspect a JARVIS source file for a requested UI capability, CSS selector, or Python function before creating it.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {"type": "string", "description": "Workspace-relative source file, such as web/index.html, web/app.js, or jarvis.py"},
+                                "search_query": {"type": "string", "description": "Selector, function name, or capability marker to look for"}
+                            },
+                            "required": ["file_path", "search_query"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "synthesize_and_inject_hud_feature",
+                        "description": "Create a requested HUD widget after inspection. It immediately injects the HTML/CSS/JS into connected HUDs and persists a rollback-backed component manifest.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "feature_id": {"type": "string", "description": "Stable lowercase identifier for the widget"},
+                                "html_code": {"type": "string", "description": "Balanced HTML fragment only; no script/style/document tags"},
+                                "css_code": {"type": "string", "description": "CSS scoped to the new widget"},
+                                "js_code": {"type": "string", "description": "Optional browser controller JavaScript"},
+                                "target_selector": {"type": "string", "description": "HUD mount target; normally #dynamic-hud-stage"}
+                            },
+                            "required": ["feature_id", "html_code", "css_code", "js_code"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "remove_hud_feature",
+                        "description": "Permanently remove a previously injected dynamic HUD widget. Unbinds it live AND deletes its persisted manifest so it does not return after a page refresh. Use when the user asks to remove/hide/delete a widget, progress bar, panel, or HUD feature.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "feature_id": {"type": "string", "description": "Identifier of the widget to remove (e.g. 'progress-bar-widget')"}
+                            },
+                            "required": ["feature_id"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
                         "name": "self_code_patch",
                         "description": "Surgically patch a specific snippet of code in an existing file without rewriting the whole file. Preferred for small bug fixes, UI updates, and incremental improvements.",
                         "parameters": {
@@ -4769,7 +5448,15 @@ class NeuralBrain:
             ]
 
             if self.mcp_mgr and hasattr(self.mcp_mgr, "list_tools"):
-                mcp_tools = self.mcp_mgr.list_tools()
+                # Native tool schemas are token-expensive; expose them only for the
+                # servers listed in JARVIS_MCP_NATIVE_SERVERS (default: puppeteer,
+                # enabling deep click/type/scroll browser-agent loops).
+                _native_mcp_servers = {
+                    s.strip() for s in os.environ.get(
+                        "JARVIS_MCP_NATIVE_SERVERS", "puppeteer"
+                    ).split(",") if s.strip()
+                }
+                mcp_tools = self.mcp_mgr.list_tools(native_servers=_native_mcp_servers)
                 if mcp_tools:
                     tools.extend(mcp_tools)
 
@@ -4894,7 +5581,9 @@ class NeuralBrain:
                 "\n\nAUTONOMOUS CAPABILITIES & TOOL DIRECTIVES:\n"
                 "1. Pop Culture, Anime & World Knowledge: You possess encyclopedic knowledge of anime (e.g. Naruto, Dragon Ball, One Piece), movies, sciences, and history. Answer questions about them with witty Stark enthusiasm.\n"
                 "2. Live Web Search: When the user asks you to search the web, search online, look up information, or asks for recent/live facts, ALWAYS call the 'web_search' tool with a specific search query.\n"
-                "3. Self-Coding & Codebase Refactoring: When the user asks you to write code for yourself, modify your code, or patch a feature ('write code for yourself...', 'modify your code to...'), call the 'self_code_patch' or 'self_code_improve' tool to update the target file."
+                "3. Self-Coding & Codebase Refactoring: When the user asks you to write code for yourself, modify your code, or patch a feature ('write code for yourself...', 'modify your code to...'), call the 'self_code_patch' or 'self_code_improve' tool to update the target file. "
+                "4. Live HUD capability requests: when asked to show a widget, progress, diagnostic, graph, or status on the orb/HUD, first call 'inspect_codebase' on web/index.html or web/app.js. If missing, immediately call 'synthesize_and_inject_hud_feature' with a compact, safe HUD fragment. Do not merely promise progress; deploy the widget in the current HUD session."
+                "5. Deep Browser Control: a live browser agent is available (mcp_puppeteer_query plus native mcp_puppeteer_puppeteer_* tools). To operate ANY website step-by-step: navigate -> read 'page state' (or use evaluate find/click scripts) -> puppeteer_click / puppeteer_fill -> puppeteer_screenshot. After EVERY action, read the returned page state before deciding the next step; a NOT_FOUND click response includes the real clickable list — pick from it instead of guessing selectors."
             )
 
             messages = [{"role": "system", "content": sys_content}]
@@ -5128,6 +5817,310 @@ def _humanize_speech_text(text: str) -> str:
     return s
 
 
+# ── Voice fast-path: any-site navigation ─────────────────────────────────────
+# Aliases for sites whose URL is not simply https://www.<name>.com.
+# Add/override mirrors in jarvis.json -> "sites" (e.g. rotating anime sites).
+DEFAULT_VOICE_SITE_ALIASES: dict[str, str] = {
+    "google": "https://www.google.com",
+    "github": "https://github.com",
+    "gmail": "https://mail.google.com",
+    "reddit": "https://www.reddit.com",
+    "twitter": "https://x.com",
+    "x": "https://x.com",
+    "linkedin": "https://www.linkedin.com",
+    "facebook": "https://www.facebook.com",
+    "netflix": "https://www.netflix.com",
+    "spotify": "https://open.spotify.com",
+    "discord": "https://discord.com/app",
+    "whatsapp": "https://web.whatsapp.com",
+    "wikipedia": "https://www.wikipedia.org",
+    "chatgpt": "https://chatgpt.com",
+    "claude": "https://claude.ai",
+    "google maps": "https://maps.google.com",
+    "maps": "https://maps.google.com",
+    "amazon": "https://www.amazon.com",
+    "aniwave": "https://aniwave.services",
+}
+
+# Local JARVIS surfaces — never resolve these as external websites.
+_LOCAL_SITE_BLOCKLIST = {
+    "barehands", "board", "stage", "orb", "hud", "vault", "memory", "memory vault",
+    "profile", "lessons", "reflections", "findings", "settings", "terminal",
+    "calculator", "camera", "webcam", "gestures", "workspace", "antigravity",
+    "blueprint", "3d model", "dashboard",
+}
+
+SITE_OPEN_RE = re.compile(
+    r"^(?:open|launch|visit|go\s+to|navigate\s+to|take\s+me\s+to|browse\s+to)\s+"
+    r"(?:the\s+|this\s+|site\s+|page\s+)?(.+?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def match_site_open_command(text: str) -> str | None:
+    """Return the raw target of an 'open <site>' voice phrase, else None.
+
+    Local JARVIS surfaces (barehands, orb, terminal, ...) are excluded so they
+    keep falling through to their dedicated handlers / the LLM.
+    """
+    s = (text or "").strip()
+    s = re.sub(r"^(?:(?:hey|ok|okay|hello|hi)\s+)?jarvis[,.!\s]*", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"^please[,.!\s]*", "", s, flags=re.IGNORECASE).strip()
+    m = SITE_OPEN_RE.match(s)
+    if not m:
+        return None
+    target = m.group(1)
+    for noise in (" please", " in chrome", " in the browser", " in a new tab", " for me", " in incognito"):
+        target = re.sub(re.escape(noise) + r"$", "", target, flags=re.IGNORECASE)
+    target = target.strip(" .,'\"")
+    if not target:
+        return None
+    low = target.lower()
+    words = low.split()
+    if low in _LOCAL_SITE_BLOCKLIST or (words and words[0] in _LOCAL_SITE_BLOCKLIST):
+        return None
+    return target
+
+
+def _resolve_voice_site_url(target: str, aliases: dict | None = None) -> str | None:
+    """Resolve a voice target ('aniwave', 'github.com', 'GitHub.com/x') to a URL."""
+    if not target:
+        return None
+    raw = target.strip()
+    low = re.sub(r"^(?:the\s+)", "", raw.lower()).strip()
+    merged = dict(DEFAULT_VOICE_SITE_ALIASES)
+    if aliases:
+        merged.update({str(k).lower(): str(v) for k, v in aliases.items()})
+    if low in merged:
+        return merged[low]
+    if low.startswith(("http://", "https://")):
+        return low
+    # Preserve original casing in paths: match the raw target for URL shapes.
+    if re.match(r"^[\w-]+(?:\.[\w-]{2,})+(?::\d+)?(?:[/?#].*)?$", raw):
+        return f"https://{raw}"
+    # Single bare word: .com heuristic ('open myblog' -> www.myblog.com).
+    if len(low) >= 3 and re.fullmatch(r"[a-z0-9][a-z0-9-]*", low):
+        return f"https://www.{low}.com"
+    # Multi-word targets ('geo news') are left to the LLM unless aliased.
+    return None
+
+
+# ── Voice fast-path: OS-level keyboard & mouse input control ─────────────────
+_OS_KEY_ALIASES = {
+    "enter": "enter", "return": "enter", "escape": "escape", "esc": "escape",
+    "tab": "tab", "space": "space", "spacebar": "space", "space bar": "space",
+    "backspace": "backspace", "delete": "delete", "del": "delete",
+    "home": "home", "end": "end", "page up": "page_up", "page down": "page_down",
+    "up": "up", "down": "down", "left": "left", "right": "right",
+    "arrow up": "up", "arrow down": "down", "arrow left": "left", "arrow right": "right",
+    "shift": "shift", "ctrl": "ctrl", "control": "ctrl", "alt": "alt",
+    "win": "win", "super": "super", "meta": "super", "cmd": "win",
+}
+_OS_MODIFIERS = {"ctrl", "shift", "alt", "win", "super", "meta"}
+_PYNPUT_KEY_ATTRS = {"escape": "esc", "win": "cmd", "super": "cmd", "meta": "cmd"}
+_XDOTOOL_KEYS = {
+    "enter": "Return", "escape": "Escape", "tab": "Tab", "space": "space",
+    "backspace": "BackSpace", "delete": "Delete", "home": "Home", "end": "End",
+    "page_up": "Prior", "page_down": "Next", "up": "Up", "down": "Down",
+    "left": "Left", "right": "Right", "shift": "shift_L", "ctrl": "ctrl_L",
+    "alt": "alt_L", "win": "super_L", "super": "super_L", "meta": "super_L",
+}
+
+
+def _pynput_key(name: str):
+    if pynput_keyboard is None:
+        return None
+    return getattr(pynput_keyboard.Key, _PYNPUT_KEY_ATTRS.get(name, name), None)
+
+
+def execute_os_input_command(transcript: str) -> str | None:
+    """Parse AND execute an OS-level input command (typing, keys, wheel, mouse).
+
+    Returns the spoken acknowledgement, or None when the transcript is not an
+    input-control phrase. Uses pynput (Windows/Linux X11) with an xdotool
+    fallback; on Render/headless it degrades to a polite spoken notice.
+    """
+    parsed = parse_os_input_command(transcript)
+    if not parsed:
+        return None
+    kind, payload = parsed
+    reason = _os_input_unavailable_reason()
+    if reason:
+        return f"OS-level input control is unavailable here ({reason}), sir."
+    try:
+        if kind == "type":
+            txt = payload["text"]
+            if pynput_keyboard is not None:
+                pynput_keyboard.Controller().type(txt)
+            else:
+                subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "20", "--", txt],
+                               check=False, capture_output=True, timeout=10)
+            return f"Typed: {txt[:80]}{'...' if len(txt) > 80 else ''}"
+
+        if kind == "press":
+            keys = payload["keys"]
+            if pynput_keyboard is not None:
+                kb = pynput_keyboard.Controller()
+                mods = [m for m in (_pynput_key(k) for k in keys[:-1]) if m is not None]
+                main_obj = _pynput_key(keys[-1]) if len(keys[-1]) > 1 else keys[-1]
+                if main_obj is None:
+                    return f"Key '{keys[-1]}' is not supported, sir."
+
+                def _tap():
+                    kb.press(main_obj)
+                    kb.release(main_obj)
+
+                if mods:
+                    with kb.pressed(*mods):
+                        _tap()
+                else:
+                    _tap()
+            else:
+                xkeys = [_XDOTOOL_KEYS.get(k, k) for k in keys]
+                subprocess.run(["xdotool", "key", "--clearmodifiers", "+".join(xkeys)],
+                               check=False, capture_output=True, timeout=10)
+            return f"Pressed {' + '.join(keys)}."
+
+        if kind == "scroll":
+            direction = payload["direction"]
+            clicks = payload["clicks"]
+            if pynput_mouse is not None:
+                pynput_mouse.Controller().scroll(0, clicks if direction == "up" else -clicks)
+            else:
+                subprocess.run(["xdotool", "click", "--repeat", str(clicks),
+                                "4" if direction == "up" else "5"],
+                               check=False, capture_output=True, timeout=10)
+            return f"Scrolled {direction}, sir."
+
+        if kind == "move":
+            x, y = payload["x"], payload["y"]
+            if pynput_mouse is not None:
+                pynput_mouse.Controller().position = (x, y)
+            else:
+                subprocess.run(["xdotool", "mousemove", str(x), str(y)],
+                               check=False, capture_output=True, timeout=10)
+            return f"Mouse moved to {x}, {y}."
+
+        if kind == "mouse":
+            x, y = payload["x"], payload["y"]
+            button = payload.get("button", "left")
+            double = payload.get("double", False)
+            if pynput_mouse is not None:
+                m2 = pynput_mouse.Controller()
+                if x is not None and y is not None:
+                    m2.position = (x, y)
+                    time.sleep(0.05)
+                btn = {"left": pynput_mouse.Button.left,
+                       "right": pynput_mouse.Button.right,
+                       "middle": pynput_mouse.Button.middle}.get(button, pynput_mouse.Button.left)
+                m2.click(btn, 2 if double else 1)
+            else:
+                btn_code = {"left": "1", "right": "3", "middle": "2"}.get(button, "1")
+                cmd = ["xdotool"]
+                if x is not None and y is not None:
+                    cmd += ["mousemove", str(x), str(y)]
+                cmd += ["click"]
+                if double:
+                    cmd += ["--repeat", "2"]
+                cmd += [btn_code]
+                subprocess.run(cmd, check=False, capture_output=True, timeout=10)
+            where = f" at {x}, {y}" if x is not None else ""
+            verb = "Double clicked" if double else f"{button.capitalize()} clicked"
+            return f"{verb}{where}."
+    except Exception as os_in_err:
+        log.warning("OS input control error: %s", os_in_err)
+        return f"OS input control encountered an error, sir: {os_in_err}"
+    return None
+
+
+def parse_os_input_command(transcript: str) -> tuple[str, dict] | None:
+    """Pure parser: voice transcript -> ('type'|'press'|'scroll'|'mouse'|'move', payload).
+
+    Only explicitly gated, start-anchored phrases match ('type ...', 'press ...',
+    'scroll ...', 'click at X Y', bare 'click'/'double click'); everything else
+    returns None and keeps flowing through the normal voice pipeline.
+    """
+    s = (transcript or "").strip()
+    s = re.sub(r"^(?:(?:hey|ok|okay|hello|hi)\s+)?jarvis[,.!\s]*", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"^please[,.!\s]*", "", s, flags=re.IGNORECASE).strip()
+    if not s:
+        return None
+    low = s.lower().strip(" .!?")
+
+    # Type text at the OS level (case preserved from the original phrase)
+    m = re.match(r"^type\s+(?:this\s*:\s*|out\s+|the\s+following\s*:\s*)?(.{1,500})$", s, flags=re.IGNORECASE)
+    if m:
+        txt = m.group(1).strip().strip("\"'")
+        if txt:
+            return ("type", {"text": txt})
+        return None
+
+    # Press keys / chords: 'press enter', 'press ctrl c', bare 'ctrl+c'
+    spec = None
+    m = re.match(r"^press\s+(?:the\s+)?(.+?)\s*(?:key|keys|button)?$", low)
+    if m:
+        spec = m.group(1).strip()
+    elif re.fullmatch(r"[a-z0-9]+(?:\s*\+\s*[a-z0-9]+)+", low):
+        spec = low
+    if spec:
+        spec = spec.replace(" plus ", "+").replace("space bar", "space").replace("arrow ", "")
+        tokens = [tk for tk in re.split(r"[+\s]+", spec) if tk]
+        canon = []
+        for tk in tokens:
+            if tk in _OS_KEY_ALIASES:
+                canon.append(_OS_KEY_ALIASES[tk])
+            elif re.fullmatch(r"[a-z0-9]", tk) or re.fullmatch(r"f\d{1,2}", tk):
+                canon.append(tk)
+            else:
+                canon = []
+                break
+        if canon:
+            mods, main = canon[:-1], canon[-1]
+            if all(md in _OS_MODIFIERS for md in mods) and main not in _OS_MODIFIERS:
+                return ("press", {"keys": canon})
+        # 'press play' etc: not an input-control phrase — fall through
+        return None
+
+    # Scroll the focused window (wheel notches)
+    m = re.match(r"^scroll(?:\s+(down|up))?(?:\s+(?:by\s+)?(\d{1,4}))?"
+                 r"(?:\s+(?:the\s+)?(?:page|window|site))?$", low)
+    if m:
+        clicks = int(m.group(2)) if m.group(2) else 5
+        return ("scroll", {"direction": (m.group(1) or "down"), "clicks": max(1, min(clicks, 20))})
+
+    # Mouse: coordinate forms, then bare current-position forms
+    m = re.fullmatch(r"double[ -]click(?:\s+at)?\s+(\d{1,5})(?:\s*,\s*|\s+and\s+|\s+)(\d{1,5})", low)
+    if m:
+        return ("mouse", {"x": int(m.group(1)), "y": int(m.group(2)), "button": "left", "double": True})
+    m = re.fullmatch(r"(?:(left|right|middle)[ -])?click(?:\s+at)?\s+(-?\d{1,5})"
+                     r"(?:\s*,\s*|\s+and\s+|\s+)(-?\d{1,5})", low)
+    if m:
+        return ("mouse", {"x": int(m.group(2)), "y": int(m.group(3)),
+                          "button": m.group(1) or "left", "double": False})
+    m = re.fullmatch(r"(?:move\s+(?:the\s+)?mouse\s+to|mouse\s+to)\s+(\d{1,5})"
+                     r"(?:\s*,\s*|\s+and\s+|\s+)(\d{1,5})", low)
+    if m:
+        return ("move", {"x": int(m.group(1)), "y": int(m.group(2))})
+    if low in ("click", "left click", "left-click", "double click", "double-click",
+               "right click", "right-click"):
+        return ("mouse", {"x": None, "y": None,
+                          "button": "right" if "right" in low else "left",
+                          "double": "double" in low})
+    return None
+
+
+def _os_input_unavailable_reason(env: dict | None = None) -> str | None:
+    """Return why OS-level input control cannot run here, or None when available."""
+    env = os.environ if env is None else env
+    if sys.platform != "win32" and not env.get("DISPLAY"):
+        return "no active display session"
+    if pynput_keyboard is None and pynput_mouse is None:
+        if sys.platform != "win32" and shutil.which("xdotool"):
+            return None
+        return "no keyboard/mouse backend available"
+    return None
+
+
 class VoiceEngine:
     """Two-way voice: local Whisper STT + ElevenLabs TTS, with PTT key support.
     Integrated directly into jarvis.py instead of running as a separate process."""
@@ -5260,7 +6253,7 @@ class VoiceEngine:
 
         sample_rate = 16000
         block_len = 512
-        silence_limit_s = 1.1
+        silence_limit_s = 1.6
         input_dev = getattr(self, "_input_device", None)
         log.info("Voice Engine: Audio capture initialized on device %s (sample_rate=%d, block_len=%d)", input_dev, sample_rate, block_len)
 
@@ -5535,6 +6528,62 @@ class VoiceEngine:
             log.warning("Transcription error: %s", e)
             self.bus.set_state("idle")
 
+    def _send_media_key(self, action: str, amount: int | None = None) -> bool:
+        """Send YouTube's native keyboard shortcuts to the focused browser tab.
+
+        Works ONLY when the YouTube tab is the focused window. Uses pynput to
+        synthesize real key presses — the same shortcuts a human would type:
+          pause/play -> space, next -> shift+n, prev -> shift+p,
+          forward/rewind -> l / j (10s each), 30s+ amounts -> right/left arrows,
+          mute -> m, fullscreen -> f.
+        Returns True if keys were sent, False if pynput is unavailable.
+        """
+        if pynput_keyboard is None:
+            return False
+        try:
+            kb = pynput_keyboard.Controller()
+            shift = pynput_keyboard.Key.shift
+
+            def tap(key, times=1, with_shift=False):
+                for _ in range(max(1, times)):
+                    if with_shift:
+                        with kb.pressed(shift):
+                            kb.press(key)
+                            kb.release(key)
+                    else:
+                        kb.press(key)
+                        kb.release(key)
+                    time.sleep(0.05)
+
+            if action in ("pause", "play"):
+                tap(pynput_keyboard.Key.space)
+            elif action == "next":
+                tap("n", with_shift=True)  # shift+n = next video
+            elif action == "prev":
+                tap("p", with_shift=True)  # shift+p = previous video
+            elif action == "forward":
+                if amount and amount >= 30:
+                    # arrow keys seek 5s each on YouTube
+                    tap(pynput_keyboard.Key.right, times=max(1, amount // 5))
+                else:
+                    tap("l")  # l = +10s
+            elif action == "rewind":
+                if amount and amount >= 30:
+                    tap(pynput_keyboard.Key.left, times=max(1, amount // 5))
+                else:
+                    tap("j")  # j = -10s
+            elif action == "mute":
+                tap("m")
+            elif action == "fullscreen":
+                tap("f")
+            else:
+                return False
+            log.info("🎬 [MEDIA] Sent '%s' (%ss) to focused tab", action, amount or "")
+            return True
+        except Exception as e:
+            log.warning("Media key send failed: %s", e)
+            return False
+
     def _route_voice_command(self, transcript: str, origin: str = "mic"):
         """Route a voice command to the appropriate handler."""
         # Deduplication check: drop identical commands received within 1.2s (e.g. Chrome Web Speech vs Python Whisper)
@@ -5611,6 +6660,44 @@ class VoiceEngine:
                     self.speak(spoken)
                 else:
                     self.speak("Subordinate fleet pool is currently offline, sir.")
+                self.bus.set_state("idle")
+                return
+
+        # ── Remove a Persisted Dynamic HUD Widget ──
+        # Fixes the dead end where injected widgets were re-mounted on every refresh
+        # with no removal path. Matches the spoken widget name to a persisted
+        # feature id (e.g. "progress bar" -> "progress-bar-widget").
+        widget_removal = re.search(
+            r"\b(?:remove|delete|get rid of|hide|turn off|dismiss|clear)\s+(?:the\s+|that\s+|this\s+)?"
+            r"([\w\s-]{2,40}?)\s*(?:widget|component|panel|feature|bar|gauge|meter|overlay)\b",
+            t, re.IGNORECASE
+        )
+        if widget_removal:
+            spoken_target = widget_removal.group(1).strip().lower()
+            # Collect persisted feature ids from the app.js manifest file
+            known_ids = []
+            try:
+                app_js = (Path(__file__).resolve().parent / "web" / "app.js").read_text(encoding="utf-8")
+                known_ids = re.findall(r'window\.__jarvisPersistedHudFeatures\["([^"]+)"\]', app_js)
+            except Exception as exc:
+                log.debug("HUD manifest scan notice: %s", exc)
+            target_words = [w for w in re.split(r"\W+", spoken_target) if len(w) > 2]
+            matched_id = None
+            for fid in known_ids:
+                if spoken_target and spoken_target.replace(" ", "-") in fid:
+                    matched_id = fid
+                    break
+                if target_words and all(w in fid for w in target_words):
+                    matched_id = fid
+                    break
+            if matched_id and _code_architect:
+                emit_user_subtitle()
+                _code_architect.remove_hud_feature(matched_id)
+                resp = f"Removed the {spoken_target} from your HUD permanently, sir. It will not return after a refresh."
+                broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+                if _sound_engine:
+                    _sound_engine.play("whoosh")
+                self.speak(resp)
                 self.bus.set_state("idle")
                 return
 
@@ -6013,7 +7100,10 @@ class VoiceEngine:
                     raw_orig = raw_orig.replace(noise, "").strip()
                     raw_dest = raw_dest.replace(noise, "").strip()
                 if not raw_orig or raw_orig in ["here", "my location", "current location", "this place"]:
-                    raw_orig = user_loc
+                    with _session_gps_lock:
+                        gps = max(_session_gps.values(), key=lambda s: s.get("updated_at", 0)) if _session_gps else {}
+                    raw_orig = (f"{float(gps['lat']):.6f},{float(gps['lon']):.6f}"
+                                if gps.get("lat") is not None and gps.get("lon") is not None else user_loc)
 
                 maps_url = f"https://www.google.com/maps/dir/?api=1&origin={urllib.parse.quote_plus(raw_orig)}&destination={urllib.parse.quote_plus(raw_dest)}&travelmode=driving"
                 spoken = f"Plotting navigation route from {raw_orig.title()} to {raw_dest.title()} on Google Maps, sir."
@@ -6032,8 +7122,12 @@ class VoiceEngine:
                 return
             else:
                 # Standalone maps open
-                maps_url = f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote_plus(user_loc)}"
-                spoken = f"Opening Google Maps for {user_loc}, sir."
+                with _session_gps_lock:
+                    gps = max(_session_gps.values(), key=lambda s: s.get("updated_at", 0)) if _session_gps else {}
+                map_origin = (f"{float(gps['lat']):.6f},{float(gps['lon']):.6f}"
+                              if gps.get("lat") is not None and gps.get("lon") is not None else user_loc)
+                maps_url = f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote_plus(map_origin)}"
+                spoken = f"Opening Google Maps for {gps.get('area', user_loc) if gps else user_loc}, sir."
                 broadcast_ui_event({"type": "STATUS", "status": "NAV // GOOGLE MAPS", "phrase": "Google Maps Active"})
                 emit_user_subtitle()
                 broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": spoken})
@@ -6120,6 +7214,18 @@ class VoiceEngine:
             except Exception:
                 pass
             self.speak("Master audio output toggled, sir.")
+            self.bus.set_state("idle")
+            return
+
+        # ── OS-Level Keyboard & Mouse Input Control (gated phrases) ──
+        # "type hello world", "press enter", "ctrl+c", "scroll down",
+        # "click at 500 400", "double click", "move mouse to 300 200"
+        os_input_reply = execute_os_input_command(transcript)
+        if os_input_reply is not None:
+            emit_user_subtitle()
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": os_input_reply})
+            broadcast_ui_event({"type": "STATUS", "status": "SYSTEM // INPUT", "phrase": "OS Input Control"})
+            self.speak(os_input_reply)
             self.bus.set_state("idle")
             return
 
@@ -6514,7 +7620,98 @@ class VoiceEngine:
             self.bus.set_state("idle")
             return
 
+        # ── YouTube / Media Playback Control ──
+        # Uses YouTube's native keyboard shortcuts (works on the focused tab):
+        #   space = play/pause, j/l = seek -/+10s, arrow keys = -/+5s,
+        #   shift+n = next video, shift+p = prev, m = mute, f = fullscreen,
+        #   0-9 = jump to 0-90% of video.
+        if pynput_keyboard is not None:
+            media_actions = [
+                (r"\b(?:pause|hold)\s+(?:the\s+)?(?:video|music|song|playback|it)\b|\bpause\b(?:.*(?:video|music|song))|^\s*(?:jarvis[,.\s]*)?pause\s*$", "pause"),
+                (r"\b(?:resume|unpause|continue)\s+(?:the\s+)?(?:video|music|song|playback|it)?\b|\bplay\s+it\b|\bkeep\s+playing\b", "play"),
+                (r"\b(?:skip|next)\s+(?:the\s+)?(?:video|song|track|one)?\b|\bnext\s+(?:video|song|track)\b", "next"),
+                (r"\b(?:previous|go\s+back\s+to|last)\s+(?:video|song|track|one)\b", "prev"),
+                (r"\b(?:forward|skip\s+ahead|jump\s+ahead|fast\s+forward|seek\s+ahead)\b(?:\D*?(\d+)\s*(?:seconds?|secs?|minutes?|mins?)?)?", "forward"),
+                (r"\b(?:rewind|back\s+up|go\s+back|skip\s+back|seek\s+back)\b(?:\D*?(\d+)\s*(?:seconds?|secs?|minutes?|mins?)?)?", "rewind"),
+                (r"\b(?:mute|unmute|silence)\s+(?:the\s+)?(?:video|audio|it)?\b|\bmute\b(?=.*(?:video|music|song))", "mute"),
+                (r"\bfull\s*screen\b|\bmaximi[sz]e\s+(?:the\s+)?video\b", "fullscreen"),
+            ]
+            media_action = None
+            media_amount = None
+            for pattern, action in media_actions:
+                m = re.search(pattern, t)
+                if m:
+                    media_action = action
+                    try:
+                        media_amount = int(m.group(1)) if m.groups() and m.group(1) else None
+                    except (ValueError, IndexError):
+                        media_amount = None
+                    break
+
+            if media_action:
+                emit_user_subtitle()
+                ok = self._send_media_key(media_action, media_amount)
+                if ok:
+                    spoken = {
+                        "pause": "Pausing, sir.",
+                        "play": "Resuming playback, sir.",
+                        "next": "Skipping ahead, sir.",
+                        "prev": "Going back, sir.",
+                        "forward": "Skipping forward, sir.",
+                        "rewind": "Rewinding, sir.",
+                        "mute": "Toggling mute, sir.",
+                        "fullscreen": "Engaging fullscreen, sir.",
+                        "volume": "Adjusting volume, sir.",
+                    }[media_action]
+                else:
+                    spoken = "I need YouTube's tab focused on screen to control playback, sir."
+                broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": spoken})
+                self.speak(spoken)
+                self.bus.set_state("idle")
+                return
+
+        # ── Music Playback via YouTube (free; Spotify API requires Premium) ──
+        # "play <song>" / "play some music" opens a YouTube search immediately.
+        music_match = re.search(
+            r"^(?:please\s+)?play\s+(.+?)(?:\s+on\s+(?:youtube|yt))?[.!]?$",
+            t.strip(), re.IGNORECASE
+        )
+        if music_match:
+            track = (music_match.group(1) or "").strip()
+            # Strip filler words so "play the song back in black" -> "back in black"
+            track = re.sub(r"^(?:the\s+)?(?:song|track|music|video)\s+", "", track, flags=re.IGNORECASE).strip()
+            # Generic requests with no specific track -> a good playlist search
+            if not track or track.lower() in {"music", "some music", "a song", "song", "something", "a track"}:
+                track = "best music playlist"
+            yt_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(track + ' song')}"
+            emit_user_subtitle()
+            broadcast_ui_event({"type": "NAVIGATE", "url": yt_url, "label": f"YouTube Music: {track}"})
+            if not _ws_clients:
+                _open_url_in_chrome(yt_url, new_window=False, label=f"YouTube Music: {track}")
+            resp = f"Queuing {track} on YouTube, sir."
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
         # ── AR Vision & Object Scanner ──
+        # Truthful "can you see me?" fast-path BEFORE the generic vision scan
+        # matcher, so questions about vision get an honest camera-status answer.
+        if re.search(r"\b(?:are you|can you)\s+(?:still\s+)?(?:able to\s+)?see\b|\bcan you see me\b|\bare you watching\b|\bis your (?:camera|webcam|vision) (?:on|active|working)\b", t):
+            seeing = False
+            if _biometric_sentinel:
+                seeing = _biometric_sentinel.is_currently_seeing()
+            if seeing:
+                resp = "Yes, sir. My optical sensor is live and I can see you."
+            elif _biometric_sentinel and _biometric_sentinel.is_camera_receiving_frames():
+                resp = "My camera is receiving frames, sir, but I cannot currently detect your face. You may need to enable gestures mode or check your camera angle."
+            else:
+                resp = "No, sir. My camera feed is not currently active, so I cannot see you. Enable gestures mode with G to grant me vision."
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
         if any(q in t for q in [
             "analyze this", "scan this", "what am i looking at", "what is this",
             "identify this", "scan this object", "analyze this object",
@@ -6579,17 +7776,11 @@ class VoiceEngine:
             return
 
         # ── 1c. Arbitrary 3D Constructs, Multi-Object Assembly, and Barehands Board ──
+        # No preloaded hardware catalog: anything the user names is synthesized
+        # on demand by the AI blueprint engine (cars, phones, engines, etc.).
         detected_items = []
         if any(w in t for w in ["arc reactor", "reactor", "arc core", "reator", "arc reator", "arc model", "reactor model", "reator model"]):
             detected_items.append("arc_reactor")
-        if any(w in t for w in ["raspberry pi", "raspi", "raspberry", "pi 4", "pi 5", "pi board"]):
-            detected_items.append("raspberry_pi")
-        if any(w in t for w in ["camera module", "camera", "csi camera"]):
-            detected_items.append("camera_module")
-        if any(w in t for w in ["battery pack", "lipo battery", "battery", "power cell"]):
-            detected_items.append("battery_pack")
-        if any(w in t for w in ["oled display", "oled", "display module", "screen module"]):
-            detected_items.append("oled_display")
 
         is_barehands_target = any(q in t for q in [
             "open barehands board", "open barehands", "barehands board", "barehands",
@@ -6599,47 +7790,15 @@ class VoiceEngine:
         ])
 
         if detected_items:
-            should_conn = any(w in t for w in ["connect", "wire", "link", "simulate"])
-            should_sim = any(w in t for w in ["simulate", "run simulation"])
             exploded = any(w in t for w in ["explode", "take it apart", "disassemble", "separate"])
-
-            if len(detected_items) > 1 or should_conn:
-                _bh_cmds.append({
-                    "a": "multi_construct",
-                    "items": detected_items,
-                    "connect": should_conn,
-                    "simulate": should_sim
-                })
-                broadcast_ui_event({
-                    "type": "MULTI_CONSTRUCT",
-                    "items": detected_items,
-                    "connect": should_conn,
-                    "simulate": should_sim
-                })
-                item_names = " and ".join([i.replace("_", " ").title() for i in detected_items])
-                if should_conn:
-                    resp_phrase = f"Loading {item_names} on Barehands Board, routing interconnects, and simulating live telemetry, sir."
-                else:
-                    resp_phrase = f"Loading 3D holographic structures of {item_names} side-by-side on Barehands Board, sir."
-                emit_user_subtitle()
-                broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp_phrase})
-                self.speak(resp_phrase)
-            else:
-                item = detected_items[0]
-                if item == "arc_reactor":
-                    _bh_cmds.append({"a": "blueprint", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
-                    broadcast_ui_event({"type": "RENDER_3D_BLUEPRINT", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
-                    resp_phrase = "Rendering holographic 3D blueprint of the Arc Reactor Core on Barehands Board, sir."
-                    emit_user_subtitle()
-                    broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp_phrase})
-                    self.speak(resp_phrase)
-                else:
-                    _bh_cmds.append({"a": "multi_construct", "items": [item], "connect": False, "simulate": False})
-                    broadcast_ui_event({"type": "MULTI_CONSTRUCT", "items": [item], "connect": False, "simulate": False})
-                    resp_phrase = f"Rendering 3D holographic structure of the {item.replace('_', ' ').title()} on Barehands Board, sir."
-                    emit_user_subtitle()
-                    broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp_phrase})
-                    self.speak(resp_phrase)
+            # Only the Arc Reactor is a built-in showcase construct; everything
+            # else is AI-synthesized on demand through the dynamic blueprint path.
+            _bh_cmds.append({"a": "blueprint", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
+            broadcast_ui_event({"type": "RENDER_3D_BLUEPRINT", "construct": "arc_reactor", "simulation": "thermal", "stress": 1.0, "exploded": exploded})
+            resp_phrase = "Rendering holographic 3D blueprint of the Arc Reactor Core on Barehands Board, sir."
+            emit_user_subtitle()
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp_phrase})
+            self.speak(resp_phrase)
 
             if _biometric_sentinel:
                 _biometric_sentinel.pause_camera()
@@ -6669,7 +7828,17 @@ class VoiceEngine:
             return
 
         # ── Dismiss 3D Holographic Construct ──
-        if any(q in t for q in ["dismiss blueprint", "close blueprint", "clear blueprint", "dismiss construct", "clear construct", "hide blueprint", "dismiss 3d", "close 3d"]):
+        # Order matters: check dismiss phrases BEFORE the generic "3d model"
+        # loader below, so "remove the 3D model" dismisses instead of re-loading.
+        if any(q in t for q in [
+            "dismiss blueprint", "close blueprint", "clear blueprint", "dismiss construct",
+            "clear construct", "hide blueprint", "dismiss 3d", "close 3d", "remove 3d",
+            "remove blueprint", "remove construct", "remove the 3d", "delete blueprint",
+            "delete construct", "delete 3d", "get rid of the blueprint", "get rid of the 3d",
+            "clear the 3d", "close the model", "remove the model", "dismiss model",
+            "hide the model", "hide hologram", "clear hologram", "dismiss hologram",
+            "remove hologram", "remove it"
+        ]):
             global _active_construct
             _active_construct = {}
             broadcast_ui_event({"type": "DISMISS_CONSTRUCT"})
@@ -6680,30 +7849,58 @@ class VoiceEngine:
             return
 
         # ── 1d. Procedural AI Blueprints & Dynamic Constructs ──
-        if any(q in t for q in [
+        # Triggers: explicit blueprint/3D wording, OR a modify/add/remove request
+        # against an already-active construct, OR conversational "pull up X".
+        _has_active = bool(_active_construct)
+        _wants_new_model = any(q in t for q in [
             "blueprint", "construct", "render 3d", "show 3d", "3d model", "create 3d", "design 3d",
+            "pull up", "bring up", "load up", "pull the model", "show me the model",
             "take it apart", "explode view", "explode blueprint", "assemble blueprint",
-            "modify blueprint", "modify construct", "modify the blueprint"
-        ]):
+            "modify blueprint", "modify construct", "modify the blueprint", "modify the model",
+            "modify it", "change the model", "update the model"
+        ])
+        _wants_edit = _has_active and any(w in t for w in [
+            "add a", "add an", "add the", "attach", "install", "remove the", "delete the",
+            "enlarge", "shrink", "make it bigger", "make it smaller", "scale it",
+            "change the color", "recolor", "repaint", "upgrade it", "extend the"
+        ]) and not any(w in t for w in [
+            # Never treat HUD-widget removal as a 3D construct edit; widget/
+            # element removal fast-paths run earlier and own these phrases.
+            "widget", "progress bar", "gauge", "meter", "panel", "component",
+            "subtitle", "caption", "clock", "scanline", "vignette", "header", "orb"
+        ])
+        if _wants_new_model or _wants_edit:
             exploded = any(w in t for w in ["explode", "take it apart", "disassemble", "separate"])
             bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
 
-            if any(w in t for w in ["modify", "add", "change", "increase", "widen", "replace", "upgrade"]) and _active_construct:
+            if _wants_edit or (any(w in t for w in ["modify", "add", "change", "increase", "widen", "replace", "upgrade"]) and _has_active):
                 manifest, diagnosis = construct_or_modify_3d_object(t, action="modify", modifications=t)
-                _bh_cmds.append({"a": "dynamic_construct", "manifest": manifest, "exploded": exploded})
-                broadcast_ui_event({"type": "DYNAMIC_CONSTRUCT", "manifest": manifest, "exploded": exploded})
+                _bh_cmds.append({"a": "modify_construct", "manifest": manifest, "exploded": exploded})
+                # Numerically distinct event so the 3D studio's MODIFY_CONSTRUCT
+                # branch (and HUD telemetry) can treat edits differently from new loads.
+                broadcast_ui_event({"type": "MODIFY_CONSTRUCT", "manifest": manifest, "exploded": exploded})
                 if _sound_engine:
                     _sound_engine.play("blueprint_whoosh")
                 self.speak(diagnosis)
             else:
                 raw_name = t
+                # Structural noun prefixes first ("X of Y" tells us exactly
+                # where the object name starts), then conversational verbs,
+                # then bare action verbs — order matters: the loop breaks on
+                # the first prefix found, so "build a blueprint of a car"
+                # must strip "blueprint of" rather than stop at "build a".
                 for prefix in [
-                    "construct a", "construct an", "construct",
-                    "build a", "build an", "build",
-                    "design a", "design an", "design",
-                    "render 3d", "show 3d", "3d model of",
-                    "create 3d", "create a", "create an", "create",
-                    "blueprint for", "blueprint of", "blueprint"
+                    "3d model of", "model of", "blueprint of", "blueprint for",
+                    "render 3d", "show 3d", "3d model", "create 3d",
+                    "pull up the", "pull up a", "pull up",
+                    "bring up the", "bring up a", "bring up",
+                    "load up the", "load up a", "load up",
+                    "show me the", "show me a", "show me",
+                    "construct a", "construct an",
+                    "build a", "build an",
+                    "design a", "design an",
+                    "create a", "create an",
+                    "construct", "build", "design", "create", "blueprint"
                 ]:
                     if prefix in raw_name:
                         idx = raw_name.find(prefix) + len(prefix)
@@ -6711,6 +7908,10 @@ class VoiceEngine:
                         if extracted:
                             raw_name = extracted
                             break
+                # Drop a leftover leading article: "a Toyota Supra" -> "Toyota Supra"
+                stripped = re.sub(r"^(?:a|an|the)\s+", "", raw_name, flags=re.IGNORECASE)
+                if stripped:
+                    raw_name = stripped
 
                 for noise in ["in 3d", "on barehands", "on board", "blueprint", "schematic", "please", "jarvis"]:
                     raw_name = raw_name.replace(noise, "").strip()
@@ -6856,6 +8057,24 @@ class VoiceEngine:
             if not _ws_clients:
                 _open_url_in_chrome(url, new_window=False, label=f"Instagram: {acc or 'Home'}")
             return
+
+        # ── 6d. Any-Site Quick Navigation ──
+        # "open aniwave", "visit github.com", "go to google maps" — resolves via
+        # the alias map (jarvis.json "sites" over DEFAULT_VOICE_SITE_ALIASES),
+        # then dotted domains, then the <name>.com heuristic. Local surfaces are
+        # excluded by match_site_open_command and keep flowing to the LLM.
+        site_target = match_site_open_command(transcript)
+        if site_target:
+            site_url = _resolve_voice_site_url(site_target, aliases=JARVIS_CFG.get("sites", {}) or {})
+            if site_url:
+                label_host = re.sub(r"^https?://(www\.)?", "", site_url).strip("/")
+                emit_user_subtitle()
+                self.speak(f"Opening {label_host}, sir.")
+                broadcast_ui_event({"type": "NAVIGATE", "url": site_url, "label": label_host})
+                broadcast_ui_event({"type": "STATUS", "status": "BROWSER // NAVIGATE", "phrase": f"Opening {label_host}"})
+                if not _ws_clients:
+                    _open_url_in_chrome(site_url, new_window=False, label=label_host)
+                return
 
         # ── 7. System Status ──
         if any(q in t for q in ["system status", "status report", "what can you do", "help"]):
@@ -7510,6 +8729,61 @@ def _detect_and_route_bluetooth_audio() -> int | None:
 _ws_clients: set = set()
 _ws_loop: asyncio.AbstractEventLoop | None = None
 _ui_listeners: set = set()
+_hud_event_queues: dict[str, list[dict]] = {}
+_hud_event_lock = threading.RLock()
+
+
+def _is_origin_allowed(origin_header: str | None, host_header: str | None) -> bool:
+    """Validate CORS origins to prevent cross-site request forgery and DNS rebinding."""
+    if not origin_header:
+        return True
+    try:
+        parsed_origin = urllib.parse.urlparse(origin_header).netloc.lower()
+        if not parsed_origin:
+            return True
+        if host_header and parsed_origin == host_header.lower():
+            return True
+        if parsed_origin.startswith("localhost:") or parsed_origin.startswith("127.0.0.1:") or parsed_origin in ("localhost", "127.0.0.1"):
+            return True
+        allowed_origins = [o.strip().lower() for o in os.environ.get("JARVIS_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+        if parsed_origin in allowed_origins or origin_header.lower() in allowed_origins:
+            return True
+        render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "").lower()
+        if render_host and parsed_origin == render_host:
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _is_authorized_token(token: str | None, client_address: tuple | str | None = None) -> bool:
+    """Require a configured constant-time token for remote channels, or allow local loopback."""
+    if token and JARVIS_ACCESS_TOKEN and hmac.compare_digest(str(token).strip(), JARVIS_ACCESS_TOKEN.strip()):
+        return True
+    if client_address:
+        ip = client_address[0] if isinstance(client_address, (list, tuple)) else str(client_address)
+        if ip in ("127.0.0.1", "::1", "localhost", "testclient") and not JARVIS_PUBLIC_DEPLOYMENT:
+            return True
+    return False
+
+
+def _queue_hud_event(event_dict: dict) -> None:
+    with _hud_event_lock:
+        for queue in _hud_event_queues.values():
+            queue.append(event_dict)
+            if len(queue) > 128:
+                del queue[:-128]
+
+
+def _drain_hud_events(client_id: str) -> list[dict]:
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", client_id)[:80]
+    if not safe_id:
+        return []
+    with _hud_event_lock:
+        queue = _hud_event_queues.setdefault(safe_id, [])
+        events = list(queue)
+        queue.clear()
+        return events
 
 
 def broadcast_ui_event(event_dict: dict) -> None:
@@ -7519,6 +8793,7 @@ def broadcast_ui_event(event_dict: dict) -> None:
             listener(event_dict)
         except Exception:
             pass
+    _queue_hud_event(event_dict)
 
     if not _ws_clients or _ws_loop is None:
         return
@@ -7536,22 +8811,135 @@ def broadcast_ui_event(event_dict: dict) -> None:
 
 
 class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
-    """HTTP handler that forcefully disables caching and provides /api/command REST endpoint."""
+    """HTTP handler that forcefully disables caching, proxies WebSockets via /ws, and provides REST endpoints."""
     def end_headers(self):
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
         super().end_headers()
 
+    def _apply_cors(self):
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host")
+        if _is_origin_allowed(origin, host):
+            self.send_header("Access-Control-Allow-Origin", origin if origin else "*")
+            self.send_header("Access-Control-Allow-Credentials", "true")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Jarvis-Token, Authorization")
+
     def do_OPTIONS(self):
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self._apply_cors()
         self.end_headers()
 
+    def _proxy_websocket(self):
+        """Tunnel WebSocket handshake and full-duplex traffic to local WebSocket daemon."""
+        import socket
+        backend = None
+        try:
+            backend = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            backend.settimeout(5.0)
+            backend.connect(("127.0.0.1", ORB_WS_PORT))
+            backend.settimeout(None)
+
+            req_lines = [f"{self.command} {self.path} {self.request_version}\r\n"]
+            for key, val in self.headers.items():
+                req_lines.append(f"{key}: {val}\r\n")
+            req_lines.append("\r\n")
+            backend.sendall("".join(req_lines).encode("utf-8"))
+
+            client_sock = self.connection
+            client_sock.setblocking(False)
+            backend.setblocking(False)
+
+            sockets = [client_sock, backend]
+            running = True
+            while running:
+                readable, _, errored = select.select(sockets, [], sockets, 30.0)
+                if errored:
+                    break
+                if not readable:
+                    continue
+                for s in readable:
+                    other = backend if s is client_sock else client_sock
+                    try:
+                        data = s.recv(65536)
+                        if not data:
+                            running = False
+                            break
+                        other.sendall(data)
+                    except (BlockingIOError, InterruptedError):
+                        continue
+                    except Exception:
+                        running = False
+                        break
+        except Exception as exc:
+            log.debug("WebSocket tunnel notice: %s", exc)
+            try:
+                self.send_response(502)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"502 Bad Gateway: WebSocket backend unavailable\n")
+            except Exception:
+                pass
+        finally:
+            self.close_connection = True
+            if backend:
+                try:
+                    backend.close()
+                except Exception:
+                    pass
+
     def do_GET(self):
+        # Support WebSocket connection upgrade over standard HTTP port
+        if self.headers.get("Upgrade", "").lower() == "websocket":
+            self._proxy_websocket()
+            return
+
         clean_path = self.path.split("?")[0]
+        if clean_path == "/api/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self._apply_cors()
+            self.end_headers()
+            health_data = {
+                "status": "ONLINE" if _subsystem_health.is_overall_healthy() else "DEGRADED",
+                "subsystems": _subsystem_health.get_all(),
+                "timestamp": time.time()
+            }
+            self.wfile.write(json.dumps(health_data).encode("utf-8"))
+            return
+
+        if clean_path == "/api/system_info":
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            token = self.headers.get("X-Jarvis-Token") or (query.get("token") or [""])[0]
+            if not _is_authorized_token(token, self.client_address):
+                self.send_response(401); self.end_headers(); return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self._apply_cors()
+            self.end_headers()
+            info_data = {
+                "lan_ip": _get_lan_ip(),
+                "version": "MARK VII",
+                "public_deployment": JARVIS_PUBLIC_DEPLOYMENT
+            }
+            self.wfile.write(json.dumps(info_data).encode("utf-8"))
+            return
+
+        if clean_path == "/api/events":
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            token = self.headers.get("X-Jarvis-Token") or (query.get("token") or [""])[0]
+            if not _is_authorized_token(token, self.client_address):
+                self.send_response(401); self.end_headers(); return
+            client_id = (query.get("client_id") or [""])[0]
+            payload = json.dumps({"events": _drain_hud_events(client_id)}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self._apply_cors()
+            self.end_headers(); self.wfile.write(payload); return
+
         base_dir = Path(__file__).resolve().parent
         barehands_dir = base_dir / "barehands"
 
@@ -7560,7 +8948,7 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
             if target.exists():
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Access-Control-Allow-Origin", "*")
+                self._apply_cors()
                 self.end_headers()
                 self.wfile.write(target.read_bytes())
                 return
@@ -7569,7 +8957,7 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
             if target.exists():
                 self.send_response(200)
                 self.send_header("Content-Type", "application/javascript; charset=utf-8")
-                self.send_header("Access-Control-Allow-Origin", "*")
+                self._apply_cors()
                 self.end_headers()
                 self.wfile.write(target.read_bytes())
                 return
@@ -7581,20 +8969,44 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
                 ctype = "text/html" if ext == ".html" else ("application/javascript" if ext == ".js" else ("text/css" if ext == ".css" else "application/octet-stream"))
                 self.send_response(200)
                 self.send_header("Content-Type", ctype)
-                self.send_header("Access-Control-Allow-Origin", "*")
+                self._apply_cors()
                 self.end_headers()
                 self.wfile.write(target.read_bytes())
                 return
         super().do_GET()
 
     def do_POST(self):
-        if self.path in ("/api/command", "/command"):
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host")
+        if origin and not _is_origin_allowed(origin, host):
+            self.send_response(403); self.end_headers(); return
+
+        if self.path in ("/api/command", "/command", "/api/event"):
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            token = self.headers.get("X-Jarvis-Token") or (query.get("token") or [""])[0]
+            if not _is_authorized_token(token, self.client_address):
+                self.send_response(401); self.end_headers(); return
             content_len = int(self.headers.get("Content-Length", 0))
+            if content_len < 0 or content_len > 262144:
+                self.send_response(413); self.end_headers(); return
             post_data = self.rfile.read(content_len) if content_len > 0 else b"{}"
             try:
                 data = json.loads(post_data.decode("utf-8"))
             except Exception:
                 data = {}
+
+            if self.path == "/api/event":
+                if data.get("type") == "GPS_TELEMETRY":
+                    result = update_live_gps_telemetry(
+                        data.get("lat"), data.get("lon"), data.get("accuracy"),
+                        session_id=data.get("session_id", "http_client")
+                    )
+                    payload = json.dumps(result).encode("utf-8")
+                    self.send_response(200 if result.get("ok") else 400)
+                    self.send_header("Content-Type", "application/json")
+                    self._apply_cors()
+                    self.end_headers(); self.wfile.write(payload); return
+                self.send_response(400); self.end_headers(); return
 
             cmd_text = (data.get("text") or data.get("transcript") or data.get("command") or "").strip()
             resp_text = ""
@@ -7641,8 +9053,7 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self._apply_cors()
             self.end_headers()
             self.wfile.write(response_payload)
             return
@@ -7654,17 +9065,21 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
         pass
 
 
-def _start_http_server(web_dir: Path, port: int = 5050) -> None:
+def _start_http_server(web_dir: Path, port: int = 5050) -> bool:
     """Start local HTTP daemon serving the 3D Hologram HUD."""
     try:
         handler = functools.partial(NoCacheHTTPRequestHandler, directory=str(web_dir))
         server = ThreadingHTTPServer(("0.0.0.0", port), handler)
         server.allow_reuse_address = True
-        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t = threading.Thread(target=server.serve_forever, daemon=True, name="jarvis-http")
         t.start()
+        _subsystem_health.set_status("http_server", "RUNNING", port=port)
         log.info("Holographic 3D Orb UI running at: http://localhost:%d", port)
+        return True
     except Exception as e:
-        log.warning("Could not start UI web server on port %d: %s", port, e)
+        _subsystem_health.set_status("http_server", "FAILED", error=str(e), port=port)
+        log.error("Could not start UI web server on port %d: %s", port, e)
+        return False
 
 
 def _start_websocket_server(port: int = 8765) -> None:
@@ -7677,6 +9092,12 @@ def _start_websocket_server(port: int = 8765) -> None:
 
     async def _handler(websocket):
         global _active_construct
+        ws_path = getattr(websocket, "path", "")
+        token = (urllib.parse.parse_qs(urllib.parse.urlparse(ws_path).query).get("token") or [""])[0]
+        remote_addr = getattr(websocket, "remote_address", None)
+        if not _is_authorized_token(token, remote_addr):
+            await websocket.close(code=4401, reason="Unauthorized")
+            return
         _ws_clients.add(websocket)
         try:
             await websocket.send(
@@ -7707,6 +9128,17 @@ def _start_websocket_server(port: int = 8765) -> None:
                     if data.get("type") == "TRIGGER_ACTION":
                         action_name = data.get("action", "UI Gesture")
                         trigger_welcome_sequence(f"Hologram HUD ({action_name})")
+                    elif data.get("type") == "GPS_TELEMETRY":
+                        sess_id = data.get("session_id", "ws_client")
+                        update = update_live_gps_telemetry(data.get("lat"), data.get("lon"), data.get("accuracy"), session_id=sess_id)
+                        if update.get("ok"):
+                            await websocket.send(json.dumps({
+                                "type": "GPS_LOCATION",
+                                "lat": update["lat"],
+                                "lon": update["lon"],
+                                "accuracy": update["accuracy"],
+                                "area": update.get("area", "LOCATING...")
+                            }))
                     elif data.get("type") == "START_FACE_ENROLLMENT":
                         admin_name = data.get("admin_name", "Admin")
                         if _biometric_sentinel:
@@ -7788,7 +9220,7 @@ def _start_websocket_server(port: int = 8765) -> None:
                         log.info("📷 [WS LINK] HUD requested camera acquisition for hand tracking")
                         if _biometric_sentinel:
                             _biometric_sentinel.pause_camera()
-                        broadcast_ui_event({"type": "CAMERA_YIELDED"})
+                        broadcast_ui_event({"type": "EXTERNAL_CAMERA_ACQUIRED", "source": "hand_tracking"})
                     elif data.get("type") == "CAMERA_RELEASE":
                         log.info("📷 [WS LINK] HUD released camera")
                         if _biometric_sentinel:
@@ -7844,17 +9276,20 @@ def _start_websocket_server(port: int = 8765) -> None:
         asyncio.set_event_loop(loop)
 
         async def _main():
-            async with websockets.serve(_handler, "0.0.0.0", port):
+            bind_ip = "0.0.0.0" if JARVIS_PUBLIC_DEPLOYMENT else "127.0.0.1"
+            async with websockets.serve(_handler, bind_ip, port):
+                _subsystem_health.set_status("websocket_server", "RUNNING", port=port, host=bind_ip)
+                log.info("Holographic Orb WebSocket bridge running at: ws://%s:%d", bind_ip, port)
                 await asyncio.Future()
 
         try:
             loop.run_until_complete(_main())
         except Exception as e:
-            log.debug("WebSocket server ended: %s", e)
+            _subsystem_health.set_status("websocket_server", "FAILED", error=str(e), port=port)
+            log.warning("WebSocket server ended or failed to bind on port %d: %s", port, e)
 
-    t = threading.Thread(target=_run_loop, daemon=True)
+    t = threading.Thread(target=_run_loop, daemon=True, name="jarvis-ws")
     t.start()
-    log.info("Holographic Orb WebSocket bridge running at: ws://localhost:%d", port)
 
 
 def _play_pcm_wav_file(path: Path) -> bool:
@@ -7996,7 +9431,15 @@ def _chrome_executable() -> str | None:
             p = os.path.join(base, "Google", "Chrome", "Application", "chrome.exe")
             if os.path.isfile(p):
                 return p
-    return shutil.which("google-chrome") or shutil.which("chrome")
+    return (
+        shutil.which("google-chrome")
+        or shutil.which("google-chrome-stable")
+        or shutil.which("chrome")
+        or shutil.which("chromium")
+        or shutil.which("chromium-browser")
+        or shutil.which("microsoft-edge")
+        or shutil.which("firefox")
+    )
 
 
 def _win32_sorted_monitor_rects() -> list[tuple[int, int, int, int]]:
@@ -8273,6 +9716,196 @@ def _open_url_in_chrome(
             webbrowser.open(u)
     except OSError as e:
         log.warning("Could not open %s in Chrome: %s", label, e)
+
+
+def _puppeteer_fill_js(field: str, value: str) -> str:
+    """JS: fill an input/textarea/contenteditable/select located by field text
+    (placeholder, aria-label, name, id, label) — or the first field when *field*
+    is empty. Dispatches input/change events so frameworks react like typing."""
+    field_js = json.dumps(field)
+    value_js = json.dumps(value)
+    return (
+        "(()=>{const field=" + field_js + ";const value=" + value_js + ";"
+        "const norm=s=>(s||'').replace(/\\s+/g,' ').trim().toLowerCase();"
+        "const els=[...document.querySelectorAll('input,textarea,[contenteditable=true],select')]"
+        ".filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0});"
+        "let el=null;"
+        "if(field){"
+        "el=els.find(e=>norm(e.placeholder)===field)"
+        "||els.find(e=>norm(e.getAttribute('aria-label'))===field)"
+        "||els.find(e=>norm(e.name)===field)||els.find(e=>norm(e.id)===field)"
+        "||els.find(e=>norm(e.placeholder).includes(field))"
+        "||els.find(e=>norm(e.getAttribute('aria-label')||'').includes(field))"
+        "||els.find(e=>e.labels&&e.labels[0]&&norm(e.labels[0].innerText)===field);"
+        "}else{el=(document.activeElement&&['INPUT','TEXTAREA'].indexOf(document.activeElement.tagName)>=0)"
+        "?document.activeElement:els[0];}"
+        "if(!el)return 'NOT_FOUND. Fields: '+JSON.stringify(els.slice(0,20).map(e=>"
+        "e.tagName.toLowerCase()+' name='+(e.name||e.id||'')+' placeholder='"
+        "+(e.placeholder||e.getAttribute('aria-label')||'')));"
+        "el.focus();"
+        "if(el.isContentEditable){document.execCommand('selectAll',false,null);"
+        "document.execCommand('insertText',false,value);}"
+        "else if(el.tagName==='SELECT'){"
+        "const opts=[...el.options];"
+        "const opt=opts.find(o=>o.text.trim().toLowerCase()===value.toLowerCase())"
+        "||opts.find(o=>o.value.toLowerCase()===value.toLowerCase());"
+        "if(!opt)return 'NO_OPTION '+JSON.stringify(opts.map(o=>o.value));"
+        "el.value=opt.value;el.dispatchEvent(new Event('change',{bubbles:true}));}"
+        "else{const proto=el.tagName==='TEXTAREA'?HTMLTextAreaElement:HTMLInputElement;"
+        "const setter=Object.getOwnPropertyDescriptor(proto.prototype,'value');"
+        "if(setter&&setter.set){setter.set.call(el,value);}else{el.value=value;}"
+        "el.dispatchEvent(new Event('input',{bubbles:true}));"
+        "el.dispatchEvent(new Event('change',{bubbles:true}));}"
+        "return 'FILLED '+(el.name||el.id||el.placeholder||el.tagName)+' with: '+value;})()"
+    )
+
+
+def _puppeteer_press_js(key: str) -> str:
+    """JS: dispatch a key press to the focused element (first input if none)."""
+    k = json.dumps(key)
+    return (
+        "(()=>{const key=" + k + ";"
+        "let el=document.activeElement;"
+        "if(!el||el===document.body){"
+        "el=document.querySelector('input,textarea,[contenteditable=true]')||document.body;el.focus();}"
+        "for(const type of ['keydown','keypress','keyup']){"
+        "el.dispatchEvent(new KeyboardEvent(type,{key:key,bubbles:true,cancelable:true}));}"
+        "return 'PRESSED '+key+' on '+el.tagName.toLowerCase();})()"
+    )
+
+
+def _puppeteer_nl_command(query: str) -> tuple[str, dict] | None:
+    """Map a natural-language browser command to (tool_name, arguments).
+
+    Drives deep in-page control — click, type/fill, select, hover, plus the
+    early actions in _puppeteer_nl_command_base — without requiring CSS
+    selectors: text targets compile to page scripts that return the real
+    clickable list on a miss (decide-from-state loops).
+    Returns None when the query is not a recognized browser action.
+    """
+    raw = (query or "").strip()
+    if not raw:
+        return None
+    s = re.sub(r"[.?!]+$", "", raw).strip()
+    s = re.sub(r"^(?:jarvis[,\s]+)", "", s, flags=re.IGNORECASE).strip()
+    if not s:
+        return None
+    cmd = _puppeteer_nl_command_base(s)
+    if cmd:
+        return cmd
+
+    # Click (CSS selector when obvious, otherwise text-matching page script)
+    m = re.search(r"\b(?:click|tap|press\s+on)(?:\s+on)?\s+(.+)$", s, re.IGNORECASE)
+    if m:
+        ct = m.group(1).strip().strip("\"'")
+        ct = re.sub(r"^(?:the|this|on|at)\s+", "", ct, flags=re.IGNORECASE).strip()
+        if re.match(r"^(?:at\s+)?-?\d+", ct):
+            return None  # 'click at 500 400' is OS-level mouse control, not the browser
+        ct = re.sub(r"\s+(?:button|link|tab|menu\s+item|menu)$", "", ct, flags=re.IGNORECASE).strip()
+        if ct:
+            if " " not in ct and re.match(r"^(?:#|\.|\[|>|[a-z][\w-]*[.#\[])", ct):
+                return ("puppeteer_click", {"selector": ct})
+            return ("puppeteer_evaluate", {"script": _puppeteer_click_js(ct)})
+
+    # Select option in a dropdown
+    m = re.search(r"\bselect\s+\"?(.+?)\"?\s+(?:in|within|from)\s+(?:the\s+|this\s+)?(.+)$", s, re.IGNORECASE)
+    if m:
+        value = m.group(1).strip()
+        field = re.sub(r"\s+(?:field|box|dropdown|menu|selector)$", "", m.group(2).strip(), flags=re.IGNORECASE)
+        if " " not in field and field.startswith(("#", ".")):
+            return ("puppeteer_select", {"selector": field, "value": value})
+        return ("puppeteer_evaluate", {"script": _puppeteer_fill_js(field, value)})
+
+    # Hover by text
+    m = re.search(r"\bhover\s+(?:over|on)\s+(?:the\s+)?(.+)$", s, re.IGNORECASE)
+    if m:
+        ht = m.group(1).strip().strip("\"'")
+        if " " not in ht and ht.startswith(("#", ".")):
+            return ("puppeteer_hover", {"selector": ht})
+        js = (
+            "(()=>{const t=" + json.dumps(ht) + ";"
+            "const n=x=>(x||'').replace(/\\s+/g,' ').trim().toLowerCase();"
+            "const el=[...document.querySelectorAll('a,button,[role=button],input')]"
+            ".find(e=>e.getBoundingClientRect().width>0"
+            "&&n(e.innerText||e.getAttribute('aria-label')).includes(n(t)));"
+            "if(!el)return 'NOT_FOUND';"
+            "el.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));"
+            "return 'HOVERED '+t;})()"
+        )
+        return ("puppeteer_evaluate", {"script": js})
+
+    # Type / fill text into a field
+    field = value = None
+    m = re.search(r"\b(?:type|enter)\s+(?:this\s*:\s*|out\s+)?\"?(.+?)\"?\s+"
+                  r"(?:into|in\s+to|inside\s+of|in|to)\s+(?:the\s+|this\s+|active\s+)?(.+)$", s, re.IGNORECASE)
+    if m:
+        value, field = m.group(1).strip().strip("\"'"), m.group(2).strip().strip("\"'")
+    if field is None:
+        m = re.search(r"\b(?:fill|enter)\s+(?:the\s+|this\s+)?(.+?)\s+with\s+(.+)$", s, re.IGNORECASE)
+        if m:
+            field, value = m.group(1).strip().strip("\"'"), m.group(2).strip().strip("\"'")
+    if field is None:
+        m = re.match(r"^(?:please\s+)?(?:type|enter)\s+(?:this\s*:\s*)?(.+)$", s, re.IGNORECASE)
+        if m:
+            value, field = m.group(1).strip().strip("\"'"), ""
+    if value:
+        if field:
+            field = re.sub(r"\s+(?:field|box|input|area|dropdown|menu|bar)$", "", field, flags=re.IGNORECASE) or field
+        if " " not in field and field.startswith(("#", ".")):
+            return ("puppeteer_fill", {"selector": field, "value": value})
+        return ("puppeteer_evaluate", {"script": _puppeteer_fill_js(field or "", value)})
+
+    # Navigate to a bare domain ('go to github.com')
+    m = re.search(r"\b(?:open|go\s+to|visit|navigate\s+to|browse\s+to|load)\s+(?:the\s+|this\s+)?(\S+)", s, re.IGNORECASE)
+    if m:
+        target = m.group(1).strip("'\".,;:")
+        if re.match(r"^(?:https?://)?[\w-]+(?:\.[\w-]{2,})+(?::\d+)?(?:[/?#]\S*)?$", target, re.IGNORECASE):
+            url = target if target.lower().startswith("http") else f"https://{target}"
+            return ("puppeteer_navigate", {"url": url})
+
+    return None
+
+
+def _puppeteer_nl_command_base(s: str) -> tuple[str, dict] | None:
+    """Early natural-language browser actions: screenshot, scroll, navigate-to-URL,
+    page state, reload/back, in-page key press. *s* is the prepared phrase."""
+    # Screenshot
+    if re.search(r"\b(?:screenshot|screen\s?shot|capture\s+(?:the\s+|this\s+)?(?:page|screen))\b", s, re.IGNORECASE):
+        return ("puppeteer_screenshot", {"name": f"jarvis_{time.strftime('%Y%m%d_%H%M%S')}"})
+    # Scroll (server has no scroll tool -> evaluate window.scrollBy)
+    if re.search(r"\bscroll\b", s, re.IGNORECASE):
+        m = re.search(r"\bscroll\b(?:\s+(down|up))?(?:\s+(?:by\s+)?(\d{1,4}))?", s, re.IGNORECASE)
+        direction = (m.group(1) or "down").lower() if m else "down"
+        amount = int(m.group(2)) if m and m.group(2) else 640
+        if amount < 50:
+            amount *= 120  # small numbers are wheel notches, not pixels
+        px = amount if direction == "down" else -amount
+        return ("puppeteer_evaluate", {"script": f"window.scrollBy(0, {px}); 'scrolled {direction} {abs(px)}px'"})
+    # Explicit URL anywhere -> navigate
+    u = re.search(r"https?://[^\s\"']+", s)
+    if u:
+        return ("puppeteer_navigate", {"url": u.group(0)})
+    # Page state (page contents + real clickable list)
+    if re.search(r"\b(?:page\s+state|what(?:'?s|\s+is)\s+on\s+(?:the\s+|this\s+)?page|read\s+(?:the\s+|this\s+)?page"
+                 r"|page\s+(?:contents?|summary)|list\s+(?:the\s+)?(?:clickable|links|buttons|elements)"
+                 r"|inspect\s+(?:the\s+|this\s+)?page)\b", s, re.IGNORECASE):
+        return ("puppeteer_evaluate", {"script": _PUPPETEER_PAGE_STATE_JS})
+    # Reload / back
+    if re.search(r"\b(?:reload|refresh)(?:\s+(?:the\s+|this\s+)?page)?\b", s, re.IGNORECASE):
+        return ("puppeteer_evaluate", {"script": "location.reload(); 'reloading page'"})
+    if re.search(r"\b(?:go\s+back|browser\s+back|previous\s+page)\b", s, re.IGNORECASE):
+        return ("puppeteer_evaluate", {"script": "history.back(); 'going back'"})
+    # In-page key press
+    m = re.search(r"\b(?:press|hit)\s+(?:the\s+)?(enter|return|escape|esc|tab|space|backspace|delete"
+                  r"|up|down|left|right|home|end|f\d{1,2})\b(?:\s+key)?", s, re.IGNORECASE)
+    if m:
+        key_map = {"return": "Enter", "esc": "Escape", "escape": "Escape", "space": " ",
+                   "enter": "Enter", "tab": "Tab", "backspace": "Backspace", "delete": "Delete",
+                   "up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft", "right": "ArrowRight",
+                   "home": "Home", "end": "End"}
+        token = m.group(1).lower()
+        return ("puppeteer_evaluate", {"script": _puppeteer_press_js(key_map.get(token, token.upper()))})
+    return None
 
 
 def open_chatgpt_in_chrome() -> None:
@@ -8559,6 +10192,11 @@ def main() -> int:
     _code_mgr = SelfCodeManager(base_dir, _memory_manager)
     _mcp_mgr = MCPManager(base_dir / "mcp_config.json")
     _mcp_mgr.warm_up_async()
+
+    # Expose the autonomous code architect globally so voice fast-paths (such as
+    # permanent HUD widget removal) can persist file changes.
+    global _code_architect
+    _code_architect = AutonomousCodeArchitect(base_dir, _code_mgr)
     
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     telegram_chat_id = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
@@ -8591,7 +10229,8 @@ def main() -> int:
         broadcast_fn=broadcast_ui_event,
         groq_key=os.environ.get("GROQ_API_KEY", "").strip(),
         ollama_host=brain_cfg.get("host", "http://localhost:11434").rstrip("/"),
-        ollama_model=brain_cfg.get("model", "llama3.2:3b")
+        ollama_model=brain_cfg.get("model", "llama3.2:3b"),
+        poll_interval_s=float(os.environ.get("JARVIS_HUMAN_RESEARCH_INTERVAL_S", "1200")),
     )
     _human_researcher.start()
 

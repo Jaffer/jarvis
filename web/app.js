@@ -1,5 +1,5 @@
-import { createOrbScene } from "./orbScene.js?v=3.0.0";
-import { HandTracker } from "./handTracker.js?v=3.0.0";
+import { createOrbScene } from "./orbScene.js?v=3.2.0";
+import { HandTracker } from "./handTracker.js?v=3.2.0";
 
 // DOM references
 const container = document.getElementById("canvas-container");
@@ -51,9 +51,9 @@ function openBarehandsStage(construct) {
   barehandsIframe.src = targetUrl;
   barehandsModal.classList.remove("hidden");
   showToast("🖐️ BAREHANDS // HOLOGRAPHIC BOARD ACTIVE", 3500);
-  try {
-    window.open(targetUrl, "barehands_stage");
-  } catch (e) {}
+  // NOTE: intentionally do NOT window.open() here — the in-page modal is the
+  // board. Use the POPOUT button for a separate tab, so the board never
+  // opens twice and there is no orphan tab left to close.
 }
 
 function closeBarehandsStage() {
@@ -228,8 +228,22 @@ function cycleTheme() {
   if (label && themeBtn) {
     themeBtn.textContent = `THEME [T]: ${label.split("//")[0].trim()}`;
   }
+  // Persist across page refreshes
+  try { localStorage.setItem("jarvis_theme", scene.getThemeName ? scene.getThemeName() : label); } catch (e) {}
   showToast(`Theme: ${label || "UNKNOWN"}`, 2000);
 }
+
+// Restore theme saved before a refresh
+(function restoreSavedTheme() {
+  let saved = null;
+  try { saved = localStorage.getItem("jarvis_theme"); } catch (e) {}
+  if (saved && scene && scene.setColorTheme) {
+    const label = scene.setColorTheme(saved);
+    if (label && themeBtn) {
+      themeBtn.textContent = `THEME [T]: ${label.split("//")[0].trim()}`;
+    }
+  }
+})();
 
 // ——— STARK SOUNDSCAPE & PROCEDURAL SFX ENGINE ———
 class JarvisSoundscape {
@@ -848,24 +862,25 @@ function handleVoiceCommand(rawTranscript) {
     if (transcript.includes("arc") || transcript.includes("cyan") || transcript.includes("blue") || transcript.includes("reactor")) {
       const label = scene.setColorTheme("arc");
       if (themeBtn) themeBtn.textContent = "THEME [T]: ARC";
+      try { localStorage.setItem("jarvis_theme", scene.getThemeName ? scene.getThemeName() : "jarvis"); } catch (e) {}
       showToast(`Theme: ${label}`, 2000);
-      sendWsMessage({ type: "THEME_CHANGE", theme: "arc" });
+      // Backend theme routing happens via VOICE_COMMAND below (it re-broadcasts THEME_CHANGE).
       sendWsMessage({ type: "VOICE_COMMAND", transcript: "arc theme" });
       return;
     }
     if (transcript.includes("crimson") || transcript.includes("red") || transcript.includes("mark")) {
       const label = scene.setColorTheme("crimson");
       if (themeBtn) themeBtn.textContent = "THEME [T]: CRIMSON";
+      try { localStorage.setItem("jarvis_theme", scene.getThemeName ? scene.getThemeName() : "crimson"); } catch (e) {}
       showToast(`Theme: ${label}`, 2000);
-      sendWsMessage({ type: "THEME_CHANGE", theme: "crimson" });
       sendWsMessage({ type: "VOICE_COMMAND", transcript: "crimson theme" });
       return;
     }
     if (transcript.includes("ultron") || transcript.includes("gold") || transcript.includes("amber") || transcript.includes("yellow")) {
       const label = scene.setColorTheme("ultron");
       if (themeBtn) themeBtn.textContent = "THEME [T]: ULTRON";
+      try { localStorage.setItem("jarvis_theme", scene.getThemeName ? scene.getThemeName() : "ultron"); } catch (e) {}
       showToast(`Theme: ${label}`, 2000);
-      sendWsMessage({ type: "THEME_CHANGE", theme: "ultron" });
       sendWsMessage({ type: "VOICE_COMMAND", transcript: "ultron theme" });
       return;
     }
@@ -1211,6 +1226,30 @@ function injectHudComponent(data) {
   soundscape?.play("chime_positive");
 }
 
+function removeHudComponent(featureId) {
+  const id = String(featureId || "").replace(/[^a-z0-9_-]/gi, "-");
+  if (!id) return;
+  // 1. Remove the live mount node
+  const mount = document.querySelector(`[data-jarvis-live-feature="${CSS.escape(id)}"]`);
+  if (mount) mount.remove();
+  // 2. Remove its scoped CSS block
+  const styleEl = document.getElementById("dynamic-hud-styles");
+  if (styleEl) {
+    const start = `/* JARVIS:${id}:START */`;
+    const end = `/* JARVIS:${id}:END */`;
+    const pattern = new RegExp(
+      `${start.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?${end.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
+      "g"
+    );
+    styleEl.textContent = styleEl.textContent.replace(pattern, "");
+  }
+  // 3. Forget the persisted manifest so it is not re-mounted in this session
+  if (window.__jarvisPersistedHudFeatures) {
+    delete window.__jarvisPersistedHudFeatures[id];
+  }
+  showToast(`🧹 HUD feature removed: ${id}`, 2500);
+}
+
 function connectWebSocket() {
   const isHttps = window.location.protocol === "https:";
   const wsProto = isHttps ? "wss:" : "ws:";
@@ -1262,6 +1301,10 @@ function handleServerEvent(data) {
 
     case "INJECT_HUD_COMPONENT":
       injectHudComponent(data);
+      break;
+
+    case "REMOVE_HUD_COMPONENT":
+      removeHudComponent(data.feature_id);
       break;
 
     case "ACTIVATED":
@@ -1424,7 +1467,10 @@ function handleServerEvent(data) {
     case "SUBTITLE":
       if (data.role === "jarvis" && data.text) {
         lastJarvisSpokenText = (data.text || "").toLowerCase().replace(/[^\w\s]/g, " ").trim();
-        if (!currentPlayingAudio && (ws && ws.readyState === WebSocket.OPEN) && (window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1")) {
+        // Only fall back to browser TTS when the WS link is DOWN (HTTP fallback mode).
+        // When WS is open, the backend ElevenLabs stream is the single voice —
+        // speaking here too caused two simultaneous voices.
+        if (!currentPlayingAudio && !(ws && ws.readyState === WebSocket.OPEN)) {
           speakTextBrowser(data.text);
         }
       }
@@ -1459,7 +1505,11 @@ function handleServerEvent(data) {
         if (data.url.includes("stage.html")) {
           openBarehandsStage(data.construct || null);
         } else {
-          window.open(data.url, data.target || "_blank");
+          // window.open() from a WS event is popup-blocked (no user gesture).
+          // Navigating the same tab always works.
+          try {
+            window.location.href = data.url;
+          } catch (e) {}
         }
       }
       break;
@@ -1536,8 +1586,33 @@ function handleServerEvent(data) {
       break;
 
     case "FACE_ENROLLMENT_CANCELLED":
+    case "FACE_ENROLLMENT_CANCEL":
       closeEnrollmentModal(false);
       showToast("Biometric enrollment cancelled", 2000);
+      break;
+
+    case "FACE_ENROLLMENT_ALIGN_WARNING":
+      if (enrollGuidanceText && data.message) {
+        enrollGuidanceText.textContent = data.message;
+        enrollGuidanceText.style.color = "#ffab40";
+      }
+      break;
+
+    case "SECURITY_STATUS":
+      const secBadge = document.getElementById("speaker-badge");
+      if (secBadge) {
+        if (data.authenticated) {
+          secBadge.textContent = `🛡️ ${(data.user || "ADMIN").toUpperCase()} VERIFIED`;
+          secBadge.className = "badge badge-persona-stark";
+        } else {
+          secBadge.textContent = `⚠️ ${data.threat_level || "SPOOF"} — ACCESS DENIED`;
+          secBadge.className = "badge badge-standby";
+        }
+      }
+      if (data.authenticated === false) {
+        showToast(`🚨 SECURITY: ${data.threat_level || "SPOOF DETECTED"}`, 4000);
+        soundscape.play("security_alert");
+      }
       break;
 
     case "UI_MUTATION":
@@ -1912,11 +1987,27 @@ function closeCmdModal() {
 
 function executeTextCommand(text) {
   if (!text) return;
+  interruptJarvisSpeech(); // barge-in: kill any ongoing voice before executing
   addTerminalLine("user", text);
   showToast(`⌨ "${text}"`, 3000);
   soundscape.play("thinking");
   scene.triggerBurst();
   sendWsMessage({ type: "TEXT_COMMAND", text });
+}
+
+// ——— BARGE-IN: stop every local voice output immediately ———
+function interruptJarvisSpeech() {
+  stopActiveSpeech();
+  try {
+    if (window.speechSynthesis && window.speechSynthesis.speaking) {
+      window.speechSynthesis.cancel();
+    }
+  } catch (e) {}
+  const spBadge = document.getElementById("speech-status");
+  if (spBadge) {
+    spBadge.textContent = "VOICE: READY";
+    spBadge.className = "badge badge-standby";
+  }
 }
 
 function submitCmd() {
