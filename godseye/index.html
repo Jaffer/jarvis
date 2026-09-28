@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>J.A.R.V.I.S. // God's Eye View</title>
+  <link rel="icon" type="image/svg+xml" href="/logo.svg" />
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <!-- Icon font subset to the glyphs this app renders. Keep `icon_names` in sync
+       with the sources: src/materialSymbolsSubset.test.mjs fails when a source
+       names a glyph this list is missing, because a missing glyph does not draw
+       a box — the ligature never forms and the element renders the literal word. -->
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,400,0,0&icon_names=adjust,arrow_drop_down,arrow_forward,arrow_left,arrow_right,bolt,chevron_left,chevron_right,close,close_fullscreen,dark_mode,draw,east,flare,flight,layers_clear,light_mode,local_fire_department,my_location,navigation,normal,on,open_in_full,public,radar,radio,right_panel_close,right_panel_open,rocket_launch,skip_next,skip_previous,view_in_ar" rel="stylesheet" />
+</head>
+<body>
+  <!-- gev:template scene-chrome -->
+
+  <!-- gev:template cockpit -->
+
+  <!-- gev:template display-controls -->
+
+  <!-- gev:template command-dock -->
+
+  <!-- gev:template layer-panels -->
+
+  <!-- gev:template context -->
+
+  <!-- gev:template welcome -->
+
+  <!-- gev:template provider-settings -->
+
+  <!-- gev:template hud-loading -->
+
+  <!-- JARVIS vendored delta — uplink chrome & HUD return link (see JARVIS-INTEGRATION.md) -->
+  <style>
+    #jarvis-hud-return {
+      display: inline-block;
+      margin-top: 7px;
+      font-size: 10px;
+      letter-spacing: 0.16em;
+      font-family: 'JetBrains Mono', monospace;
+      color: #00e5ff;
+      text-decoration: none;
+      border: 1px solid rgba(0, 229, 255, 0.45);
+      border-radius: 3px;
+      padding: 3px 9px;
+      background: rgba(2, 14, 20, 0.5);
+      pointer-events: auto;
+      transition: background 0.15s ease, box-shadow 0.15s ease;
+    }
+    #jarvis-hud-return:hover {
+      background: rgba(0, 229, 255, 0.15);
+      box-shadow: 0 0 10px rgba(0, 229, 255, 0.4);
+    }
+    #jarvis-hud-return:focus-visible { outline: 1px solid #00e5ff; outline-offset: 2px; }
+  </style>
+  <script>
+    // JARVIS vendored delta: learn the ORB HUD origin (passed by the opener via
+    // #hud=, recovered from document.referrer, or persisted in localStorage) so
+    // the return link works from LAN IPs and non-default ports too.
+    (function () {
+      var hud = null;
+      var m = location.hash.match(/hud=([^&]+)/);
+      if (m) { try { hud = decodeURIComponent(m[1]); } catch (e) {} }
+      if (!hud && document.referrer) {
+        try {
+          var u = new URL(document.referrer);
+          if (u.origin !== location.origin) hud = u.origin;
+        } catch (e) {}
+      }
+      if (hud) { try { localStorage.setItem("jarvis_hud_origin", hud); } catch (e) {} }
+      if (!hud) { try { hud = localStorage.getItem("jarvis_hud_origin"); } catch (e) {} }
+      hud = hud || "http://localhost:5050";
+      var a = document.getElementById("jarvis-hud-return");
+      if (a) a.setAttribute("href", hud.replace(/\/$/, ""));
+    })();
+  </script>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

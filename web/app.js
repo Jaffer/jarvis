@@ -36,6 +36,7 @@ const personaWitDesc = document.getElementById("persona-wit-desc");
 const personaBtn = document.getElementById("btn-persona");
 const personaBtnApply = document.getElementById("btn-persona-apply");
 const personaBtnReset = document.getElementById("btn-persona-reset");
+const godseyeBtn = document.getElementById("btn-godseye");
 const personaCards = document.querySelectorAll(".persona-card");
 
 // Barehands Board references
@@ -70,6 +71,82 @@ if (barehandsPopoutBtn) {
   });
 }
 
+// ——— GOD'S EYE VIEW — vendored live OSINT globe, lazily spawned by JARVIS ———
+// The sidecar (Node/Vite on 127.0.0.1:4174) may need to install + boot on first
+// use, so the tab is pre-opened synchronously (user gesture → popup allowed) and
+// filled with the globe URL once /api/godseye/status reports ready.
+let godseyeLaunching = false;
+async function openGodsEyeView() {
+  if (godseyeLaunching) {
+    showToast("🛰️ GOD'S EYE // UPLINK ALREADY ESTABLISHING", 2500);
+    return;
+  }
+  godseyeLaunching = true;
+  const token = getJarvisToken();
+  try { soundscape.play("sub_bass_tick"); } catch (e) {}
+  showToast("🛰️ GOD'S EYE // ESTABLISHING UPLINK...", 3000);
+  addTerminalLine("jarvis", "God's Eye View uplink requested.", true);
+  let win = null;
+  try { win = window.open("about:blank", "_blank"); } catch (e) {}
+  const closeSpare = () => { try { if (win && !win.closed) win.close(); } catch (e) {} };
+  try {
+    const kick = await fetch("/api/godseye/start", { headers: { "X-Jarvis-Token": token } }).then(r => r.json());
+    if (kick && kick.enabled === false) {
+      showToast(`⛔ GOD'S EYE // ${(kick.detail || "DISABLED ON THIS INSTANCE").toUpperCase()}`, 5000);
+      addTerminalLine("jarvis", `God's Eye View unavailable: ${kick.detail || "disabled"}`, true);
+      closeSpare();
+      godseyeLaunching = false;
+      return;
+    }
+    const deadline = Date.now() + 240000;
+    let lastState = "";
+    while (Date.now() < deadline) {
+      const st = await fetch("/api/godseye/status").then(r => r.json()).catch(() => null);
+      if (st) {
+        if (st.state !== lastState && st.detail) {
+          showToast(`🛰️ ${st.detail.toUpperCase()}`, 2200);
+          lastState = st.state;
+        }
+        if (st.ready && st.url) {
+          const target = `${st.url}/#hud=${encodeURIComponent(location.origin)}`;
+          let placed = false;
+          if (win && !win.closed) {
+            try { win.location.href = target; placed = true; } catch (e) {}
+          }
+          if (!placed) {
+            const w2 = window.open(target, "_blank");
+            if (!w2) { location.href = target; }
+            else { closeSpare(); }
+          }
+          showToast("🛰️ GOD'S EYE VIEW // UPLINK ESTABLISHED", 3500);
+          addTerminalLine("jarvis", "God's Eye View online — live OSINT globe.", true);
+          godseyeLaunching = false;
+          return;
+        }
+        if (st.state === "error" || st.state === "missing_toolchain") {
+          showToast(`⛔ GOD'S EYE // ${(st.detail || st.state).toUpperCase()}`, 7000);
+          addTerminalLine("jarvis", `God's Eye View failed: ${st.detail || st.state}`, true);
+          closeSpare();
+          godseyeLaunching = false;
+          return;
+        }
+      }
+      await new Promise(r => setTimeout(r, 1500));
+    }
+    showToast("⛔ GOD'S EYE // UPLINK TIMEOUT", 6000);
+    closeSpare();
+  } catch (e) {
+    showToast("⛔ GOD'S EYE // UPLINK ERROR", 5000);
+    closeSpare();
+  }
+  godseyeLaunching = false;
+}
+godseyeBtn?.addEventListener("click", openGodsEyeView);
+document.getElementById("mob-btn-godseye")?.addEventListener("click", () => {
+  closeMobileSheet();
+  openGodsEyeView();
+});
+
 // Session and Token security helpers
 function getJarvisToken() {
   const params = new URLSearchParams(window.location.search);
@@ -95,34 +172,89 @@ const qrBackdrop = document.getElementById("qr-backdrop");
 function updateDynamicQR() {
   const qrImage = document.getElementById("qr-image");
   const qrLinkText = document.getElementById("qr-link-text");
-  const token = getJarvisToken();
-  let baseUrl = window.location.origin;
+  const qrWarning = document.getElementById("qr-warning");
+  const qrAltLinks = document.getElementById("qr-alt-links");
+  const localToken = getJarvisToken();
+  const isLocalOrigin =
+    window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+  const portStr = window.location.port ? `:${window.location.port}` : "";
 
-  const applyLink = (url) => {
-    const fullUrl = token ? `${url}/?token=${encodeURIComponent(token)}` : url;
+  const withToken = (baseUrl, token) =>
+    token ? `${baseUrl}/?token=${encodeURIComponent(token)}` : baseUrl;
+
+  const applyLink = (fullUrl, warning, altUrls = []) => {
     if (qrImage) {
       qrImage.src = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(fullUrl)}`;
     }
     if (qrLinkText) {
       qrLinkText.textContent = fullUrl;
+      qrLinkText.style.color = warning ? "#fbbf24" : "#00e5ff";
+    }
+    if (qrWarning) {
+      if (warning) {
+        qrWarning.textContent = `⚠ ${warning}`;
+        qrWarning.style.display = "block";
+      } else {
+        qrWarning.textContent = "";
+        qrWarning.style.display = "none";
+      }
+    }
+    if (qrAltLinks) {
+      qrAltLinks.innerHTML = "";
+      altUrls.forEach((u) => {
+        const a = document.createElement("a");
+        a.href = u;
+        a.textContent = `alt: ${u}`;
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.style.cssText =
+          "display:block;color:#7dd3fc;font-size:10px;word-break:break-all;margin-top:4px;";
+        qrAltLinks.appendChild(a);
+      });
     }
   };
 
-  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
-    fetch("/api/system_info", { headers: { "X-Jarvis-Token": token } })
-      .then(r => r.json())
-      .then(info => {
-        if (info.lan_ip && info.lan_ip !== "127.0.0.1") {
-          const portStr = window.location.port ? `:${window.location.port}` : "";
-          applyLink(`${window.location.protocol}//${info.lan_ip}${portStr}`);
-        } else {
-          applyLink(baseUrl);
+  fetch("/api/system_info", { headers: { "X-Jarvis-Token": localToken } })
+    .then((r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    })
+    .then((info) => {
+      // Server-side token wins when the page itself has none — without it the
+      // phone's API calls from the LAN would all be rejected (401).
+      const token = localToken || info.access_token || "";
+      if (!isLocalOrigin) {
+        // Cloud/tunnel origin: the public origin IS the mobile link.
+        applyLink(withToken(window.location.origin, token));
+        return;
+      }
+      const candidates = [];
+      const push = (ip) => {
+        if (ip && typeof ip === "string" && !ip.startsWith("127.") && !candidates.includes(ip)) {
+          candidates.push(ip);
         }
-      })
-      .catch(() => applyLink(baseUrl));
-  } else {
-    applyLink(baseUrl);
-  }
+      };
+      push(info.lan_ip);
+      (Array.isArray(info.lan_ips) ? info.lan_ips : []).forEach(push);
+      if (!candidates.length) {
+        applyLink(
+          withToken(window.location.origin, token),
+          "No LAN IP found — a phone cannot open localhost.\nCheck that this PC is on Wi‑Fi (not VPN-only)."
+        );
+        return;
+      }
+      const mkUrl = (ip) => withToken(`${window.location.protocol}//${ip}${portStr}`, token);
+      applyLink(mkUrl(candidates[0]), null, candidates.slice(1).map(mkUrl));
+    })
+    .catch(() => {
+      // system_info unreachable/unauthorized — fall back to page origin
+      applyLink(
+        window.location.origin,
+        isLocalOrigin
+          ? "Could not resolve LAN IP — localhost link will NOT work from a phone."
+          : null
+      );
+    });
 }
 
 if (btnMobileQr && qrModal) {
@@ -1518,6 +1650,16 @@ function handleServerEvent(data) {
       openBarehandsStage(data.construct || null);
       break;
 
+    case "GODSEYE_STATE":
+      if (data.state === "ready") {
+        showToast(`🛰️ ${data.message || "GOD'S EYE VIEW // UPLINK ESTABLISHED"}`, 4000);
+        scene.triggerBurst();
+      } else {
+        showToast(`⛔ ${data.message || "GOD'S EYE // UNAVAILABLE"}`, 7000);
+      }
+      addTerminalLine("jarvis", data.message || "God's Eye View state change", true);
+      break;
+
     case "PROACTIVE_INTERJECTION":
       scene.triggerBurst();
       showToast(`⚠️ [WATCHDOG ${data.category ? data.category.toUpperCase() : 'ALERT'}]: ${data.phrase || ''}`, 5000);
@@ -2617,6 +2759,8 @@ window.addEventListener("keydown", (e) => {
     initLocalMic();
   } else if (key === "b") {
     toggleFleetDock();
+  } else if (key === "o") {
+    openGodsEyeView();
   } else if (key === "delete" || key === "backspace") {
     scene.dismissConstruct(false);
     soundscape.play("whoosh");
@@ -2654,4 +2798,3 @@ window.addEventListener("keydown", () => {
 
 // JARVIS_DYNAMIC_HUD_COMPONENTS
 window.__jarvisPersistedHudFeatures = window.__jarvisPersistedHudFeatures || {};
-window.__jarvisPersistedHudFeatures["progress-bar-widget"] = {html: "<div id=\"progress-bar-container\"><div id=\"progress-bar\"></div><div class=\"progress-text\" id=\"progress-text\">0%</div></div>", css: "#progress-bar-container{position:fixed;bottom:10px;left:10px;width:300px;height:20px;background:#222;border-radius:10px;overflow:hidden;box-shadow:0 0 5px rgba(0,0,0,0.5)}#progress-bar{height:100%;background:#4caf50;width:0%;transition:width 0.3s ease;}.progress-text{position:absolute;top:-25px;left:0;color:#fff;font-size:12px;}.", js: "function updateProgress(percent){document.getElementById('progress-bar').style.width=percent+'%';document.getElementById('progress-text').innerText=percent+'%';}", target_selector: "#dynamic-hud-stage"};

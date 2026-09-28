@@ -14,3 +14,8 @@ memory/00 - Biometrics/admin_profile.json
 memory/00 - Biometrics/*.npy
 *.token
 .jarvis_token
+
+# God's Eye View sidecar (vendored in godseye/, see godseye/JARVIS-INTEGRATION.md)
+godseye/node_modules/
+godseye/.logs/
+godseye/dist/

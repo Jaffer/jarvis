@@ -2190,6 +2190,7 @@
       <button id="btn-cmd" class="hud-btn" style="border-color: var(--color-cyan); color: var(--color-cyan);"><span class="key" style="margin-right: 4px;">/</span>TYPE [ENTER]</button>
       <button id="btn-fleet" class="hud-btn" style="border-color: #38bdf8; color: #38bdf8;">FLEET [B]: 4 READY</button>
       <button id="btn-persona" class="hud-btn" style="border-color: #00e5ff; color: #00e5ff;">PERSONA [P]: STARK LAB (75%)</button>
+      <button id="btn-godseye" class="hud-btn" style="border-color: #f0a63c; color: #f0a63c;">GOD'S EYE [O]</button>
       <button id="btn-toggle-gesture" class="hud-btn">GESTURES [G]: OFF</button>
       <button id="btn-enroll" class="hud-btn">ENROLL [E]</button>
       <button id="btn-theme" class="hud-btn">THEME [T]: ULTRON</button>
@@ -2216,6 +2217,11 @@
         <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #a1a1aa; line-height: 1.5;">
           Scan with your phone camera to launch J.A.R.V.I.S. on any device.<br>
           <span id="qr-link-text" style="color: #00e5ff; font-weight: bold; word-break: break-all;">Generating link...</span>
+        </div>
+        <div id="qr-warning" style="display: none; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #fbbf24; font-weight: bold; white-space: pre-line; text-align: center; max-width: 300px; line-height: 1.5;"></div>
+        <div id="qr-alt-links" style="max-width: 300px; font-family: 'JetBrains Mono', monospace;"></div>
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 9px; color: #71717a; line-height: 1.5; max-width: 300px; text-align: center;">
+          Phone must be on the SAME Wi&#8209;Fi as this PC. If it can't connect: turn off any VPN, allow the port (<code>sudo ufw allow 5050</code>), and avoid guest Wi&#8209;Fi (AP isolation blocks device-to-device).
         </div>
       </div>
     </div>
@@ -2293,6 +2299,10 @@
           <span class="mob-ctrl-icon">🖐️</span>
           <span class="mob-ctrl-label">BAREHANDS</span>
         </button>
+        <button type="button" id="mob-btn-godseye" class="mob-ctrl-btn" style="--accent:#f0a63c;">
+          <span class="mob-ctrl-icon">🛰️</span>
+          <span class="mob-ctrl-label">GOD'S EYE [O]</span>
+        </button>
         <button type="button" id="mob-btn-theme" class="mob-ctrl-btn" style="--accent:#ffaa30;">
           <span class="mob-ctrl-icon">🎨</span>
           <span class="mob-ctrl-label">THEME [T]</span>
@@ -2322,4 +2332,3 @@
 </html>
 
 <!-- JARVIS_DYNAMIC_HUD_COMPONENTS -->
-<template data-jarvis-feature="progress-bar-widget"><div id="progress-bar-container"><div id="progress-bar"></div><div class="progress-text" id="progress-text">0%</div></div></template>

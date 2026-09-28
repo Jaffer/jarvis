@@ -190,6 +190,39 @@ if not JARVIS_ACCESS_TOKEN:
 JARVIS_PUBLIC_DEPLOYMENT = bool(os.environ.get("RENDER") or os.environ.get("PORT")) or (JARVIS_BIND_HOST not in ("127.0.0.1", "localhost", "::1"))
 
 
+# ─── God's Eye View (vendored live OSINT globe in godseye/) ───
+# Runs as a local Node/Vite sidecar on its own loopback port so its /api data
+# providers never collide with JARVIS's own /api routes. Spawned lazily on
+# first use (HUD button, voice phrase, or open_board tool) — never at boot.
+GODSEYE_DEFAULT_PORT = int(os.environ.get("JARVIS_GODSEYE_PORT", "4174"))
+GODSEYE_VOICE_PHRASES = (
+    "god's eye", "gods eye", "godseye", "gods-eye", "god eye",
+    "eye in the sky", "spy satellite", "open the globe", "show the globe",
+)
+_GODSEYE_ENV_FLAG = os.environ.get("JARVIS_GODSEYE", "").strip().lower()
+
+
+def _godseye_enabled() -> tuple[bool, str]:
+    """Decide whether the vendored God's Eye View globe may run on this instance.
+
+    Cloud stays off by default: a Node sidecar would fight the 512MB Render
+    memory cap. Force with JARVIS_GODSEYE=1, disable with JARVIS_GODSEYE=0.
+    """
+    if _GODSEYE_ENV_FLAG in ("0", "off", "false", "no", "disabled"):
+        return False, "Disabled via JARVIS_GODSEYE=0"
+    if not (Path(__file__).resolve().parent / "godseye" / "package.json").exists():
+        return False, "godseye/ source tree missing"
+    if _GODSEYE_ENV_FLAG in ("1", "on", "true", "yes", "enabled"):
+        return True, "Force-enabled via JARVIS_GODSEYE=1"
+    if JARVIS_PUBLIC_DEPLOYMENT:
+        return False, "Cloud instance (set JARVIS_GODSEYE=1 to enable)"
+    return True, "Local instance — spawns on first use"
+
+
+# Set during the boot sequence; None until main() wires it up.
+_gods_eye_service = None
+
+
 # Song: Spotify or YouTube URL/URI (empty = disabled until chosen)
 SONG_URI = os.environ.get("SONG_URI", "").strip()
 
@@ -238,17 +271,77 @@ def _load_jarvis_config() -> dict:
 
 JARVIS_CFG = _load_jarvis_config()
 
+def _get_lan_ip_candidates() -> list[str]:
+    """Ordered, de-duplicated non-loopback IPv4 candidates for mobile sync.
+
+    Default-route address first (usually what the phone can reach), then the
+    remaining interface addresses skipping virtual bridges (docker, veth,
+    tunnels) that a phone could never route to. VPN-only environments fall
+    back to whatever exists so the QR modal can surface the situation.
+    """
+    import socket
+    seen: set[str] = set()
+    ordered: list[str] = []
+
+    def add(ip: str | None) -> None:
+        if not ip:
+            return
+        ip = ip.strip()
+        if not ip or ip in seen or ip.startswith("127."):
+            return
+        seen.add(ip)
+        ordered.append(ip)
+
+    # 1. Default-route IP (UDP connect sends nothing; just resolves the route)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            add(s.getsockname()[0])
+        finally:
+            s.close()
+    except Exception:
+        pass
+
+    # 2. All interface addresses, skipping virtual/tunnel interfaces
+    try:
+        import re
+        import subprocess
+        out = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show"],
+            capture_output=True, text=True, timeout=3
+        ).stdout
+        virtual_prefixes = ("docker", "br-", "veth", "virbr", "wg", "tun", "tap",
+                            "tailscale", "zt", "ap", "vboxnet", "vmnet")
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            iface = parts[1]
+            if iface.startswith(virtual_prefixes):
+                continue
+            m = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", parts[3])
+            if m:
+                add(m.group(1))
+    except Exception:
+        pass
+
+    # 3. Hostname resolution fallback
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            add(info[4][0])
+    except Exception:
+        pass
+
+    return ordered
+
+
 def _get_lan_ip() -> str:
     """Determine the primary local network IPv4 address for mobile sync."""
-    try:
-        import socket
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
+    candidates = _get_lan_ip_candidates()
+    if candidates:
+        return candidates[0]
+    return "127.0.0.1"
 
 
 class SubsystemHealthRegistry:
@@ -263,6 +356,7 @@ class SubsystemHealthRegistry:
             "voice_engine": {"status": "STANDBY", "error": None},
             "biometrics": {"status": "STANDBY", "error": None},
             "telegram_bridge": {"status": "STANDBY", "error": None},
+            "godseye_server": {"status": "STANDBY", "port": GODSEYE_DEFAULT_PORT, "error": None},
         }
 
     def set_status(self, subsystem: str, status: str, error: str | None = None, **extra) -> None:
@@ -2040,6 +2134,7 @@ class BiometricSentinelDaemon:
         self.last_status = "STANDBY"
         self.last_auth_time = 0.0
         self.last_intruder_alert_ts = 0.0
+        self.intruder_alert_cooldown = 30.0  # seconds between repeated intruder/spoof alert dispatches
         self.camera_index = 0
         self._cap = None
         self._camera_paused = False
@@ -2060,16 +2155,20 @@ class BiometricSentinelDaemon:
         self._enroll_target_frames = 30
         self._last_enroll_pct = -1
 
-        try:
-            from biometrics.face_sentinel import FaceSentinel
-            from biometrics.voice_sentinel import VoiceSentinel
-            self.face_sentinel = FaceSentinel()
-            self.voice_sentinel = VoiceSentinel()
-            if self.face_sentinel.admin_name:
-                self.admin_name = self.face_sentinel.admin_name
-            log.info("Biometric Sentinel loaded (Admin profile: %s)", self.admin_name)
-        except Exception as e:
-            log.warning("Biometrics module load notice: %s", e)
+        _biometrics_env = os.environ.get("JARVIS_ENABLE_BIOMETRICS", "").strip().lower()
+        if JARVIS_PUBLIC_DEPLOYMENT and _biometrics_env not in ("1", "true", "yes", "on"):
+            log.info("Cloud instance: camera biometrics skipped (no optical sensor; keeps MediaPipe/cv2 model memory out of the 512MB budget). Set JARVIS_ENABLE_BIOMETRICS=1 to force-enable.")
+        else:
+            try:
+                from biometrics.face_sentinel import FaceSentinel
+                from biometrics.voice_sentinel import VoiceSentinel
+                self.face_sentinel = FaceSentinel()
+                self.voice_sentinel = VoiceSentinel()
+                if self.face_sentinel.admin_name:
+                    self.admin_name = self.face_sentinel.admin_name
+                log.info("Biometric Sentinel loaded (Admin profile: %s)", self.admin_name)
+            except Exception as e:
+                log.warning("Biometrics module load notice: %s", e)
 
     def get_latest_frame(self):
         """Thread-safe acquisition of the most recent optical camera frame."""
@@ -4869,6 +4968,15 @@ class NeuralBrain:
             elif "orb" in target or "hud" in target:
                 _open_url_in_chrome(f"http://localhost:{ORB_HTTP_PORT}", new_window=False, label="Orb HUD", fullscreen=False)
                 return "Holographic Orb HUD opened."
+            elif any(w in target for w in ("god", "eye", "globe", "satellite")):
+                if _gods_eye_service and _gods_eye_service.enabled:
+                    st = _gods_eye_service.kick()
+                    if st.get("ready"):
+                        _open_url_in_chrome(_gods_eye_service.deep_link(), new_window=False, label="God's Eye View", fullscreen=False)
+                        return "God's Eye View opened."
+                    _gods_eye_service.open_when_ready(label="God's Eye View")
+                    return "Bringing the God's Eye View online, sir — it will open momentarily."
+                return "God's Eye View is disabled on this instance, sir."
             elif "workspace" in target or "antigravity" in target:
                 open_antigravity_workspace()
                 return "Antigravity workspace opened."
@@ -5119,11 +5227,11 @@ class NeuralBrain:
                     "type": "function",
                     "function": {
                         "name": "open_board",
-                        "description": "Open Barehands board, Orb HUD, ChatGPT, or Antigravity workspace",
+                        "description": "Open Barehands board, Orb HUD, ChatGPT, Antigravity workspace, or the God's Eye View live OSINT globe",
                         "parameters": {
                             "type": "object",
                             "properties": {
-                                "target": {"type": "string", "enum": ["barehands", "orb", "chatgpt", "workspace"]}
+                                "target": {"type": "string", "enum": ["barehands", "orb", "chatgpt", "workspace", "godseye"]}
                             },
                             "required": ["target"]
                         }
@@ -5584,6 +5692,7 @@ class NeuralBrain:
                 "3. Self-Coding & Codebase Refactoring: When the user asks you to write code for yourself, modify your code, or patch a feature ('write code for yourself...', 'modify your code to...'), call the 'self_code_patch' or 'self_code_improve' tool to update the target file. "
                 "4. Live HUD capability requests: when asked to show a widget, progress, diagnostic, graph, or status on the orb/HUD, first call 'inspect_codebase' on web/index.html or web/app.js. If missing, immediately call 'synthesize_and_inject_hud_feature' with a compact, safe HUD fragment. Do not merely promise progress; deploy the widget in the current HUD session."
                 "5. Deep Browser Control: a live browser agent is available (mcp_puppeteer_query plus native mcp_puppeteer_puppeteer_* tools). To operate ANY website step-by-step: navigate -> read 'page state' (or use evaluate find/click scripts) -> puppeteer_click / puppeteer_fill -> puppeteer_screenshot. After EVERY action, read the returned page state before deciding the next step; a NOT_FOUND click response includes the real clickable list — pick from it instead of guessing selectors."
+                "6. God's Eye View: a live 3D OSINT globe (flights, ships, satellites, earthquakes, CCTV) runs as a JARVIS sidecar. When the user asks to open the globe, the world map, satellite or flight tracking, or 'God's Eye View', call open_board with target 'godseye'."
             )
 
             messages = [{"role": "system", "content": sys_content}]
@@ -6137,7 +6246,16 @@ class VoiceEngine:
         self._ptt_key = JARVIS_CFG.get("ptt_key", "f4")
         self._mic_mode = JARVIS_CFG.get("mic_mode", "handsfree")
         self._stt_model = None
-        self._stt_model_name = JARVIS_CFG.get("voice", {}).get("stt_model", "base.en")
+        # STT model selection: JARVIS_WHISPER_MODEL env override > cloud lean mode
+        # (Render Free = 512MB RAM cap: server-side Whisper is skipped outright —
+        # headless hosts have no mic and HUD Web Speech handles voice) > jarvis.json.
+        _env_stt = os.environ.get("JARVIS_WHISPER_MODEL", "").strip()
+        if _env_stt:
+            self._stt_model_name = _env_stt
+        elif JARVIS_PUBLIC_DEPLOYMENT:
+            self._stt_model_name = None
+        else:
+            self._stt_model_name = JARVIS_CFG.get("voice", {}).get("stt_model", "base.en")
         self._tts_queue: queue.Queue = queue.Queue()
         self._stop_speaking = threading.Event()
         self._active = False
@@ -6171,6 +6289,9 @@ class VoiceEngine:
     def _load_stt(self):
         """Lazy-load faster-whisper model."""
         if self._stt_model is not None:
+            return
+        if self._stt_model_name is None:
+            log.info("Server-side Whisper STT disabled on this instance (cloud lean mode). Set JARVIS_WHISPER_MODEL (e.g. tiny.en) to force-enable.")
             return
         try:
             import importlib
@@ -7944,6 +8065,26 @@ class VoiceEngine:
             )
             return
 
+        # ── 2b. God's Eye View — vendored live OSINT globe (lazy-spawned) ──
+        if any(q in t for q in GODSEYE_VOICE_PHRASES):
+            emit_user_subtitle()
+            if _gods_eye_service and _gods_eye_service.enabled:
+                ready = _gods_eye_service.status().get("ready")
+                resp = ("Opening the God's Eye View, sir." if ready
+                        else "Bringing the God's Eye View online, sir.")
+                broadcast_ui_event({"type": "STATUS", "status": "GOD'S EYE // UPLINK",
+                                    "phrase": "Establishing live globe uplink"})
+                broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+                self.speak(resp)
+                _gods_eye_service.kick()
+                _gods_eye_service.open_when_ready(label="God's Eye View")
+            else:
+                resp = "The God's Eye View is disabled on this instance, sir."
+                broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+                self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
         # ── 3. Memory Vault ──
         if any(q in t for q in [
             "open memory vault", "open memory", "show memory", "open vault",
@@ -8893,6 +9034,15 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         # Support WebSocket connection upgrade over standard HTTP port
         if self.headers.get("Upgrade", "").lower() == "websocket":
+            # The tunnel connects to the WS daemon from loopback, which would
+            # otherwise auto-authorize every remote client — enforce the token
+            # against the REAL client address before proxying.
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            ws_token = (query.get("token") or [""])[0]
+            if not _is_authorized_token(ws_token, self.client_address):
+                self.send_response(401)
+                self.end_headers()
+                return
             self._proxy_websocket()
             return
 
@@ -8921,6 +9071,11 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             info_data = {
                 "lan_ip": _get_lan_ip(),
+                "lan_ips": _get_lan_ip_candidates(),
+                # Lets an already-authorized caller (loopback desktop HUD or a
+                # token holder) embed the access token in the mobile QR link —
+                # LAN clients have no other way to discover it.
+                "access_token": JARVIS_ACCESS_TOKEN,
                 "version": "MARK VII",
                 "public_deployment": JARVIS_PUBLIC_DEPLOYMENT
             }
@@ -8939,6 +9094,36 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self._apply_cors()
             self.end_headers(); self.wfile.write(payload); return
+
+        if clean_path == "/api/godseye/status":
+            status_obj = (_gods_eye_service.status() if _gods_eye_service else
+                          {"enabled": False, "state": "disabled",
+                           "detail": "Service not initialized", "ready": False})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self._apply_cors()
+            self.end_headers()
+            self.wfile.write(json.dumps(status_obj).encode("utf-8"))
+            return
+
+        if clean_path == "/api/godseye/start":
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            token = self.headers.get("X-Jarvis-Token") or (query.get("token") or [""])[0]
+            if not _is_authorized_token(token, self.client_address):
+                self.send_response(401); self.end_headers(); return
+            if _gods_eye_service:
+                status_obj = _gods_eye_service.kick()
+            else:
+                status_obj = {"enabled": False, "state": "disabled",
+                              "detail": "Service not initialized", "ready": False}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self._apply_cors()
+            self.end_headers()
+            self.wfile.write(json.dumps(status_obj).encode("utf-8"))
+            return
 
         base_dir = Path(__file__).resolve().parent
         barehands_dir = base_dir / "barehands"
@@ -9063,6 +9248,299 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
 
     def log_message(self, format, *args):
         pass
+
+
+class GodsEyeViewService:
+    """Lazy host manager for the vendored God's Eye View globe (godseye/).
+
+    GEV is a Node/Vite app with same-origin /api data-provider middleware, so
+    it runs on its own loopback port instead of being proxied through JARVIS's
+    /api routes. Nothing starts at boot: the first HUD button press, voice
+    phrase, or `open_board` tool call triggers kick(), which verifies the Node
+    toolchain, runs `npm ci` on first use, starts Vite, and opens the tab once
+    the port answers. Cloud instances keep it disabled to protect the 512MB cap.
+    """
+
+    _REGISTRY_STATES = {
+        "disabled": "DISABLED", "standby": "STANDBY", "installing": "INSTALLING",
+        "starting": "STARTING", "ready": "ONLINE", "adopted": "ONLINE",
+        "missing_toolchain": "UNAVAILABLE", "error": "UNAVAILABLE",
+    }
+
+    def __init__(self, root: Path, port: int = GODSEYE_DEFAULT_PORT):
+        self.root = root
+        self.port = port
+        self.url = f"http://127.0.0.1:{port}"
+        self.enabled, self.enabled_reason = _godseye_enabled()
+        self._lock = threading.Lock()
+        self._state = "disabled"
+        self._detail = self.enabled_reason
+        self._proc: subprocess.Popen | None = None
+        self._vite_log = None
+        self._open_lock = threading.Lock()
+        if self.enabled:
+            self._set_state("standby", "Ready — globe spawns on first use")
+        else:
+            _subsystem_health.set_status(
+                "godseye_server", "DISABLED", error=self.enabled_reason,
+                port=self.port, url=self.url,
+            )
+            log.info("God's Eye View: disabled (%s)", self.enabled_reason)
+        atexit.register(self.shutdown)
+
+    def _set_state(self, state: str, detail: str) -> None:
+        with self._lock:
+            self._state, self._detail = state, detail
+        _subsystem_health.set_status(
+            "godseye_server", self._REGISTRY_STATES.get(state, state.upper()),
+            error=detail if state in ("missing_toolchain", "error") else None,
+            port=self.port, url=self.url,
+        )
+        log.info("God's Eye View: %s — %s", state, detail)
+
+    def status(self) -> dict:
+        with self._lock:
+            state, detail = self._state, self._detail
+        if state in ("ready", "adopted") and not self._port_open():
+            # Server vanished underneath us (manual stop, OOM, reboot).
+            self._set_state("error", "Server stopped unexpectedly")
+            state, detail = "error", "Server stopped unexpectedly"
+        return {
+            "enabled": self.enabled, "state": state, "detail": detail,
+            "ready": state in ("ready", "adopted"),
+            "port": self.port, "url": self.url, "reason": self.enabled_reason,
+        }
+
+    # ── readiness ──
+    def _port_open(self) -> bool:
+        import socket
+        try:
+            with socket.create_connection(("127.0.0.1", self.port), timeout=0.6):
+                return True
+        except OSError:
+            return False
+
+    def deep_link(self) -> str:
+        """Globe URL with the ORB HUD origin embedded for GEV's back-link."""
+        hud_origin = f"http://localhost:{ORB_HTTP_PORT}"
+        return f"{self.url}/#hud={urllib.parse.quote(hud_origin, safe='')}"
+
+    def wait_until_ready(self, timeout: float = 300.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            st = self.status()
+            if st["ready"]:
+                return True
+            if st["state"] in ("error", "missing_toolchain", "disabled"):
+                return False
+            time.sleep(0.8)
+        return False
+
+    # ── boot ──
+    def kick(self) -> dict:
+        """Start dependency install + Vite in a background thread (idempotent)."""
+        if not self.enabled:
+            return self.status()
+        start_worker = False
+        with self._lock:
+            if self._state not in ("ready", "adopted", "installing", "starting"):
+                # State flips inside the lock so concurrent kicks stay single-flight.
+                self._state, self._detail = "starting", "Checking Node toolchain…"
+                start_worker = True
+        if start_worker:
+            threading.Thread(target=self._run, daemon=True, name="godseye-boot").start()
+        return self.status()
+
+    def _run(self) -> None:
+        try:
+            if self._adopt_existing():
+                return
+            err = self._toolchain_error()
+            if err:
+                self._set_state("missing_toolchain", err)
+                return
+            if not (self.root / "node_modules" / "vite" / "bin" / "vite.js").exists():
+                self._install_dependencies()
+                with self._lock:
+                    failed = self._state in ("error", "missing_toolchain")
+                if failed:
+                    return
+            self._start_vite()
+        except Exception as exc:
+            log.exception("God's Eye View boot crashed")
+            self._set_state("error", f"{type(exc).__name__}: {exc}")
+
+    def _adopt_existing(self) -> bool:
+        """A globe the user started manually on our port counts as ready."""
+        if not self._port_open():
+            return False
+        try:
+            with urllib.request.urlopen(f"{self.url}/", timeout=3) as resp:
+                head = resp.read(8192).decode("utf-8", "replace").lower()
+            if "god's eye" in head or "cesium" in head:
+                self._set_state("adopted", f"Adopted existing globe on port {self.port}")
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _toolchain_error(self) -> str | None:
+        node, npm = shutil.which("node"), shutil.which("npm")
+        if not node or not npm:
+            return "Node.js 24+ and npm are required but were not found on PATH"
+        try:
+            out = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=10)
+            major_str = (out.stdout.strip() or "v0").lstrip("v")
+            major = int(re.match(r"\d+", major_str).group())
+        except Exception:
+            return "Could not execute `node --version`"
+        if major < 24:
+            return f"Node {major} is too old — God's Eye View needs Node 24.x or 26.x"
+        if major == 25:
+            return "Node 25 is end-of-life upstream — switch to Node 24.x or 26.x"
+        return None
+
+    def _child_env(self) -> dict:
+        env = dict(os.environ)
+        env.update({
+            "PORT": str(self.port),
+            "HOST": "127.0.0.1",
+            "PUPPETEER_SKIP_DOWNLOAD": "1",
+            "PUPPETEER_SKIP_CHROMIUM_DOWNLOAD": "1",
+            "npm_config_fund": "false",
+            "npm_config_audit": "false",
+        })
+        return env
+
+    def _log_dir(self) -> Path:
+        log_dir = self.root / ".logs"
+        log_dir.mkdir(exist_ok=True)
+        return log_dir
+
+    @staticmethod
+    def _log_tail(path: Path, lines: int = 3) -> str:
+        try:
+            tail = path.read_text(errors="replace").splitlines()[-lines:]
+            return " | ".join(s.strip() for s in tail if s.strip())[-300:]
+        except Exception:
+            return ""
+
+    def _install_dependencies(self) -> None:
+        npm = shutil.which("npm") or "npm"
+        self._set_state("installing", "Installing Node dependencies (first run)…")
+        log_path = self._log_dir() / "install.log"
+        with open(log_path, "ab") as lf:
+            lf.write(f"\n--- npm ci {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
+            lf.flush()
+            proc = subprocess.Popen(
+                [npm, "ci", "--no-audit", "--no-fund"], cwd=str(self.root),
+                env=self._child_env(), stdout=lf, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            try:
+                rc = proc.wait(timeout=900)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                self._set_state("error", "npm ci timed out after 15 minutes")
+                return
+        if rc != 0:
+            self._set_state(
+                "error",
+                f"npm ci failed — see godseye/.logs/install.log: {self._log_tail(log_path)}",
+            )
+            return
+        self._set_state("starting", "Dependencies installed — starting globe…")
+
+    def _start_vite(self) -> None:
+        node = shutil.which("node") or "node"
+        vite_bin = self.root / "node_modules" / "vite" / "bin" / "vite.js"
+        if not vite_bin.exists():
+            self._set_state("error", "vite binary missing — delete godseye/node_modules and retry")
+            return
+        self._set_state("starting", "Linking up the globe…")
+        log_path = self._log_dir() / "vite.log"
+        lf = open(log_path, "ab")
+        lf.write(f"\n--- vite {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
+        lf.flush()
+        self._vite_log = lf
+        self._proc = subprocess.Popen(
+            [node, str(vite_bin), "--host", "127.0.0.1", "--port", str(self.port)],
+            cwd=str(self.root), env=self._child_env(),
+            stdout=lf, stderr=subprocess.STDOUT,
+            start_new_session=True,  # own process group → clean killpg on shutdown
+        )
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            if self._proc.poll() is not None:
+                code = self._proc.returncode
+                lf.close()
+                self._set_state("error", f"Vite exited with code {code}: {self._log_tail(log_path)}")
+                return
+            if self._port_open():
+                self._set_state("ready", f"Globe online at {self.url}")
+                return
+            time.sleep(0.8)
+        self._set_state("error", "Vite did not come up within 120s — see godseye/.logs/vite.log")
+
+    # ── launch ──
+    def open_when_ready(self, label: str = "God's Eye View", timeout: float = 300.0) -> bool:
+        """Background: wait for readiness, then open the globe in Chrome.
+
+        Deduplicates concurrent requests (voice + HUD + LLM tool racing).
+        """
+        if not self.enabled:
+            return False
+        if not self._open_lock.acquire(blocking=False):
+            return False  # an open attempt is already in flight
+
+        def _worker() -> None:
+            try:
+                if self.wait_until_ready(timeout):
+                    _open_url_in_chrome(
+                        self.deep_link(), new_window=False, label=label, fullscreen=False,
+                    )
+                    broadcast_ui_event({
+                        "type": "GODSEYE_STATE", "state": "ready",
+                        "message": "GOD'S EYE VIEW // UPLINK ESTABLISHED", "url": self.url,
+                    })
+                else:
+                    st = self.status()
+                    msg = (st.get("detail") or st.get("state", "unavailable")).upper()
+                    broadcast_ui_event({
+                        "type": "GODSEYE_STATE", "state": st.get("state", "error"),
+                        "message": f"GOD'S EYE // {msg}",
+                    })
+            except Exception as exc:
+                log.warning("God's Eye View open failed: %s", exc)
+                broadcast_ui_event({
+                    "type": "GODSEYE_STATE", "state": "error",
+                    "message": f"GOD'S EYE // {exc}",
+                })
+            finally:
+                self._open_lock.release()
+
+        threading.Thread(target=_worker, daemon=True, name="godseye-open").start()
+        return True
+
+    def shutdown(self) -> None:
+        proc, self._proc = self._proc, None
+        if proc and proc.poll() is None:
+            try:
+                import signal
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            log.info("God's Eye View globe shut down.")
+        if self._vite_log:
+            try:
+                self._vite_log.close()
+            except Exception:
+                pass
+            self._vite_log = None
 
 
 def _start_http_server(web_dir: Path, port: int = 5050) -> bool:
@@ -10168,6 +10646,14 @@ def main() -> int:
     bh_port = JARVIS_CFG.get("barehands", {}).get("port", 8794)
     _start_barehands_server(bh_port)
 
+    # 4b. God's Eye View sidecar (vendored OSINT globe — lazy Node/Vite service;
+    # it installs/runs nothing until the HUD button, voice, or tool asks for it)
+    global _gods_eye_service
+    _gods_eye_service = GodsEyeViewService(
+        base_dir / "godseye",
+        port=int(JARVIS_CFG.get("godseye", {}).get("port", GODSEYE_DEFAULT_PORT)),
+    )
+
     # 4b. Initialize Stark SFX & Soundscape Engine
     global _sound_engine
     if SoundEffectsEngine is not None:
@@ -10191,7 +10677,12 @@ def main() -> int:
 
     _code_mgr = SelfCodeManager(base_dir, _memory_manager)
     _mcp_mgr = MCPManager(base_dir / "mcp_config.json")
-    _mcp_mgr.warm_up_async()
+    if JARVIS_PUBLIC_DEPLOYMENT:
+        # Defer MCP (npx/node) server spawn to first tool call — five warm node
+        # processes can push a 512MB instance into the OOM killer.
+        log.info("Cloud instance: MCP warm-up deferred (servers start lazily on first tool use).")
+    else:
+        _mcp_mgr.warm_up_async()
 
     # Expose the autonomous code architect globally so voice fast-paths (such as
     # permanent HUD widget removal) can persist file changes.
@@ -10306,6 +10797,11 @@ def main() -> int:
     log.info("  Orb HUD:       http://localhost:%d", ORB_HTTP_PORT)
     log.info("  WebSocket:     ws://localhost:%d", ORB_WS_PORT)
     log.info("  Barehands:     http://localhost:%d", bh_port)
+    if _gods_eye_service and _gods_eye_service.enabled:
+        log.info("  God's Eye:     standby (http://localhost:%d — spawns on first use)", _gods_eye_service.port)
+    else:
+        log.info("  God's Eye:     disabled (%s)",
+                 _gods_eye_service.enabled_reason if _gods_eye_service else "not initialized")
     log.info("  Memory Vault:  %s", vault_path)
     log.info("  Signal Bus:    %s", state_dir)
     log.info("  Voice PTT Key: %s", JARVIS_CFG.get("ptt_key", "F4"))

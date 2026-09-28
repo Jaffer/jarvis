@@ -97,10 +97,22 @@ class LivenessDetector:
 
     def evaluate_screen_moire(self, face_crop_bgr: np.ndarray) -> tuple[float, float]:
         """
-        Evaluates high-frequency spectral Moiré interference patterns using 2D FFT.
-        Smartphones and computer displays emit periodic sub-pixel raster grids that
-        create distinctive spatial frequency peaks under optical sensors.
-        Returns: (moire_score [0.0=screen, 1.0=real skin], high_freq_ratio)
+        Evaluates the 2D FFT of the face crop for sharp periodic lattice peaks.
+
+        A phone/tablet/monitor presents the face through a regular sub-pixel
+        grid; photographed, that grid (and its beat frequencies) appears as
+        isolated high-magnitude spectral peaks far above the surrounding
+        broadband floor. Real skin + camera sensor noise distribute energy
+        smoothly instead, so peak PROMINENCE (max/median of the high band) is
+        robust to lighting and gain — unlike broadband HF/LF energy ratios,
+        which miscalibrate per camera (sensor noise put real faces above the
+        old "screen" cutoff on the reference webcam).
+
+        Calibration (scratch/calibrate_moire.py, 640x480 webcam face crops):
+          real faces            peak ratio 52 - 104
+          LCD stripe/beat sim   peak ratio 461 - 732
+          angled display sim    peak ratio ~300
+        Returns: (moire_score [0.0=screen, 1.0=real skin], lattice_peak_ratio)
         """
         if face_crop_bgr is None or face_crop_bgr.size == 0:
             return 0.5, 0.0
@@ -111,40 +123,35 @@ class LivenessDetector:
         if h < 32 or w < 32:
             return 0.5, 0.0
 
-        # Resize to fixed dimension for consistent FFT spectral analysis
         gray_norm = gray - np.mean(gray)
 
         # 2D Fast Fourier Transform
-        fft = np.fft.fft2(gray_norm)
-        fft_shift = np.fft.fftshift(fft)
-        magnitude = np.abs(fft_shift)
+        magnitude = np.abs(np.fft.fftshift(np.fft.fft2(gray_norm)))
 
-        # Radial frequency energy distribution
+        # Lattice band: from ~30% of the inscribed radius out toward the
+        # Nyquist corners (a display grid peaks at/just beyond r_max, and a
+        # rotated grid lands between r_max and the corners).
         cy, cx = h // 2, w // 2
         y, x = np.ogrid[:h, :w]
         r = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+        r_in = float(min(cx, cy))
+        corner = float(math.hypot(cx, cy))
+        band_mask = (r >= 0.30 * r_in) & (r <= 0.95 * corner)
+        if not np.any(band_mask):
+            return 0.5, 0.0
 
-        r_max = min(cx, cy)
-        low_mask = r < (r_max * 0.25)
-        high_mask = (r >= (r_max * 0.50)) & (r < r_max)
+        band = magnitude[band_mask]
+        peak_ratio = float(np.max(band)) / (float(np.median(band)) + 1e-6)
 
-        low_energy = np.sum(magnitude[low_mask]) + 1e-6
-        high_energy = np.sum(magnitude[high_mask]) + 1e-6
-
-        # Ratio of high frequency to low frequency
-        # Digital screens exhibit elevated high-frequency harmonics due to pixel boundaries
-        hf_ratio = float(high_energy / low_energy)
-
-        # Natural human skin has low high-frequency raster energy (typically 0.02 - 0.10)
-        # Screen displays typically score > 0.22 due to pixel grids and Moiré fringes
-        if hf_ratio > 0.22:
-            moire_score = 0.15  # High probability of screen display
-        elif hf_ratio > 0.16:
-            moire_score = 0.50  # Suspicious raster energy
+        # Peak prominence thresholds (see calibration note above)
+        if peak_ratio < 150.0:
+            moire_score = 0.95  # Broadband organic skin gradient
+        elif peak_ratio < 350.0:
+            moire_score = 0.50  # Suspicious periodic structure
         else:
-            moire_score = 0.95  # Natural organic skin gradient
+            moire_score = 0.15  # Display lattice confirmed
 
-        return moire_score, hf_ratio
+        return moire_score, peak_ratio
 
     def evaluate_blink(self, ear: float) -> tuple[float, bool]:
         """
@@ -238,9 +245,9 @@ class LivenessDetector:
             reasons.append("Zero eye aspect ratio dynamics over rolling window (static picture).")
 
         # 3. Screen Moiré & Frequency Spectrum
-        moire_score, hf_ratio = self.evaluate_screen_moire(face_crop_bgr)
+        moire_score, peak_ratio = self.evaluate_screen_moire(face_crop_bgr)
         if moire_score < 0.3:
-            reasons.append(f"Digital display sub-pixel raster detected (FFT HF ratio: {hf_ratio:.3f}). Screen replay attack.")
+            reasons.append(f"Display lattice spectral peak detected (peak/median {peak_ratio:.0f}). Screen replay attack.")
 
         # 4. rPPG Skin Capillary Pulse
         pulse_score = self.evaluate_rppg_pulse(face_crop_bgr)

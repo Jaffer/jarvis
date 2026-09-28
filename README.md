@@ -71,3 +71,13 @@ Edit the constants at the top of `jarvis.py`:
 - **No reaction to claps:** Lower `SPIKE_RATIO` slightly or speak/clap closer to the mic.
 - **Spam logs:** Raise `SPIKE_RATIO` or `COOLDOWN_S`.
 - **No welcome speech:** Set `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` in `.env` and restart the terminal so variables load.
+
+## 🛰️ God's Eye View (bundled live OSINT globe)
+
+JARVIS ships with a vendored copy of [God's Eye View](https://github.com/bilawalsidhu/gods-eye-view) (MIT license, © Bilawal Sidhu) in `godseye/` — a photorealistic 3D globe with live aircraft, ships, satellites, earthquakes, traffic, and public cameras.
+
+- **Open it:** HUD `GOD'S EYE [O]` button, hotkey `O`, say *"open God's Eye View"*, or ask JARVIS to open the globe (`open_board` tool with target `godseye`).
+- **Lazy sidecar:** nothing runs until first use. JARVIS verifies Node 24+/npm, runs `npm ci` on first use, then starts Vite on `127.0.0.1:4174` — its own origin, so GEV's `/api` data providers never collide with JARVIS's `/api` routes.
+- **Config:** `godseye.port` in `jarvis.json` (default `4174`); `JARVIS_GODSEYE=1/0` force-enables/disables (off on Render/cloud by default — see `.env.example`).
+- **Keys optional:** the globe starts keyless (Esri imagery); add Cesium ion / Google / OpenAI keys later via GEV's in-app POWER UP panel (`godseye/.env`, git-ignored).
+- **Logs:** `godseye/.logs/install.log`, `godseye/.logs/vite.log`. Deltas vs upstream are documented in `godseye/JARVIS-INTEGRATION.md`.
