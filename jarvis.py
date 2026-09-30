@@ -144,6 +144,13 @@ except ImportError:
 # Load .env early so all constants can read overrides
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
+# OpenRouter free-model pool (key lives ONLY in .env — never in the repo).
+try:
+    from openrouter import OpenRouterPoolError, get_openrouter_pool
+except ImportError:  # pragma: no cover - pool is optional
+    OpenRouterPoolError = None
+    get_openrouter_pool = None
+
 # --- tuning knobs -----------------------------------------------------------
 SAMPLE_RATE = 44100
 BLOCK_MS = 80
@@ -221,6 +228,440 @@ def _godseye_enabled() -> tuple[bool, str]:
 
 # Set during the boot sequence; None until main() wires it up.
 _gods_eye_service = None
+
+
+# ─── God's Eye View command bridge (JARVIS → globe) ───
+# JARVIS keeps the single brain and the single voice; the globe is a dumb
+# executor. The globe page polls /api/godseye/command for queued actions and
+# posts its camera centre back as telemetry so "nearest X" knows where to look.
+# Mirrors the barehands _bh_cmds queue: append on the JARVIS side, drain on the
+# page side.
+_GODSEYE_CMD_ALLOWED = (
+    "fly_to_location", "fly_route", "move_camera", "adjust_camera_zoom",
+    "zoom_to_globe", "set_layer_visibility", "control_cockpit", "track_entity",
+    "stop_tracking", "frame_overhead", "set_visual_style", "get_entity_context",
+    "get_current_view_state", "select_nearest_aircraft", "control_cctv",
+    "control_radio", "set_panel_open", "set_context_mode", "set_hud",
+    "set_cyber_sonar", "set_detection", "set_map_stack", "set_post_processing",
+    "control_scene", "clear_annotations", "annotate_map", "analyst_query",
+    "show_data_layers_menu", "next_iss_pass", "next_satellite_pass",
+)
+_gev_cmds: list = []
+_gev_view_state: dict = {"lat": None, "lng": None, "heightM": None, "label": None}
+_gev_cmd_lock = threading.Lock()
+# Single-element list instead of a bare float so helpers can mutate it without
+# a `global` declaration in every caller.
+_gev_last_poll = [0.0]
+_GODSEYE_BRIDGE_STALE_S = 15.0
+
+
+def godseye_push_action(action: str, **args) -> bool:
+    """Queue one globe action for the running God's Eye View page to execute.
+
+    Returns False for an action the globe does not advertise, so callers can
+    report honestly instead of silently dropping the request.
+    """
+    act = (action or "").strip()
+    if act not in _GODSEYE_CMD_ALLOWED:
+        log.warning("God's Eye View: refused unknown action '%s'", act)
+        return False
+    payload = {"action": act, "args": {k: v for k, v in args.items() if v is not None}}
+    with _gev_cmd_lock:
+        _gev_cmds.append(payload)
+        if len(_gev_cmds) > 24:
+            del _gev_cmds[:-24]
+    log.info("God's Eye View: queued action '%s' %s", act, payload["args"] or "")
+    return True
+
+
+def godseye_drain_actions() -> list:
+    """Hand the globe page its pending actions (and clear them)."""
+    with _gev_cmd_lock:
+        out = _gev_cmds[:16]
+        del _gev_cmds[:16]
+    return out
+
+
+def godseye_note_poll() -> None:
+    """Mark the globe page as attached (called on every bridge poll)."""
+    _gev_last_poll[0] = time.monotonic()
+
+
+def godseye_bridge_live(max_age_s: float = _GODSEYE_BRIDGE_STALE_S) -> bool:
+    """True when the globe page has polled recently — i.e. the bridge is attached."""
+    stamp = _gev_last_poll[0]
+    return bool(stamp) and (time.monotonic() - stamp) <= max_age_s
+
+
+def godseye_record_view(lat, lng, height_m=None, label=None) -> bool:
+    """Store the globe's current camera centre so 'nearest X' has an origin."""
+    try:
+        flat, flng = float(lat), float(lng)
+    except (TypeError, ValueError):
+        return False
+    if not (-90.0 <= flat <= 90.0 and -180.0 <= flng <= 180.0):
+        return False
+    state = {"lat": flat, "lng": flng, "label": (str(label).strip() or None)}
+    try:
+        state["heightM"] = float(height_m) if height_m is not None else None
+    except (TypeError, ValueError):
+        state["heightM"] = None
+    _gev_view_state.update(state)
+    return True
+
+
+def godseye_view_state() -> dict:
+    """Snapshot of the globe's last reported camera centre."""
+    return dict(_gev_view_state)
+
+
+# Spoken POI categories → (OSM tag key, tag value, noun used in the reply).
+# Keyless: served by the globe's own cached Overpass proxy, which accepts any
+# spatially bounded query (around: counts), with the public Overpass API as the
+# fallback when the globe is not answering.
+_GODSEYE_POI_TAGS = {
+    "coffee": ("amenity", "cafe", "coffee shop"),
+    "cafes": ("amenity", "cafe", "coffee shop"),
+    "cafe": ("amenity", "cafe", "coffee shop"),
+    "coffee shop": ("amenity", "cafe", "coffee shop"),
+    "coffee shops": ("amenity", "cafe", "coffee shop"),
+    "restaurant": ("amenity", "restaurant", "restaurant"),
+    "restaurants": ("amenity", "restaurant", "restaurant"),
+    "food": ("amenity", "restaurant", "restaurant"),
+    "pizza": ("amenity", "restaurant", "pizza place"),
+    "burger": ("amenity", "fast_food", "burger place"),
+    "bar": ("amenity", "bar", "bar"),
+    "pub": ("amenity", "pub", "pub"),
+    "hotel": ("tourism", "hotel", "hotel"),
+    "hospital": ("amenity", "hospital", "hospital"),
+    "clinic": ("amenity", "clinic", "clinic"),
+    "pharmacy": ("amenity", "pharmacy", "pharmacy"),
+    "chemist": ("amenity", "pharmacy", "pharmacy"),
+    "atm": ("amenity", "atm", "ATM"),
+    "bank": ("amenity", "bank", "bank"),
+    "petrol": ("amenity", "fuel", "petrol station"),
+    "petrol station": ("amenity", "fuel", "petrol station"),
+    "gas station": ("amenity", "fuel", "petrol station"),
+    "fuel": ("amenity", "fuel", "fuel station"),
+    "supermarket": ("shop", "supermarket", "supermarket"),
+    "grocery": ("shop", "supermarket", "grocery store"),
+    "parking": ("amenity", "parking", "car park"),
+    "police": ("amenity", "police", "police station"),
+    "airport": ("aeroway", "aerodrome", "airport"),
+    "train station": ("railway", "station", "railway station"),
+    "museum": ("tourism", "museum", "museum"),
+    "park": ("leisure", "park", "park"),
+}
+
+
+def _godseye_haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Great-circle distance in metres (matches the globe's own POI ranking)."""
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
+
+
+def godseye_find_nearby_place(category: str, radius_m: int = 2500) -> dict | None:
+    """Nearest place of a spoken category around the globe's current view centre.
+
+    Keyless, and reuses the globe's own Overpass proxy (cache + rate limiting)
+    before falling back to the public Overpass API. Returns
+    {'label', 'lat', 'lng', 'distance_m', 'category'} or None when nothing
+    resolves — callers must report the miss rather than invent a location.
+    """
+    import urllib.request
+
+    key = (category or "").strip().lower()
+    tag = _GODSEYE_POI_TAGS.get(key)
+    if not tag:
+        return None
+    tag_key, tag_value, noun = tag
+    view = godseye_view_state()
+    lat, lng = view.get("lat"), view.get("lng")
+    if lat is None or lng is None:
+        log.info("God's Eye View: no view telemetry yet — cannot resolve 'nearby %s'", key)
+        return None
+    radius = max(200, min(int(radius_m or 2500), 8000))
+    query = (
+        f'[out:json][timeout:20];'
+        f'(node(around:{radius},{lat},{lng})["{tag_key}"="{tag_value}"];'
+        f'way(around:{radius},{lat},{lng})["{tag_key}"="{tag_value}"];);'
+        f'out center 12;'
+    )
+    form = urllib.parse.urlencode({"data": query}).encode("utf-8")
+    payload = None
+
+    # 1. The globe's own proxy — already cached, rate limited, mirror-aware.
+    port = getattr(_gods_eye_service, "port", None) if _gods_eye_service else None
+    if port:
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/overpass",
+                data=form,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception as exc:
+            log.info("God's Eye View: globe Overpass proxy unavailable (%s); trying public API", exc)
+
+    # 2. Public Overpass directly — one bounded query per voice command.
+    if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
+        try:
+            req = urllib.request.Request(
+                "https://overpass-api.de/api/interpreter",
+                data=form,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "User-Agent": "jarvis-globe-bridge/1.0",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception as exc:
+            log.warning("God's Eye View: nearby '%s' lookup failed: %s", key, exc)
+            return None
+
+    elements = payload.get("elements") if isinstance(payload, dict) else None
+    if not isinstance(elements, list) or not elements:
+        return None
+    best = None
+    for el in elements:
+        if not isinstance(el, dict):
+            continue
+        el_lat, el_lng = el.get("lat"), el.get("lon")
+        if el_lat is None or el_lng is None:
+            center = el.get("center")
+            if isinstance(center, dict):
+                el_lat, el_lng = center.get("lat"), center.get("lon")
+        try:
+            el_lat, el_lng = float(el_lat), float(el_lng)
+        except (TypeError, ValueError):
+            continue
+        dist = _godseye_haversine_m(lat, lng, el_lat, el_lng)
+        if best is None or dist < best["distance_m"]:
+            tags = el.get("tags") if isinstance(el.get("tags"), dict) else {}
+            best = {
+                "label": (tags.get("name") or noun).strip(),
+                "lat": el_lat,
+                "lng": el_lng,
+                "distance_m": round(dist),
+                "category": noun,
+            }
+    return best
+
+
+# ─── God's Eye View voice grammar (routed ahead of the bare "open globe" handler) ───
+# Layer names are passed through verbatim: the globe's own normalizeLayerId
+# resolves its alias table, so JARVIS never has to mirror it.
+_GODSEYE_NAV_VERBS = (
+    r"fly\s+to", r"take\s+me\s+to", r"take\s+us\s+to", r"now\s+move\s+to",
+    r"move\s+to", r"navigate\s+to", r"zoom\s+to", r"jump\s+to", r"focus\s+on",
+    r"centre\s+on", r"center\s+on",
+)
+_GODSEYE_LAYER_VERBS = (
+    (r"\b(?:turn|switch|power)\s+(?:it\s+)?on\b", True),
+    (r"\b(?:turn|switch|power)\s+(?:it\s+)?off\b", False),
+    (r"\benable\b", True),
+    (r"\bdisable\b", False),
+    (r"\bshow\s+(?:me\s+)?(?:the\s+)?", True),
+    (r"\bhide\s+(?:the\s+)?", False),
+    (r"\b(?:display|load|add)\s+(?:the\s+)?", True),
+    (r"\b(?:remove|clear)\s+(?:the\s+)?", False),
+)
+# Mirrors the globe's own LAYER_ALIASES (godseye/src/voice/gevActions.js) so a
+# phrase like "show me the coffee shop" can never be mistaken for a layer
+# command. Anything outside this set falls through to the other handlers instead
+# of making the globe throw "Unknown data layer". Keep in sync with upstream.
+_GODSEYE_LAYER_NAMES = frozenset({
+    "flights", "planes", "aircraft", "military", "military flights",
+    "earthquakes", "quakes", "satellites", "space mission", "space missions",
+    "missions", "traffic", "street traffic", "cctv", "cameras", "radio",
+    "internet radio", "radio stations", "bikeshare", "bikes", "ais", "ships",
+    "vessels", "live vessels", "datacenters", "data centers", "data centres",
+    "dams", "submarine cables", "cables", "telegeography", "fire perimeters",
+    "perimeters", "wildfire perimeters", "firms", "fires", "active fires",
+    "alpr", "alpr cameras", "flock cameras", "license plate readers",
+    "license plate cameras", "plate readers", "local-adsb", "local adsb",
+    "local ads-b", "my receiver", "my antenna", "my sdr",
+})
+
+
+def _clean_godseye_target(raw: str) -> str:
+    """Tidy a spoken destination into a geocoder-friendly query."""
+    t = re.sub(r"\s+", " ", (raw or "").strip().strip(" ,"))
+    t = re.sub(r"^(?:the|a|an)\s+", "", t, flags=re.I)
+    # Drop a dangling preposition left over from the stripped phrasing
+    # ("... in", "... on") plus trailing politeness.
+    t = re.sub(r"\s+(?:in|on|at|to|for|from)$", "", t, flags=re.I).strip()
+    t = re.sub(r"\s+(?:please|for\s+me|now|on\s+the\s+map)$", "", t, flags=re.I).strip()
+    return t if 2 <= len(t) <= 80 else ""
+
+
+def _gods_eye_ready() -> bool:
+    """True when the globe sidecar is up (used to gate bare globe commands)."""
+    svc = _gods_eye_service
+    if svc is None or not getattr(svc, "enabled", False):
+        return False
+    try:
+        return bool(svc.status().get("ready"))
+    except Exception:
+        return False
+
+
+def godseye_command_context() -> bool:
+    """True when a globe-shaped command with no 'god's eye' in it is in scope.
+
+    Either the globe page is attached (bridge polling) or the sidecar is up.
+    Without this gate, phrases like 'take me to X' would hijack unrelated
+    handlers whenever the user happened to have the globe open.
+    """
+    return godseye_bridge_live() or _gods_eye_ready()
+
+
+def parse_godseye_command(text: str) -> dict | None:
+    """Map a spoken phrase to a globe action.
+
+    Returns:
+      {'action': name, 'args': {...}, 'say': confirmation}  direct action
+      {'poi': category}                                     needs a lookup first
+      None                                                  not a globe command
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    t = re.sub(r"^(?:jarvis|hey\s+jarvis|ok\s+jarvis)[,\s]+", "", t).strip()
+    t = t.rstrip(".!? ")
+
+    # 1. Explicit destination: "<thing> in god's eye view" (also opens the globe).
+    # "pull up"/"bring up" are deliberately absent — section 1d owns those verbs
+    # for 3D constructs. Step 2 below still accepts them when the globe is named,
+    # so "bring up the golden gate bridge in god's eye view" still works.
+    m = re.search(
+        r"(?:show|display|open|find|locate)\s+(?:me\s+)?(?:the\s+)?(.+?)\s+"
+        r"(?:in|on)\s+(?:the\s+)?(?:god'?s?\s*eye(?:\s+view)?|godseye|globe|world\s+map)\b",
+        t,
+    )
+    if m:
+        target = _clean_godseye_target(m.group(1))
+        if target:
+            return {"action": "fly_to_location", "args": {"query": target},
+                    "say": f"Taking the globe to {target}, sir."}
+
+    named_globe = any(p in t for p in GODSEYE_VOICE_PHRASES) or "globe" in t
+    in_scope = godseye_command_context()
+
+    # 2. Named globe with a trailing navigation target, e.g. "god's eye, fly to tokyo".
+    if named_globe:
+        stripped = t
+        for phrase in GODSEYE_VOICE_PHRASES:
+            stripped = stripped.replace(phrase, " ")
+        # Only connectors are dropped here. Stripping "me"/"the" would break the
+        # very verbs we are about to match ("take me to the colosseum").
+        stripped = re.sub(r"\b(?:in|on)\s+(?:the\s+)?(?:view|globe|world\s+map)\b", " ", stripped)
+        stripped = re.sub(r"\s+", " ", stripped).strip(" ,")
+        residual = re.sub(r"^(?:(?:and|then|please|now)\b[\s,]*)+", "", stripped).strip(" ,")
+        for verb in _GODSEYE_NAV_VERBS:
+            vm = re.search(rf"^(?:{verb})\s+(.+)$", residual)
+            if vm:
+                target = _clean_godseye_target(vm.group(1))
+                if target:
+                    return {"action": "fly_to_location", "args": {"query": target},
+                            "say": f"Taking the globe to {target}, sir."}
+        # "god's eye, show me the eiffel tower" — a bare display verb.
+        sm = re.search(
+            r"^(?:show|display|bring\s+up|pull\s+up|find|locate|look\s+at)\s+"
+            r"(?:me\s+)?(?:the\s+)?(.+)$",
+            residual,
+        )
+        if sm:
+            target = _clean_godseye_target(sm.group(1))
+            if target:
+                return {"action": "fly_to_location", "args": {"query": target},
+                        "say": f"Taking the globe to {target}, sir."}
+
+    if not in_scope:
+        return None
+
+    # 3. Nearby places — resolved by a keyless Overpass lookup before the flight.
+    poi = re.search(
+        r"\b(?:nearest|closest|nearby|close\s*by|around\s+here|near\s+here)\s+([a-z][a-z\s]{1,28})$",
+        t,
+    )
+    if not poi:
+        poi = re.search(
+            r"\b(?:find|locate|where'?s|where\s+is|any)\s+(?:the\s+|a\s+|an\s+|some\s+)?"
+            r"(?:nearest\s+|closest\s+|good\s+)?([a-z][a-z\s]{1,28}?)\s+"
+            r"(?:nearby|near\s+here|around\s+here|close\s*by)\b",
+            t,
+        )
+    if poi:
+        category = re.sub(r"\s+", " ", poi.group(1)).strip()
+        category = re.sub(r"^(?:the|a|an)\s+", "", category)
+        if category in _GODSEYE_POI_TAGS:
+            return {"poi": category}
+
+    # 3b. Bare navigation verbs — in scope only while the globe is live, and
+    # anchored at the start so a longer sentence is not hijacked mid-way.
+    for verb in _GODSEYE_NAV_VERBS:
+        nm = re.search(rf"^(?:{verb})\s+(.+)$", t)
+        if nm:
+            target = _clean_godseye_target(nm.group(1))
+            if target:
+                return {"action": "fly_to_location", "args": {"query": target},
+                        "say": f"Taking the globe to {target}, sir."}
+
+    # 4. Tracking and camera verbs.
+    if re.search(r"\bstop\s+tracking\b|\buntrack\b|\bstop\s+following\b", t):
+        return {"action": "stop_tracking", "args": {}, "say": "Tracking released, sir."}
+    if re.search(r"\b(?:zoom|pull)\s+out\s+to\s+(?:the\s+)?(?:globe|world|space)\b"
+                 r"|\bwhole\s+globe\b|\bzoom\s+to\s+globe\b|\bglobal\s+view\b", t):
+        return {"action": "zoom_to_globe", "args": {}, "say": "Pulling back to the globe, sir."}
+    if re.search(r"\bwhat\s+am\s+i\s+looking\s+at\b|\bwhere\s+are\s+we\b|\bcurrent\s+view\b", t):
+        return {"action": "get_current_view_state", "args": {},
+                "say": "Reading the current view, sir."}
+    if re.search(r"\bstop\s+(?:moving|the\s+camera|orbiting|the\s+orbit)\b", t):
+        return {"action": "move_camera", "args": {"motion": "stop"},
+                "say": "Halting camera motion, sir."}
+
+    zm = re.search(r"\bzoom\s+(in|out)\b", t)
+    if zm:
+        return {"action": "adjust_camera_zoom",
+                "args": {"direction": zm.group(1), "amount": "medium"},
+                "say": f"Zooming {zm.group(1)}, sir."}
+    mv = re.search(r"\b(orbit|pan|tilt)\s+(left|right|up|down)\b", t)
+    if mv:
+        return {"action": "move_camera",
+                "args": {"motion": mv.group(1), "direction": mv.group(2), "mode": "once"},
+                "say": f"{mv.group(1).capitalize()}ing {mv.group(2)}, sir."}
+    # Directional phrasing is a camera pan, never a destination — otherwise
+    # "move the view to the left" would try to fly the globe to a place called
+    # "left".
+    ms = re.search(r"\b(?:move|nudge|shift|slide)\s+(?:the\s+)?(?:view|camera|globe|map)\s+"
+                   r"(?:to\s+)?(?:the\s+)?(left|right|up|down)\b", t)
+    if ms:
+        return {"action": "move_camera",
+                "args": {"motion": "pan", "direction": ms.group(1), "mode": "once"},
+                "say": f"Panning {ms.group(1)}, sir."}
+
+    # 5. Data layers, e.g. "turn on the flights", "hide cctv".
+    for pattern, enabled in _GODSEYE_LAYER_VERBS:
+        lm = re.search(rf"{pattern}\s*(?:the\s+)?([a-z][a-z\s]{{2,32}})$", t)
+        if not lm:
+            continue
+        layer = re.sub(r"\s+", " ", lm.group(1)).strip()
+        layer = re.sub(r"\b(?:layer|data|overlay)\b", "", layer).strip(" ,")
+        if layer not in _GODSEYE_LAYER_NAMES:
+            continue
+        return {"action": "set_layer_visibility",
+                "args": {"layerId": layer, "enabled": enabled},
+                "say": f"{'Enabling' if enabled else 'Disabling'} the {layer} layer, sir."}
+    return None
 
 
 # Song: Spotify or YouTube URL/URI (empty = disabled until chosen)
@@ -523,6 +964,1154 @@ class MemoryManager:
         while not self._queue.empty() and (time.time() - start) < timeout:
             time.sleep(0.1)
         time.sleep(0.5)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GOOGLE WORKSPACE BRIDGE (Calendar + Gmail reads, optional event creation)
+# ═══════════════════════════════════════════════════════════════════════════
+# Design (verified against this codebase before writing):
+#  - OAuth: InstalledAppFlow using the SAME Desktop client in credentials.json
+#    (project jarvis-assistant-508807). Token cache is a SEPARATE file
+#    (.google-workspace-token.json) so the Drive MCP server keeps using
+#    .gdrive-server-credentials.json untouched.
+#  - Scopes are read-only by default: gmail.modify is requested ONLY when
+#    JARVIS_GOOGLE_ALLOW_MARK_READ=1 (to mark digested mail read), and
+#    calendar.events ONLY while JARVIS_GOOGLE_ALLOW_WRITE stays enabled
+#    (default on, so voice can create events; =0 drops it from consent).
+#  - Voice owns UX: next-event / agenda / mail-digest / unread-count routes live
+#    in section 6e of _route_voice_command; the brain falls back to the same
+#    public client/monitor methods those routes use.
+#  - Proactivity is callback-shaped (on_due_event / on_new_mail), exactly like
+#    the watchdog/notify_voice_activity pattern. Quiet hours divert callbacks
+#    into a pending digest instead of speaking. This tree has no call-state
+#    API, so call-safety is a public set_call_active(flag) flag plus a
+#    tests-only in_call_override kwarg on the notify path.
+#  - Safety valve: JARVIS_GOOGLE_BRIDGE_ENABLED=0 forces a hard-disabled client
+#    (every method returns ok:False "disabled") without touching OAuth files.
+#  - Render/cloud: same install flow, or paste the token JSON into
+#    GOOGLE_WORKSPACE_TOKEN_JSON (.env or dashboard) — mirrors the existing
+#    GDRIVE_CREDENTIALS_CONTENT provisioning pattern.
+#  - Tests: pure helpers are module-level so they import without side effects;
+#    a stub API surface lets the whole bridge run offline.
+_GOOGLE_BRIDGE_SCOPES = (
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/gmail.readonly",
+)
+_GOOGLE_BRIDGE_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+_GOOGLE_BRIDGE_WRITE_SCOPE = "https://www.googleapis.com/auth/calendar.events"
+_GOOGLE_WORKSPACE_TOKEN_ENV = "GOOGLE_WORKSPACE_TOKEN_JSON"
+_GOOGLE_BRIDGE_ENABLED_ENV = "JARVIS_GOOGLE_BRIDGE_ENABLED"
+_GOOGLE_BRIDGE_WRITE_ENV = "JARVIS_GOOGLE_ALLOW_WRITE"
+_GOOGLE_BRIDGE_TOKEN_FILE = ".google-workspace-token.json"
+
+# Calendar refreshes faster than Gmail: a missed meeting costs more than late mail.
+_GOOGLE_CALENDAR_POLL_S = float(os.environ.get("JARVIS_GOOGLE_CALENDAR_POLL_S", "300"))
+_GOOGLE_GMAIL_POLL_S = float(os.environ.get("JARVIS_GOOGLE_GMAIL_POLL_S", "600"))
+_GOOGLE_BRIEFING_DEFAULT_HOUR = int(os.environ.get("JARVIS_BRIEFING_HOUR", "8"))
+_GOOGLE_BRIEFING_DEFAULT_MINUTE = int(os.environ.get("JARVIS_BRIEFING_MINUTE", "0"))
+# Quiet hours are a LOCAL convenience default (22:00-08:00); the voice command
+# "quiet hours HH to HH" persists user values into memory/Profile.md.
+_GOOGLE_QUIET_START_H = int(os.environ.get("JARVIS_GOOGLE_QUIET_START_H", "22"))
+_GOOGLE_QUIET_END_H = int(os.environ.get("JARVIS_GOOGLE_QUIET_END_H", "8"))
+
+
+def _google_bridge_enabled() -> bool:
+    """JARVIS_GOOGLE_BRIDGE_ENABLED=0 forces a hard-disabled client."""
+    return os.environ.get(_GOOGLE_BRIDGE_ENABLED_ENV, "1").strip().lower() not in (
+        "0", "off", "false", "no", "disabled",
+    )
+
+
+def _google_write_enabled() -> bool:
+    """Calendar event creation gate: JARVIS_GOOGLE_ALLOW_WRITE=0 kills writes."""
+    return os.environ.get(_GOOGLE_BRIDGE_WRITE_ENV, "1").strip().lower() not in (
+        "0", "off", "false", "no", "disabled",
+    )
+
+
+def _google_redact(value: str) -> str:
+    """Redact a token/value for logs: first 4 + ... + last 4, never the middle."""
+    s = str(value or "")
+    if len(s) <= 12:
+        return "***"
+    return f"{s[:4]}...{s[-4:]}"
+
+
+def _google_quiet_now(now: datetime | None = None,
+                      start_h: int = _GOOGLE_QUIET_START_H,
+                      end_h: int = _GOOGLE_QUIET_END_H) -> bool:
+    """True when a wall-clock hour falls inside the overnight quiet window."""
+    h = (now or datetime.now()).hour
+    if start_h == end_h:
+        return False
+    if start_h < end_h:
+        return start_h <= h < end_h
+    return h >= start_h or h < end_h
+
+
+def _google_parse_natural_day(text: str, now: datetime | None = None) -> datetime.date:
+    """'today'/'tonight'/'tomorrow' (and weekday names) -> a calendar date.
+
+    Bare weekday names resolve to the NEAREST date with that name — past or
+    future — so 'what did I miss on friday' (spoken Saturday) finds yesterday.
+    """
+    now = now or datetime.now()
+    t = (text or "").strip().lower()
+    if "tomorrow" in t or "tmrw" in t:
+        return (now + timedelta(days=1)).date()
+    if "day after tomorrow" in t:
+        return (now + timedelta(days=2)).date()
+    if "tonight" in t:
+        return (now + timedelta(days=1)).date() if now.hour >= 18 else now.date()
+    weekdays = ("monday", "tuesday", "wednesday", "thursday",
+                "friday", "saturday", "sunday")
+    for i, name in enumerate(weekdays):
+        if re.search(rf"\b{name}\b", t):
+            delta = (i - now.weekday()) % 7
+            if delta > 3:  # nearer in the past than the future -> look back
+                delta -= 7
+            return (now + timedelta(days=delta)).date()
+    return now.date()
+
+
+_GOOGLE_CLOCK_RE = re.compile(
+    r"\b(?:(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b"
+    r"|(\d{1,2}):(\d{2})\b"
+    r"|(?:at|from|by|around|near)\s+(\d{1,2})\b(?!\s*:\d)(?!\s*(?::\d{2})?\s*[ap]\.?m?\b))",
+    re.IGNORECASE,
+)
+_GOOGLE_DURATION_RE = re.compile(
+    r"\b(?:for\s+)?(\d{1,3})\s*(minutes?|mins?|hours?|hrs?)\b", re.IGNORECASE)
+_GOOGLE_CREATE_VERB_RE = re.compile(
+    r"^(?:add|create|schedule|book|set\s*up|setup|make|put|save)\b", re.IGNORECASE)
+_GOOGLE_EVENT_STOPWORDS = re.compile(
+    r"\b(?:for\s+)?\d{1,3}\s*(?:minutes?|mins?|hours?|hrs?)\b"
+    r"|\b(?:today|tonight|tomorrow"
+    r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+    r"|\b(?:at|from|by|around|until|till|til|to|for)\s+\d{1,2}(?::\d{2})?\s*(?:[ap]\.?m\.?)?\b"
+    r"|\b\d{1,2}:\d{2}\s*(?:[ap]\.?m\.?)?\b"
+    r"|\b\d{1,2}\s*(?:a\.?m\.?|p\.?m\.?)\b",
+    re.IGNORECASE,
+)
+
+
+def _google_parse_clock(t: str) -> tuple[int, int] | None:
+    """Leftmost spoken clock in `t` -> 24h (hour, minute); None when absent.
+
+    Handles '3pm', '3:30 pm', 'p.m.', '15:45', and bare hours after a
+    connector ('at 3', 'from 10'). Bare 1-7 read as afternoons — 'meeting at
+    3' means 15:00, never 03:00 — while 8-12 stay mornings and 13-23 are
+    plain 24h times.
+    """
+    if not t:
+        return None
+    for m in _GOOGLE_CLOCK_RE.finditer(t):
+        if m.group(3):  # meridiem form: 3pm / 3:30 p.m.
+            h0 = int(m.group(1))
+            if not 1 <= h0 <= 12:
+                continue
+            h = h0 % 12
+            if m.group(3).lower().startswith("p"):
+                h += 12
+            mi = int(m.group(2) or 0)
+            if mi > 59:
+                continue
+            return h, mi
+        if m.group(4) is not None:  # explicit 24h clock: 15:45
+            h, mi = int(m.group(4)), int(m.group(5))
+            if h > 23 or mi > 59:
+                continue
+            if 1 <= h <= 7:
+                h += 12
+            return h, mi
+        h = int(m.group(6))  # bare hour after a connector: 'at 3'
+        if not 1 <= h <= 23:
+            continue
+        if 1 <= h <= 7:
+            h += 12
+        return h, 0
+    return None
+
+
+def _google_parse_duration(t: str) -> int | None:
+    """'for 30 minutes' / '2 hrs' -> minutes (clamped 5..1440)."""
+    m = _GOOGLE_DURATION_RE.search(t or "")
+    if not m:
+        return None
+    n = int(m.group(1))
+    if n <= 0:
+        return None
+    mins = n * 60 if m.group(2).lower().startswith("hr") else n
+    return max(5, min(mins, 24 * 60))
+
+
+def _google_parse_dt_arg(s: str) -> datetime | None:
+    """Tool-argument datetime: ISO 8601 first, 'YYYY-MM-DD HH:MM' fallback."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.astimezone()
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt).astimezone()
+        except ValueError:
+            continue
+    return None
+
+
+def _google_clean_event_title(text: str) -> str:
+    """Strip day/clock/duration scaffolding down to the bare event name."""
+    s = re.sub(r"\s+", " ", str(text or ""))
+    for _ in range(3):  # nested leftovers ('meeting tomorrow at 3 pm')
+        cleaned = _GOOGLE_EVENT_STOPWORDS.sub(" ", s)
+        if cleaned == s:
+            break
+        s = cleaned
+    s = re.sub(r"\s+(?:on|to|in|into)\s+(?:my\s+)?(?:calendar|schedule)\b", " ", s,
+               flags=re.IGNORECASE)
+    s = re.sub(r"\s+(?:on|at|from|by|until|till|til|for|to|with)\s*$", " ", s,
+               flags=re.IGNORECASE)
+    return s.strip(" ,.!?-")
+
+
+def _google_parse_create_command(t: str, raw: str | None = None) -> dict | None:
+    """'add event dentist tomorrow at 3' -> event-creation intent parts.
+
+    Returns {title, day, start_hm, end_hm, duration_min} or None when the
+    phrase is not a create request, so every older intent keeps its phrases.
+    start_hm may be None — the voice handler then asks for a time instead of
+    inventing one. `raw` (original-cased transcript) feeds the title so the
+    calendar entry keeps whatever casing the recogniser produced.
+    """
+    t = re.sub(r"^(?:hey|ok|okay|hello|hi)?\s*jarvis[,\s.]*", "", (t or "")).strip()
+    t = re.sub(r"^please[,\s.]*", "", t).strip()
+    if not _GOOGLE_CREATE_VERB_RE.match(t):
+        return None
+    # additions that belong to shopping lists / notes, never the calendar:
+    if re.search(r"\b(?:to|on|in|onto)\s+(?:my\s+)?(?:cart|list|queue|notes?)\b", t):
+        return None
+    noun = re.search(r"\b(?:event|meeting|appointment|call|block|slot)\b", t)
+    on_cal = re.search(r"\b(?:on|onto|to|in|into)\s+(?:my\s+)?(?:calendar|schedule)\b", t)
+    if not (noun or on_cal or _google_parse_clock(t)):
+        return None
+
+    day = "today"
+    if "tomorrow" in t:
+        day = "tomorrow"
+    elif "tonight" in t:
+        day = "tonight"
+    else:
+        mday = re.search(r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", t)
+        if mday:
+            day = mday.group(1)
+
+    end_hm = None
+    m_until = re.search(r"\b(?:(?:until|till|til)\s+|to\s+(?=\d))(.*)$", t, re.IGNORECASE)
+    if m_until:
+        # Feed a connector so a bare 'until 5' / 'to 5' reads as a clock hour:
+        end_hm = _google_parse_clock("at " + m_until.group(1))
+    start_zone = t[:m_until.start()] if m_until else t
+    start_hm = _google_parse_clock(start_zone)
+
+    # Title from the original-cased line so calendar entries keep whatever
+    # casing the recogniser produced; every cleanup regex is case-insensitive.
+    src = re.sub(r"^(?:hey|ok|okay|hello|hi)?\s*jarvis[,\s.]*", "",
+                 (raw or "").strip(), flags=re.IGNORECASE).strip()
+    src = re.sub(r"^please[,\s.]*", "", src, flags=re.IGNORECASE).strip() or t
+
+    title = re.sub(
+        r"^(?:add|create|schedule|book|set\s*up|setup|make|put|save)\s+", "",
+        src, count=1, flags=re.IGNORECASE)
+    title = re.sub(r"^(?:a|an|the|new)\s+", "", title, count=1, flags=re.IGNORECASE)
+    title = re.sub(r"^(?:calendar\s+)?event\b[\s:,-]*", "", title, count=1,
+                   flags=re.IGNORECASE)
+    title = _google_clean_event_title(title)
+    return {"title": title, "day": day, "start_hm": start_hm, "end_hm": end_hm,
+            "duration_min": _google_parse_duration(t)}
+
+
+def _google_format_event_time(summary: str, start: dict, end: dict) -> str:
+    """One spoken line: 'Team standup, 9:30 AM to 10:00 AM today'.
+
+    All-day events keep only the date part; timed events render in the LOCAL
+    timezone as %-I:%M %p so TTS never reads a raw ISO timestamp.
+    """
+    name = (summary or "Untitled event").strip() or "Untitled event"
+    sd, ed = (start or {}).get("dateTime"), (end or {}).get("dateTime")
+    try:
+        if sd:
+            st = datetime.fromisoformat(str(sd).replace("Z", "+00:00")).astimezone()
+            line = f"{name}, {st.strftime('%-I:%M %p')}"
+            if ed:
+                et = datetime.fromisoformat(str(ed).replace("Z", "+00:00")).astimezone()
+                if et.date() != st.date():
+                    line += f" to {et.strftime('%A %-I:%M %p')}"
+                elif (et - st).total_seconds() > 0:
+                    line += f" to {et.strftime('%-I:%M %p')}"
+            today = datetime.now().astimezone().date()
+            if st.date() == today:
+                line += " today"
+            elif st.date() == today + timedelta(days=1):
+                line += " tomorrow"
+            else:
+                line += f" on {st.strftime('%A, %B %-d')}"
+            return line
+        sday = (start or {}).get("date", "")
+        return f"{name}, all day {sday}" if sday else name
+    except Exception:
+        return name
+
+
+def _google_event_sort_key(ev: dict) -> str:
+    """Timed start, then end, then summary — stable ordering across pages."""
+    s = ev.get("start", {}) or {}
+    e = ev.get("end", {}) or {}
+    return (s.get("dateTime") or s.get("date") or "9999",
+            e.get("dateTime") or e.get("date") or "9999",
+            str(ev.get("summary", "")))
+
+
+def _google_should_notify_event(summary: str, start_iso: str,
+                                urgent_keywords: tuple = ()) -> bool:
+    """Notification rule: timed events only, plus any urgent-keyword match."""
+    keys = [k.strip().lower() for k in (urgent_keywords or ()) if k and k.strip()]
+    if any(k and k in (summary or "").lower() for k in keys):
+        return True
+    if not start_iso:
+        return False  # all-day blocks never interrupt
+    try:
+        st = datetime.fromisoformat(str(start_iso).replace("Z", "+00:00"))
+        now = datetime.now(st.tzinfo) if st.tzinfo else datetime.now().astimezone()
+        return 0 <= (st - now).total_seconds() <= 15 * 60
+    except Exception:
+        return False
+
+
+def _google_build_gmail_query(keywords: tuple = (), label_ids: tuple = (),
+                              unread_only: bool = True,
+                              newer_than_days: int = 7) -> str:
+    """Gmail search string from watcher policy (subject keywords + labels).
+
+    Keyword tokens use Gmail's subject:{} operator; embedded double quotes are
+    stripped so a quote inside a user keyword cannot break out of the phrase.
+    """
+    parts: list[str] = []
+    if unread_only:
+        parts.append("is:unread")
+    for lab in label_ids or ():
+        lab = str(lab or "").strip()
+        if lab:
+            parts.append(f"label:{lab}")
+    for kw in keywords or ():
+        kw = str(kw or "").strip().strip("\"'")
+        if kw:
+            parts.append("subject:{" + kw.replace('"', "") + "}")
+    parts.append(f"newer_than:{max(1, int(newer_than_days))}d")
+    return " ".join(parts)
+
+
+def _google_digest_greeting(now: datetime | None = None) -> str:
+    """Time-of-day prefix so the spoken digest and briefing agree."""
+    h = (now or datetime.now()).hour
+    if h < 5:
+        return "Overnight update"
+    if h < 12:
+        return "Good morning"
+    if h < 18:
+        return "Good afternoon"
+    return "Good evening"
+
+
+def _google_format_mail_line(msg: dict) -> str:
+    """'Subject line, from Name'. Missing fields degrade, never crash."""
+    subject = (msg.get("subject") or "No subject").strip() or "No subject"
+    sender = (msg.get("from") or "").strip()
+    if sender and "<" in sender:
+        sender = sender.split("<")[0].strip().strip("\"'")
+    return f"{subject}, from {sender}" if sender else subject
+
+
+class GoogleWorkspaceClient:
+    """Calendar + Gmail reads over one OAuth identity (Desktop client).
+
+    The ONLY Google API surface that needs credentials.json directly. Network
+    calls use a 10s default timeout; every failure mode returns an ok:False
+    dict — never raises into the voice router, the brain fallback, or the
+    background monitor threads.
+    """
+
+    TOKEN_FILE = _GOOGLE_BRIDGE_TOKEN_FILE
+
+    def __init__(self, root: Path | None = None, api: Any = None):
+        self.root = Path(root) if root else Path(__file__).resolve().parent
+        self.enabled = _google_bridge_enabled()
+        self.disabled_reason = "" if self.enabled else "Disabled via JARVIS_GOOGLE_BRIDGE_ENABLED=0"
+        self._api = api  # stub surface for offline tests / the brain fallback
+        self._lock = threading.Lock()
+        self._calendar = None
+        self._gmail = None
+        self._auth_error: str | None = None
+        if self.enabled and self._api is None:
+            self._provision_token_from_env()
+        _subsystem_health.set_status(
+            "google_workspace", "STANDBY" if self.enabled else "DISABLED",
+            error=self.disabled_reason or None,
+        )
+
+    # ── token provisioning (env first, files second, browser last) ──
+    def token_path(self) -> Path:
+        return self.root / self.TOKEN_FILE
+
+    def _provision_token_from_env(self) -> bool:
+        raw = os.environ.get(_GOOGLE_WORKSPACE_TOKEN_ENV, "").strip()
+        if not raw or self.token_path().exists():
+            return False
+        try:
+            json.loads(raw)  # validate before writing
+            self.token_path().write_text(raw, encoding="utf-8")
+            log.info("Google Workspace: provisioned %s from environment.", self.TOKEN_FILE)
+            return True
+        except Exception as e:
+            log.warning("Google Workspace: ignoring malformed %s (%s)", _GOOGLE_WORKSPACE_TOKEN_ENV, e)
+            return False
+
+    def _build_services(self) -> tuple[bool, str]:
+        """Authenticate (cached token -> refresh -> browser flow) and build services."""
+        if self._api is not None:
+            return True, "stub"
+        if not self.enabled:
+            return False, self.disabled_reason or "disabled"
+        try:
+            from google.auth.transport.requests import Request as GoogleRequest
+            from google.oauth2.credentials import Credentials
+            from google_auth_oauthlib.flow import InstalledAppFlow
+            from googleapiclient.discovery import build
+        except Exception as e:
+            return False, f"Google API libraries missing ({e}). Run: pip install -r requirements.txt"
+        scopes = list(_GOOGLE_BRIDGE_SCOPES)
+        allow_mark = os.environ.get("JARVIS_GOOGLE_ALLOW_MARK_READ", "0").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if allow_mark and _GOOGLE_BRIDGE_MODIFY_SCOPE not in scopes:
+            scopes.append(_GOOGLE_BRIDGE_MODIFY_SCOPE)
+        if _google_write_enabled() and _GOOGLE_BRIDGE_WRITE_SCOPE not in scopes:
+            scopes.append(_GOOGLE_BRIDGE_WRITE_SCOPE)
+        creds = None
+        tpath = self.token_path()
+        try:
+            if tpath.exists():
+                # The cached GRANT decides what a refresh can ever do: when a
+                # scope was added later (e.g. calendar write), one more
+                # consent round beats a silent insufficient-permission error.
+                try:
+                    raw_scope = str(json.loads(tpath.read_text(encoding="utf-8"))
+                                    .get("scope", "")).strip()
+                except Exception:
+                    raw_scope = ""
+                granted = set(raw_scope.split()) if raw_scope else None
+                missing = [s for s in scopes if granted is not None and s not in granted]
+                if missing:
+                    log.warning("Google Workspace: cached token lacks %s — re-running OAuth consent.",
+                                ", ".join(missing))
+                else:
+                    creds = Credentials.from_authorized_user_file(str(tpath), scopes)
+        except Exception as e:
+            log.warning("Google Workspace: cached token unreadable (%s); re-authenticating.", e)
+            creds = None
+        try:
+            if creds and not creds.valid:
+                if creds.expired and creds.refresh_token:
+                    creds.refresh(GoogleRequest())
+                    tpath.write_text(creds.to_json(), encoding="utf-8")
+                else:
+                    creds = None
+            if not creds or not creds.valid:
+                client_file = self.root / "credentials.json"
+                if not client_file.exists():
+                    return False, "credentials.json not found — run the one-time OAuth install first"
+                flow = InstalledAppFlow.from_client_secrets_file(str(client_file), scopes)
+                creds = flow.run_local_server(port=0, prompt="consent")
+                tpath.write_text(creds.to_json(), encoding="utf-8")
+                log.info("Google Workspace: OAuth install complete (token cached).")
+            self._calendar = build("calendar", "v3", credentials=creds, cache_discovery=False)
+            self._gmail = build("gmail", "v1", credentials=creds, cache_discovery=False)
+            self._auth_error = None
+            _subsystem_health.set_status("google_workspace", "ONLINE")
+            return True, "ok"
+        except Exception as e:
+            msg = str(e) or type(e).__name__
+            if "invalid_grant" in msg or "Token has been expired" in msg:
+                msg = ("invalid_grant — the refresh token stopped working. Delete "
+                       f"{self.TOKEN_FILE} and re-run the OAuth install.")
+            self._auth_error = msg
+            log.warning("Google Workspace auth notice: %s", _google_redact(msg))
+            _subsystem_health.set_status("google_workspace", "ERROR", error=msg[:160])
+            return False, msg
+
+    def _services(self):
+        with self._lock:
+            if self._api is not None:
+                return self._api, self._api, None
+            if self._calendar is not None and self._gmail is not None:
+                return self._calendar, self._gmail, None
+        ok, msg = self._build_services()
+        if not ok:
+            return None, None, msg
+        with self._lock:
+            return self._calendar, self._gmail, None
+
+    # ── Calendar reads ──
+    def list_events(self, day: datetime.date | None = None,
+                    time_min: datetime | None = None,
+                    time_max: datetime | None = None,
+                    max_results: int = 20) -> dict:
+        """Events for one day (default today), sorted, spoken-line formatted."""
+        if not self.enabled:
+            return {"ok": False, "error": self.disabled_reason or "disabled", "events": []}
+        cal, _, err = self._services()
+        if err:
+            return {"ok": False, "error": err, "events": []}
+        try:
+            if time_min is None or time_max is None:
+                day = day or datetime.now().astimezone().date()
+                start_day = datetime.combine(day, datetime.min.time()).astimezone()
+                time_min = time_min or start_day
+                time_max = time_max or (start_day + timedelta(days=1))
+            iso_min = (time_min if time_min.tzinfo else time_min.astimezone()).isoformat()
+            iso_max = (time_max if time_max.tzinfo else time_max.astimezone()).isoformat()
+            req = cal.events().list(calendarId="primary", timeMin=iso_min, timeMax=iso_max,
+                                    maxResults=max(1, min(int(max_results or 20), 50)),
+                                    singleEvents=True, orderBy="startTime")
+            items = req.execute(num_retries=1).get("items", []) if hasattr(req, "execute") else req.get("items", [])
+            events = []
+            for it in items or []:
+                try:
+                    events.append({
+                        "id": it.get("id", ""),
+                        "summary": it.get("summary", "Untitled event"),
+                        "start": it.get("start", {}) or {},
+                        "end": it.get("end", {}) or {},
+                        "line": _google_format_event_time(it.get("summary", ""),
+                                                          it.get("start", {}) or {},
+                                                          it.get("end", {}) or {}),
+                    })
+                except Exception:
+                    continue
+            events.sort(key=_google_event_sort_key)
+            return {"ok": True, "events": events}
+        except Exception as e:
+            return {"ok": False, "error": str(e) or type(e).__name__, "events": []}
+
+    def next_event(self, from_dt: datetime | None = None) -> dict:
+        """The single next timed event from now (skips all-day blocks)."""
+        if not self.enabled:
+            return {"ok": False, "error": self.disabled_reason or "disabled", "event": None}
+        now = from_dt or datetime.now().astimezone()
+        res = self.list_events(time_min=now, time_max=now + timedelta(days=7), max_results=10)
+        if not res.get("ok"):
+            return {"ok": False, "error": res.get("error", "query failed"), "event": None}
+        for ev in res["events"]:
+            if (ev.get("start") or {}).get("dateTime"):
+                return {"ok": True, "event": ev}
+        return {"ok": True, "event": None}
+
+    # ── Calendar write (JARVIS_GOOGLE_ALLOW_WRITE=0 hard-disables) ──
+    def create_event(self, title: str, start: datetime,
+                     end: datetime | None = None, description: str = "") -> dict:
+        """Insert one timed event on the primary calendar.
+
+        Needs the calendar.events scope (requested while write is enabled); a
+        token granted without it comes back as ok:False with the exact fix —
+        this path never pretends an event was saved.
+        """
+        if not self.enabled:
+            return {"ok": False, "error": self.disabled_reason or "disabled", "event": None}
+        if not _google_write_enabled():
+            return {"ok": False,
+                    "error": f"write access disabled via {_GOOGLE_BRIDGE_WRITE_ENV}=0",
+                    "event": None}
+        title = (title or "").strip()
+        if not title:
+            return {"ok": False, "error": "the event needs a name", "event": None}
+        try:
+            if start.tzinfo is None:
+                start = start.astimezone()
+            if end is None:
+                end = start + timedelta(hours=1)
+            elif end.tzinfo is None:
+                end = end.astimezone()
+            if end <= start:
+                end = start + timedelta(minutes=30)
+        except Exception as e:
+            return {"ok": False, "error": f"bad time range ({e})", "event": None}
+        cal, _, err = self._services()
+        if err:
+            return {"ok": False, "error": err, "event": None}
+        try:
+            body = {"summary": title, "description": description or "",
+                    "start": {"dateTime": start.isoformat()},
+                    "end": {"dateTime": end.isoformat()}}
+            req = cal.events().insert(calendarId="primary", body=body)
+            res = req.execute(num_retries=1) if hasattr(req, "execute") else req
+            res = res or {}
+            sd, ed = {"dateTime": start.isoformat()}, {"dateTime": end.isoformat()}
+            return {"ok": True, "event": {
+                "id": res.get("id", ""), "summary": res.get("summary", title),
+                "start": sd, "end": ed,
+                "line": _google_format_event_time(title, sd, ed),
+            }}
+        except Exception as e:
+            msg = str(e) or type(e).__name__
+            low = msg.lower()
+            if "insufficient" in low or "forbidden" in low or "403" in msg:
+                msg = (f"the cached token lacks calendar write scope — delete "
+                       f"{self.TOKEN_FILE} to re-consent, or set "
+                       f"{_GOOGLE_BRIDGE_WRITE_ENV}=0")
+            return {"ok": False, "error": msg, "event": None}
+
+    # ── Gmail reads (subject/sender only until the user asks for the body) ──
+    def unread_count(self) -> dict:
+        """Total unread in INBOX (label count, one call)."""
+        if not self.enabled:
+            return {"ok": False, "error": self.disabled_reason or "disabled", "count": 0}
+        _, gmail, err = self._services()
+        if err:
+            return {"ok": False, "error": err, "count": 0}
+        try:
+            req = gmail.users().labels().get(userId="me", id="INBOX")
+            data = req.execute(num_retries=1) if hasattr(req, "execute") else req or {}
+            return {"ok": True, "count": int((data or {}).get("messagesUnread", 0) or 0)}
+        except Exception as e:
+            return {"ok": False, "error": str(e) or type(e).__name__, "count": 0}
+
+    def search_mail(self, subject_keywords: tuple = (), label_ids: tuple = (),
+                    unread_only: bool = True, max_results: int = 10) -> dict:
+        """Unread mail matching subject keywords/labels; bodies NOT fetched here."""
+        if not self.enabled:
+            return {"ok": False, "error": self.disabled_reason or "disabled", "messages": []}
+        _, gmail, err = self._services()
+        if err:
+            return {"ok": False, "error": err, "messages": []}
+        try:
+            q = _google_build_gmail_query(tuple(subject_keywords or ()),
+                                          tuple(label_ids or ()),
+                                          unread_only=unread_only)
+            req = gmail.users().messages().list(userId="me", q=q,
+                                                maxResults=max(1, min(int(max_results or 10), 25)))
+            data = req.execute(num_retries=1) if hasattr(req, "execute") else req or {}
+            out = []
+            for ref in (data or {}).get("messages", []) or []:
+                mid = (ref or {}).get("id", "")
+                if not mid:
+                    continue
+                meta = self.get_message(mid, fetch_body=False)
+                if meta.get("ok"):
+                    out.append(meta["message"])
+            return {"ok": True, "query": q, "messages": out}
+        except Exception as e:
+            return {"ok": False, "error": str(e) or type(e).__name__, "messages": []}
+
+    def get_message(self, msg_id: str, fetch_body: bool = False) -> dict:
+        """One message. Body is fetched ONLY when the user explicitly asks."""
+        if not self.enabled:
+            return {"ok": False, "error": self.disabled_reason or "disabled"}
+        if not msg_id:
+            return {"ok": False, "error": "empty message id"}
+        _, gmail, err = self._services()
+        if err:
+            return {"ok": False, "error": err}
+        try:
+            fmt = "full" if fetch_body else "metadata"
+            req = gmail.users().messages().get(
+                userId="me", id=msg_id, format=fmt,
+                metadataHeaders=["Subject", "From", "Date"],
+            )
+            full = req.execute(num_retries=1) if hasattr(req, "execute") else req or {}
+            headers: dict[str, str] = {}
+            for h in ((full.get("payload") or {}).get("headers") or []):
+                try:
+                    headers[str(h.get("name", "")).lower()] = str(h.get("value", ""))
+                except Exception:
+                    continue
+            msg = {
+                "id": msg_id,
+                "subject": headers.get("subject", "No subject"),
+                "from": headers.get("from", ""),
+                "date": headers.get("date", ""),
+                "line": "",
+            }
+            msg["line"] = _google_format_mail_line(msg)
+            if fetch_body:
+                msg["snippet"] = str(full.get("snippet", ""))
+            return {"ok": True, "message": msg}
+        except Exception as e:
+            return {"ok": False, "error": str(e) or type(e).__name__}
+
+    def mark_read(self, msg_id: str) -> dict:
+        """Remove UNREAD. ONLY available when JARVIS_GOOGLE_ALLOW_MARK_READ=1."""
+        allowed = os.environ.get("JARVIS_GOOGLE_ALLOW_MARK_READ", "0").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if not self.enabled:
+            return {"ok": False, "error": self.disabled_reason or "disabled"}
+        if not allowed:
+            return {"ok": False, "error": "mark-read is off (set JARVIS_GOOGLE_ALLOW_MARK_READ=1)"}
+        if not msg_id:
+            return {"ok": False, "error": "empty message id"}
+        _, gmail, err = self._services()
+        if err:
+            return {"ok": False, "error": err}
+        try:
+            req = gmail.users().messages().modify(
+                userId="me", id=msg_id, body={"removeLabelIds": ["UNREAD"]})
+            (req.execute(num_retries=1) if hasattr(req, "execute") else req)
+            return {"ok": True}
+        except Exception as e:
+            emsg = str(e) or type(e).__name__
+            if "insufficient" in emsg.lower() or "scope" in emsg.lower():
+                return {"ok": False, "error": "token lacks gmail.modify — delete the token file and re-run OAuth install"}
+            return {"ok": False, "error": emsg}
+
+    # ── watchers, digests, and the morning briefing ──
+    def upcoming_within(self, minutes: int = 15,
+                        urgent_keywords: tuple = ()) -> list[dict]:
+        """Timed events starting within N minutes (pure read, used by monitors)."""
+        now = datetime.now().astimezone()
+        res = self.list_events(time_min=now, time_max=now + timedelta(minutes=max(1, minutes)),
+                               max_results=10)
+        if not res.get("ok"):
+            return []
+        return [ev for ev in res["events"]
+                if _google_should_notify_event(ev.get("summary", ""),
+                                               (ev.get("start") or {}).get("dateTime", ""),
+                                               urgent_keywords)]
+
+    def daily_digest(self, now: datetime | None = None,
+                     urgent_keywords: tuple = (),
+                     mail_keywords: tuple = (),
+                     mail_labels: tuple = ()) -> dict:
+        """Today's timed agenda + matching unread mail, in ONE spoken block."""
+        now = now or datetime.now().astimezone()
+        day = _google_parse_natural_day("today", now.replace(tzinfo=None))
+        evs = self.list_events(day=day)
+        agenda = [e["line"] for e in evs.get("events", []) if e.get("start", {}).get("dateTime")]
+        urgent = [e for e in evs.get("events", [])
+                  if _google_should_notify_event(e.get("summary", ""),
+                                                 (e.get("start") or {}).get("dateTime", ""),
+                                                 urgent_keywords)]
+        mail = self.search_mail(tuple(mail_keywords or ()), tuple(mail_labels or ()))
+        mail_lines = []
+        if mail.get("ok"):
+            for m in mail["messages"][:5]:
+                mail_lines.append(_google_format_mail_line(m))
+        parts = [f"{_google_digest_greeting(now)}, sir."]
+        if agenda:
+            parts.append(f"You have {len(agenda)} event{'s' if len(agenda) != 1 else ''} today: "
+                         + "; ".join(agenda[:6]) + ".")
+        else:
+            parts.append("Your calendar is clear today.")
+        for u in urgent[:2]:
+            parts.append(f"Heads up: {u['line']}.")
+        if mail_lines:
+            parts.append(f"And {len(mail['messages'])} matching unread email{'s' if len(mail['messages']) != 1 else ''}: "
+                         + "; ".join(mail_lines) + ".")
+        return {"ok": True, "text": " ".join(parts),
+                "event_count": len(agenda), "mail_count": len(mail_lines)}
+
+    def morning_briefing(self, now: datetime | None = None,
+                         urgent_keywords: tuple = (),
+                         mail_keywords: tuple = (),
+                         mail_labels: tuple = ()) -> str:
+        """The spoken morning briefing (same shape as the calendar digest)."""
+        res = self.daily_digest(now, urgent_keywords, mail_keywords, mail_labels)
+        if not res.get("ok"):
+            return "Good morning, sir. I could not reach your calendar just now."
+        return res["text"]
+
+
+class GoogleWorkspaceMonitor:
+    """Background event + mail watchers with quiet-hour diversion.
+
+    Mirrors the codebase's watchdog pattern: a daemon thread polls (calendar
+    every ~5 min, Gmail every ~10 min), dedupes by event/mail id, and fires
+    on_due_event / on_new_mail. During quiet hours callbacks queue into a
+    pending digest instead of speaking; the digest drains (max 5 items, spoken
+    as one block) on the next direct voice/Google query outside quiet hours.
+    """
+
+    def __init__(self, client: GoogleWorkspaceClient,
+                 on_due_event=None, on_new_mail=None, on_briefing=None,
+                 calendar_poll_s: float = _GOOGLE_CALENDAR_POLL_S,
+                 gmail_poll_s: float = _GOOGLE_GMAIL_POLL_S):
+        self.client = client
+        self.on_due_event = on_due_event
+        self.on_new_mail = on_new_mail
+        self.on_briefing = on_briefing
+        self._briefing_done_date: datetime.date | None = None
+        self.calendar_poll_s = max(60.0, float(calendar_poll_s or _GOOGLE_CALENDAR_POLL_S))
+        self.gmail_poll_s = max(120.0, float(gmail_poll_s or _GOOGLE_GMAIL_POLL_S))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._seen_event_ids: set[str] = set()
+        self._seen_mail_ids: set[str] = set()
+        self._pending: list[dict] = []
+        self._call_active = False
+        self.urgent_keywords: tuple = tuple(
+            k.strip() for k in os.environ.get("JARVIS_GOOGLE_URGENT_KEYWORDS", "").split(",")
+            if k and k.strip()
+        )
+        self.mail_keywords: tuple = tuple(
+            k.strip() for k in os.environ.get("JARVIS_GOOGLE_MAIL_KEYWORDS", "").split(",")
+            if k and k.strip()
+        )
+        self.mail_labels: tuple = tuple(
+            k.strip() for k in os.environ.get("JARVIS_GOOGLE_MAIL_LABELS", "").split(",")
+            if k and k.strip()
+        )
+
+    def set_call_active(self, flag: bool) -> None:
+        """Suppress proactive speech during calls (no call-state API exists)."""
+        with self._lock:
+            self._call_active = bool(flag)
+
+    def quiet_hours(self, start_h: int | None = None,
+                    end_h: int | None = None) -> tuple[int, int]:
+        """Persisted window: memory/Profile.md wins, else env defaults."""
+        start, end = _GOOGLE_QUIET_START_H, _GOOGLE_QUIET_END_H
+        try:
+            if _memory_manager:
+                prof = _memory_manager.read_profile() or ""
+                m = re.search(r"Quiet hours\**\s*:\s*(\d{1,2})\s*to\s*(\d{1,2})", prof)
+                if m:
+                    start, end = max(0, min(23, int(m.group(1)))), max(0, min(23, int(m.group(2))))
+        except Exception:
+            pass
+        if start_h is not None:
+            start = max(0, min(23, int(start_h)))
+        if end_h is not None:
+            end = max(0, min(23, int(end_h)))
+        return start, end
+
+    def is_quiet(self, now: datetime | None = None) -> bool:
+        start, end = self.quiet_hours()
+        return _google_quiet_now(now, start, end)
+
+    def _maybe_briefing(self) -> bool:
+        """Scheduled morning briefing (JARVIS_BRIEFING_HOUR/MINUTE, default 8:00).
+
+        Fires at most once per local day. Quiet hours and in-call defer the
+        attempt (the date is NOT marked) so the briefing arrives as soon as
+        conditions clear — the voice drain keeps anything else from being lost.
+        """
+        now = datetime.now().astimezone()
+        if self._briefing_done_date == now.date():
+            return False
+        if (now.hour, now.minute) < (_GOOGLE_BRIEFING_DEFAULT_HOUR,
+                                     _GOOGLE_BRIEFING_DEFAULT_MINUTE):
+            return False
+        if self.is_quiet(now) or self._call_active:
+            return False
+        text = self.client.morning_briefing(
+            now, self.urgent_keywords, self.mail_keywords, self.mail_labels)
+        self._briefing_done_date = now.date()
+        if self.on_briefing:
+            try:
+                self.on_briefing({"text": text})
+            except Exception as e:
+                log.warning("Google Workspace briefing notice: %s", e)
+            return True
+        log.info("Google Workspace morning briefing (no callback): %s", text)
+        return True
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True,
+                                        name="google-workspace-monitor")
+        self._thread.start()
+        log.info("Google Workspace monitor active (calendar %.0fs, gmail %.0fs).",
+                 self.calendar_poll_s, self.gmail_poll_s)
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def pending_count(self) -> int:
+        with self._lock:
+            return len(self._pending)
+
+    def drain_pending(self, max_items: int = 5) -> list[dict]:
+        with self._lock:
+            out, rest = self._pending[:max_items], self._pending[max_items:]
+            self._pending = rest
+            return out
+
+    # Single funnel: quiet/in-call diverts, otherwise the callback fires.
+    def _notify(self, kind: str, payload: dict,
+                in_call_override: bool | None = None) -> str:
+        in_call = self._call_active if in_call_override is None else bool(in_call_override)
+        if in_call:
+            return "suppressed:in-call"
+        if self.is_quiet():
+            with self._lock:
+                self._pending.append({"kind": kind, **payload})
+                if len(self._pending) > 25:
+                    del self._pending[:-25]
+            return "queued:quiet-hours"
+        try:
+            if kind == "event" and self.on_due_event:
+                self.on_due_event(payload)
+            elif kind == "mail" and self.on_new_mail:
+                self.on_new_mail(payload)
+            return "delivered"
+        except Exception as e:
+            log.warning("Google Workspace notify notice: %s", e)
+            return "callback-error"
+
+    def _loop(self) -> None:
+        next_cal = 0.0
+        next_gmail = 0.0
+        while not self._stop.is_set():
+            now = time.monotonic()
+            try:
+                if now >= next_cal:
+                    next_cal = now + self.calendar_poll_s
+                    self.check_calendar_once()
+                if now >= next_gmail:
+                    next_gmail = now + self.gmail_poll_s
+                    self.check_gmail_once()
+                self._maybe_briefing()
+            except Exception as e:
+                log.debug("Google Workspace monitor cycle notice: %s", e)
+            self._stop.wait(20.0)
+
+    def check_calendar_once(self) -> list[dict]:
+        """One calendar sweep; returns newly-raised items (testable)."""
+        raised: list[dict] = []
+        for ev in self.client.upcoming_within(15, self.urgent_keywords):
+            eid = str(ev.get("id") or ev.get("line", ""))
+            with self._lock:
+                if eid in self._seen_event_ids:
+                    continue
+                self._seen_event_ids.add(eid)
+                if len(self._seen_event_ids) > 200:
+                    self._seen_event_ids = set(list(self._seen_event_ids)[-120:])
+            if self._notify("event", {"event": ev}) == "delivered":
+                raised.append(ev)
+        return raised
+
+    def check_gmail_once(self) -> list[dict]:
+        """One Gmail sweep; returns newly-raised items (testable)."""
+        raised: list[dict] = []
+        res = self.client.search_mail(self.mail_keywords or ("",), self.mail_labels)
+        if not res.get("ok"):
+            return raised
+        allow_mark = os.environ.get("JARVIS_GOOGLE_ALLOW_MARK_READ", "0").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        for msg in res.get("messages", [])[:10]:
+            mid = str(msg.get("id") or "")
+            if not mid:
+                continue
+            with self._lock:
+                if mid in self._seen_mail_ids:
+                    continue
+                self._seen_mail_ids.add(mid)
+                if len(self._seen_mail_ids) > 300:
+                    self._seen_mail_ids = set(list(self._seen_mail_ids)[-180:])
+            if self._notify("mail", {"message": msg}) == "delivered":
+                raised.append(msg)
+                if allow_mark:
+                    try:
+                        self.client.mark_read(mid)
+                    except Exception:
+                        pass
+        return raised
+
+
+_google_client: GoogleWorkspaceClient | None = None
+_google_monitor: GoogleWorkspaceMonitor | None = None
+# Monotonic deadline set by the voice "snooze" intent: while it is in the
+# future, _google_drain_pending_block() holds quiet-hour items instead of
+# speaking them.
+_google_snooze_until: float = 0.0
+
+
+def get_google_client() -> GoogleWorkspaceClient | None:
+    """Process-wide client (None until main() wires it)."""
+    return _google_client
+
+
+def get_google_monitor() -> GoogleWorkspaceMonitor | None:
+    """Process-wide monitor (None until main() wires it)."""
+    return _google_monitor
+
+
+# ── voice intent grammar: Calendar / Gmail / digest / reminders / quiet hours ──
+# Section 2c calls this BEFORE the old openers, so a Google phrasing is never
+# swallowed. Glob-only routing is untouched.
+_GOOGLE_BRIEFING_VERBS = ("morning briefing", "morning brief", "brief me",
+                          "daily briefing", "start my day", "day briefing")
+_GOOGLE_NEXT_EVENT_VERBS = ("next event", "next meeting", "next appointment",
+                            "upcoming event", "upcoming meeting", "what's next",
+                            "what is next", "whats next")
+_GOOGLE_DIGEST_VERBS = ("mail digest", "email digest", "digest", "unread mail",
+                        "unread email", "unread emails", "any new mail",
+                        "any new email", "check my mail", "check my email",
+                        "important mail", "important email")
+
+
+def _google_intent_excludes(t: str) -> bool:
+    """Phrases other subsystems own — never claim them here."""
+    return any(w in t for w in (
+        "blueprint", "construct", "3d model", "barehands", "bare hands",
+        "deploy the fleet", "fleet", "open youtube", "open aniwave",
+        "remove the", "type ", "press ", "move buttons", "dock ",
+        "open orb", "show orb", "open hud", "god's eye", "gods eye", "godseye",
+        "memory vault", "open memory", "websocket", "change theme", "switch theme",
+    ))
+
+
+def parse_google_workspace_command(t: str, raw: str | None = None) -> dict | None:
+    """Map a lowercased transcript to a Google Workspace intent dict.
+
+    Shapes: briefing / next_event / agenda / digest / digest_filtered /
+    mail_search / unread_count-equivalent digest / remind_event / create_event /
+    quiet_hours / snooze / pending. Never raises; None when the phrase is not
+    ours. `raw` is the original-cased transcript (only the created event's
+    title consumes it).
+    """
+    t = (t or "").strip().lower()
+    if not t or _google_intent_excludes(t):
+        return None
+    needs_google = any(w in t for w in (
+        "calendar", "calender", "meeting", "meetings", "appointment", "appointments",
+        "event", "events", "schedule", "scheduled", "agenda", "briefing",
+        "book", "call", "slot", "block",
+        "gmail", "email", "emails", "mail", "mails", "inbox", "digest", "brief",
+        "reminder", "remind", "notify", "alert me", "heads up", "quiet hours",
+        "do not disturb", "snooze",
+        # pending-intent phrases contain no Google noun of their own:
+        "what did i miss", "what'd i miss", "anything pending", "pending updates",
+        "missed anything", "catch me up",
+    ))
+    if not needs_google:
+        return None
+
+    m = re.search(r"quiet\s*hours?\s*(\d{1,2})(?:\s*(?:to|[-–]|until)\s*(\d{1,2}))?", t)
+    if m or ("quiet hours" in t) or ("do not disturb" in t):
+        start = int(m.group(1)) if m and m.group(1) else 22
+        end = int(m.group(2)) if m and m.group(2) else 8
+        return {"kind": "quiet_hours", "start": max(0, min(23, start)),
+                "end": max(0, min(23, end))}
+
+    if any(v in t for v in _GOOGLE_BRIEFING_VERBS):
+        return {"kind": "briefing"}
+
+    if any(v in t for v in _GOOGLE_NEXT_EVENT_VERBS):
+        return {"kind": "next_event"}
+
+    m = re.search(r"remind(?:er)?\s+me\s+(?:about\s+)?(?:my\s+)?(.+?)\s+"
+                  r"(\d+)\s*(min|mins|minute|minutes|hr|hrs|hour|hours)\s+(?:before|ahead|early)", t)
+    if m:
+        label, num, unit = m.group(1).strip(), int(m.group(2)), m.group(3)
+        minutes = num * 60 if unit.startswith("hr") else num
+        return {"kind": "remind_event", "minutes": max(1, min(minutes, 24 * 60)),
+                "label": label or "upcoming events"}
+
+    m = re.search(r"(?:notify|alert|remind|heads?\s*up)(?:\s+me)?\s+(?:about|of|for|on)\s+(.+)", t)
+    if m and any(w in t for w in ("meeting", "event", "appointment", "calendar", "schedule")):
+        return {"kind": "remind_event", "minutes": 15, "label": m.group(1).strip()}
+
+    # add/create/schedule/book -> a NEW calendar event (never claimed silently:
+    # without a clock the handler comes back asking for the time).
+    create = _google_parse_create_command(t, raw)
+    if create:
+        return {"kind": "create_event", **create}
+
+    m = re.search(r"snooze(?:\s+(?:that|this|the|my|these|those))?\s*"
+                  r"(?:reminders?|alerts?|notifications?)?\s*(?:for\s+)?(\d+)\s*"
+                  r"(min|mins|minute|minutes|hr|hrs|hour|hours)?", t)
+    if m:
+        num = int(m.group(1))
+        unit = (m.group(2) or "min").lower()
+        minutes = num * 60 if unit.startswith("hr") else num
+        return {"kind": "snooze", "minutes": max(1, min(minutes, 12 * 60))}
+
+    if any(v in t for v in ("what did i miss", "what'd i miss", "anything pending",
+                            "pending updates", "missed anything", "catch me up")):
+        return {"kind": "pending"}
+
+    kw = re.search(r"(?:emails?|mails?)\s+(?:about|on|regarding|concerning|from)\s+([a-z0-9][a-z0-9\s\-&']{1,48})", t)
+    if ("digest" in t or "important" in t) and kw:
+        words = [w.strip() for w in re.split(r"\s+(?:and|or|,)\s+", kw.group(1)) if w.strip()]
+        return {"kind": "digest_filtered", "keywords": words[:4]}
+
+    if any(v in t for v in _GOOGLE_DIGEST_VERBS):
+        return {"kind": "digest"}
+
+    if kw and any(w in t for w in ("search", "find", "look for", "show", "any", "about", "from")):
+        words = [w.strip() for w in re.split(r"\s+(?:and|or|,)\s+", kw.group(1)) if w.strip()]
+        return {"kind": "mail_search", "keywords": words[:4]}
+
+    if "unread" in t and any(w in t for w in ("mail", "email", "inbox")):
+        return {"kind": "digest"}
+
+    if any(w in t for w in ("agenda", "schedule", "today's", "todays", "tomorrow", "tonight",
+                            "my day", "on my calendar", "my calendar")):
+        day = "today"
+        for name in ("tomorrow", "tonight"):
+            if name in t:
+                day = name
+        mday = re.search(r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", t)
+        if mday:
+            day = mday.group(1)
+        return {"kind": "agenda", "label": day}
+
+    if any(w in t for w in ("meeting", "event", "appointment", "calendar")):
+        return {"kind": "next_event"}
+
+    return None
+
+
+def _google_clean_spoken_label(text: str) -> str:
+    """Strip wake words + reminder scaffolding down to the event label."""
+    t = re.sub(r"^(?:hey|ok|okay|hello|hi)?\s*jarvis[,.\\s]*", "", (text or "").strip(), flags=re.IGNORECASE)
+    t = re.sub(r"^please[,.\\s]*", "", t, flags=re.IGNORECASE).strip()
+    t = re.sub(r"^(?:remind(?:er)?\s+me\s+(?:about\s+)?(?:my\s+)?|notify\s+me\s+(?:about\s+)?|alert\s+me\s+(?:about\s+)?)", "", t, flags=re.IGNORECASE).strip()
+    t = re.sub(r"\s+(\d+)\s*(min|mins|minute|minutes|hr|hrs|hour|hours)\s+(?:before|ahead|early)\s*$", "", t, flags=re.IGNORECASE).strip()
+    return t.strip(" ,.!?")
+
+
+# ── Google Workspace spoke for _route_voice_command ──
+# Draining pending FIRST is what makes quiet-hour items impossible to lose:
+# they surface as one spoken block the next time the user asks anything
+# Google-related outside quiet hours.
+def _google_drain_pending_block() -> str:
+    global _google_snooze_until
+    mon = get_google_monitor()
+    if not mon or mon.pending_count() == 0:
+        return ""
+    if mon.is_quiet():
+        return ""
+    if time.monotonic() < _google_snooze_until:
+        return ""
+    items = mon.drain_pending(5)
+    if not items:
+        return ""
+    lines: list[str] = []
+    for it in items:
+        if it.get("kind") == "event":
+            ev = it.get("event", {}) or {}
+            lines.append(f"Missed event: {ev.get('line', ev.get('summary', 'an event'))}.")
+        elif it.get("kind") == "mail":
+            lines.append(f"Missed mail: {_google_format_mail_line(it.get('message', {}) or {})}.")
+    return "While you were away: " + " ".join(lines) + " "
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1418,6 +3007,61 @@ class AutonomousCodeArchitect:
             log.warning("HUD component %s broadcast but persistence failed: %s", safe_id, exc)
             return {"ok": False, "feature_id": safe_id, "injected": True, "error": str(exc)}
 
+    def update_hud_feature(self, feature_id: str, html_code: str, css_code: str,
+                           js_code: str, target_selector: str = "#dynamic-hud-stage") -> dict:
+        """Re-write a widget in place: live re-inject + REPLACE the persisted
+        manifest. The first inject skips files that already carry the id, so a
+        voice-driven edit ('move the progress bar down') must take this path —
+        otherwise the change dies with the next page reload."""
+        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "-", str(feature_id or "")).strip("-")[:80]
+        if not safe_id:
+            return {"ok": False, "error": "A feature identifier is required."}
+        validation_error = self._validate_hud_code(html_code, css_code, js_code)
+        if validation_error:
+            return {"ok": False, "error": validation_error}
+
+        broadcast_ui_event({"type": "INJECT_HUD_COMPONENT", "feature_id": safe_id,
+                            "html": html_code, "css": css_code, "js": js_code,
+                            "target_selector": target_selector})
+        try:
+            index_path, js_path = self._path("web/index.html"), self._path("web/app.js")
+            component = (f'\n{self._HUD_MARKER}\n'
+                         f'<template data-jarvis-feature="{safe_id}">{html_code}</template>\n')
+            controller = (f'\n{self._JS_MARKER}\n'
+                          f'window.__jarvisPersistedHudFeatures = '
+                          f'window.__jarvisPersistedHudFeatures || {{}};\n'
+                          f'window.__jarvisPersistedHudFeatures[{json.dumps(safe_id)}] = '
+                          f'{{html: {json.dumps(html_code)}, css: {json.dumps(css_code)}, '
+                          f'js: {json.dumps(js_code)}, target_selector: {json.dumps(target_selector)}}};\n')
+
+            html_source = index_path.read_text(encoding="utf-8")
+            old_tpl = re.compile(
+                r"[^\n]*" + re.escape(self._HUD_MARKER) + r"\n?"
+                r"[^\n]*<template data-jarvis-feature=\"" + re.escape(safe_id)
+                + r"\">.*?</template>\s*\n?", re.DOTALL)
+            new_html, _n_tpl = old_tpl.subn("", html_source)
+            new_html = new_html.rstrip("\n") + "\n" + component
+            if new_html != html_source:
+                self.code_mgr.apply_code_change(str(index_path),
+                                                 f"Update HUD feature {safe_id}", new_html)
+
+            js_source = js_path.read_text(encoding="utf-8")
+            old_js = re.compile(
+                r"[^\n]*" + re.escape(self._JS_MARKER) + r"\n"
+                r"[^\n]*window\.__jarvisPersistedHudFeatures = [^\n]*\n"
+                r"[^\n]*window\.__jarvisPersistedHudFeatures\["
+                + re.escape(json.dumps(safe_id)) + r"\][^\n]*\n?")
+            new_js, _n_js = old_js.subn("", js_source)
+            new_js = new_js.rstrip("\n") + "\n" + controller
+            if new_js != js_source:
+                self.code_mgr.apply_code_change(str(js_path),
+                                                 f"Update HUD controller {safe_id}", new_js)
+            return {"ok": True, "feature_id": safe_id, "injected": True, "updated": True}
+        except Exception as exc:
+            log.warning("HUD component %s re-injected but persistence update failed: %s",
+                        safe_id, exc)
+            return {"ok": False, "feature_id": safe_id, "injected": True, "error": str(exc)}
+
     def remove_hud_feature(self, feature_id: str) -> dict:
         """Remove a dynamic HUD component permanently: unbinds it live, then
         deletes its persisted manifest from web/app.js and its <template> from
@@ -1466,7 +3110,561 @@ class AutonomousCodeArchitect:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# AUTONOMOUS TOPIC LEARNING — background web research with a self-written,
+# voice-repositionable progress widget on the orb HUD.
+# ═══════════════════════════════════════════════════════════════════════════
+_LEARN_FEATURE_ID = "learning-progress-bar"
+_LEARN_STATE_FILE = "state/learning_state.json"
+_LEARN_UI_FILE = "state/learning_progress_ui.json"
+_LEARNED_DIR = Path("memory") / "02 - Knowledge" / "Learned"
+_LEARN_UI_DEFAULTS = {"anchor": "bottom-left", "dx": 0, "dy": 0,
+                      "show_topic": True, "visible": True}
+
+
+def _workspace_root() -> Path:
+    """Repo root — the same resolution the widget-removal fast-path uses."""
+    return Path(__file__).resolve().parent
+
+
+def _html_escape(value) -> str:
+    return (str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;").replace("'", "&#39;"))
+
+
+def _learning_slug(topic: str) -> str:
+    return (re.sub(r"[^a-z0-9]+", "-", str(topic or "").lower()).strip("-")[:80] or "topic")
+
+
+def _learning_notes_path(topic: str, root: Path | None = None) -> Path:
+    return (root or _workspace_root()) / _LEARNED_DIR / f"{_learning_slug(topic)}.md"
+
+
+def _learning_topic_exists(topic: str) -> bool:
+    return _learning_notes_path(topic).is_file()
+
+
+def _learning_widget_persisted() -> bool:
+    """True once the progress widget's controller lives in web/app.js — the
+    same manifest the permanent-removal fast-path scans."""
+    try:
+        src = (_workspace_root() / "web" / "app.js").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return f'__jarvisPersistedHudFeatures[{json.dumps(_LEARN_FEATURE_ID)}]' in src
+
+
+def load_learning_ui_cfg(root: Path | None = None) -> dict:
+    """Voice-mutable widget layout: anchor corner + pixel nudges + flags."""
+    cfg = dict(_LEARN_UI_DEFAULTS)
+    try:
+        raw = json.loads(((root or _workspace_root()) / _LEARN_UI_FILE).read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            cfg.update({k: raw[k] for k in cfg if k in raw})
+    except (OSError, ValueError):
+        pass
+    return cfg
+
+
+def save_learning_ui_cfg(cfg: dict, root: Path | None = None) -> None:
+    path = (root or _workspace_root()) / _LEARN_UI_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    except OSError as exc:
+        log.warning("Learning widget config save notice: %s", exc)
+
+
+def _learning_anchor_css(cfg: dict) -> str:
+    """Anchor + signed pixel offsets -> fixed-position CSS.
+
+    dx is rightward-positive and dy downward-positive for EVERY anchor, so
+    'move it down a bit' behaves the same wherever the bar currently sits."""
+    anchor = str(cfg.get("anchor") or "bottom-left")
+    dx = max(-160, min(800, int(cfg.get("dx") or 0)))
+    dy = max(-160, min(500, int(cfg.get("dy") or 0)))
+    if anchor == "top-left":
+        return f"left: {28 + dx}px; top: {84 + dy}px; right: auto; bottom: auto; transform: none;"
+    if anchor == "top-right":
+        return f"right: {28 - dx}px; top: {84 + dy}px; left: auto; bottom: auto; transform: none;"
+    if anchor == "bottom-right":
+        return f"right: {28 - dx}px; bottom: {100 - dy}px; left: auto; top: auto; transform: none;"
+    if anchor == "top":
+        return f"left: 50%; top: {84 + dy}px; right: auto; bottom: auto; transform: translateX(-50%);"
+    if anchor == "bottom":
+        return f"left: 50%; bottom: {100 - dy}px; right: auto; top: auto; transform: translateX(-50%);"
+    if anchor == "center":
+        return f"left: 50%; top: 50%; right: auto; bottom: auto; transform: translate(-50%, -50%);"
+    return f"left: {28 + dx}px; bottom: {100 - dy}px; right: auto; top: auto; transform: none;"
+
+
+def build_learning_progress_widget(cfg: dict | None = None,
+                                   state: dict | None = None) -> Tuple[str, str, str]:
+    """GENERATE the progress widget's HTML/CSS/JS from live config + state.
+
+    This is the 'Jarvis writes its own UI' path: colors come from the HUD's
+    own theme variables (so the bar always matches the active theme), the
+    position from the voice-mutable layout config, and the labels from real
+    research state. Returns (html, css, js) for the HUD architect."""
+    merged = {**_LEARN_UI_DEFAULTS, **(cfg or {})}
+    st = state or {}
+    topic = str(st.get("topic") or "standby")
+    percent = max(0, min(100, int(st.get("percent") or 0)))
+    phase = str(st.get("phase") or "idle")
+    detail = str(st.get("detail") or "")
+    phase_text = f"{phase} — {detail}" if detail else phase
+    if not st.get("topic"):
+        phase_text = "waiting for a research topic"
+    topic_html = ""
+    if merged.get("show_topic"):
+        topic_html = f'<span class="lp-topic" data-lp-topic>{_html_escape(topic)}</span>'
+    hidden = "" if merged.get("visible", True) else ' style="display:none"'
+    html_code = (
+        f'<div class="lp-widget"{hidden}>'
+        f'<div class="lp-head">{topic_html}<span class="lp-percent" data-lp-percent>{percent}%</span></div>'
+        f'<div class="lp-track" role="progressbar" aria-valuenow="{percent}" aria-valuemin="0" aria-valuemax="100">'
+        f'<div class="lp-fill" data-lp-fill style="width:{percent}%"></div></div>'
+        f'<div class="lp-phase" data-lp-phase>{_html_escape(phase_text)}</div></div>'
+    )
+    css_code = (
+        ".lp-widget{position:fixed;z-index:4600;pointer-events:none;min-width:250px;max-width:330px;"
+        "background:rgba(6,18,24,.86);border:1px solid var(--color-border);border-radius:10px;"
+        "padding:10px 14px 12px;font-family:var(--font-mono,Menlo,monospace);"
+        "box-shadow:0 0 18px var(--color-primary-glow);backdrop-filter:blur(8px);"
+        "transition:all .4s cubic-bezier(.16,1,.3,1);" + _learning_anchor_css(merged) + "}"
+        ".lp-widget .lp-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:6px;}"
+        ".lp-widget .lp-topic{font-size:11px;letter-spacing:.12em;color:#eaffff;text-transform:uppercase;"
+        "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:210px;}"
+        ".lp-widget .lp-percent{font-size:12px;font-weight:700;color:var(--color-primary);}"
+        ".lp-widget .lp-track{height:8px;border-radius:6px;background:rgba(255,255,255,.10);overflow:hidden;}"
+        ".lp-widget .lp-fill{height:100%;width:0;border-radius:6px;"
+        "background:linear-gradient(90deg,var(--color-primary),var(--color-cyan));"
+        "box-shadow:0 0 10px var(--color-primary-glow);transition:width .6s ease;}"
+        ".lp-widget .lp-phase{margin-top:6px;font-size:9.5px;letter-spacing:.1em;color:var(--color-cyan);"
+        "text-transform:uppercase;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}"
+    )
+    js_code = ""  # live updates arrive as LEARNING_PROGRESS events (web/app.js)
+    return html_code, css_code, js_code
+
+
+class _LearningStopped(Exception):
+    """Internal control flow: the voice said stop between research steps."""
+
+
+def build_learning_notes(topic: str, research: dict) -> str:
+    """Markdown notes assembled ONLY from what the sources actually returned."""
+    now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    sources = research.get("sources") or []
+    extract = ""
+    for src in sources:
+        if src.get("extract"):
+            extract = str(src["extract"])
+            break
+    summary = extract or str(research.get("abstract") or "")
+    lines = [f"# {topic}", "",
+             f"_Learned by JARVIS on {now} from {len(sources)} web source(s)._", "",
+             "## Summary", ""]
+    if summary.strip():
+        para = re.split(r"\n\s*\n", summary.strip())[0].strip()
+        if len(para) > 1200:
+            para = para[:1200].rsplit(" ", 1)[0] + " …"
+        lines.append(para)
+    else:
+        lines.append("_No encyclopedic summary was available from the sources reached — see below._")
+    related = research.get("related") or []
+    if related:
+        lines += ["", "## Key points", ""]
+        lines += [f"- {point}" for point in related[:6]]
+    lines += ["", "## Sources", ""]
+    if sources:
+        lines += [f"- [{src.get('title') or topic}]({src.get('url') or 'n/a'})" for src in sources]
+    else:
+        lines.append("- No source could be reached.")
+    errors = research.get("errors") or []
+    if errors:
+        lines += ["", "## Gaps (honest)", ""]
+        lines += [f"- {err}" for err in errors]
+    lines.append("")
+    return "\n".join(lines)
+
+
+class TopicLearner:
+    """Research one topic at a time on a background thread with honest progress.
+
+    Every phase broadcasts a LEARNING_PROGRESS event (the HUD widget renders
+    it) and persists to state/learning_state.json; the run ends with real
+    notes in memory/02 - Knowledge/Learned/ — unreachable sources are
+    reported as gaps, never invented around."""
+
+    def __init__(self, root_dir: Path, fetch=None, broadcast=None):
+        self.root_dir = Path(root_dir).resolve()
+        self._fetch = fetch          # callable(url) -> bytes; None = live urllib
+        self._broadcast = broadcast  # callable(dict); None = broadcast_ui_event
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self.state = {"topic": None, "percent": 0, "phase": "idle", "detail": "",
+                      "running": False, "done": False, "sources": 0,
+                      "notes_path": None, "error": None,
+                      "started_at": None, "finished_at": None}
+        self._load_state()
+
+    # ── state plumbing ──────────────────────────────────────────────────
+    def _state_path(self) -> Path:
+        return self.root_dir / _LEARN_STATE_FILE
+
+    def _load_state(self) -> None:
+        try:
+            raw = json.loads(self._state_path().read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and raw.get("topic"):
+                self.state.update({k: raw[k] for k in self.state if k in raw})
+            if self.state.get("running"):
+                # The process died mid-research; say so instead of lying.
+                self.state.update({"running": False, "phase": "interrupted",
+                                   "detail": "JARVIS restarted mid-research"})
+                self._persist()
+        except (OSError, ValueError):
+            pass
+
+    def _persist(self) -> None:
+        try:
+            self._state_path().parent.mkdir(parents=True, exist_ok=True)
+            self._state_path().write_text(json.dumps(self.state, indent=2), encoding="utf-8")
+        except OSError as exc:
+            log.debug("Learning state persist notice: %s", exc)
+
+    def _emit(self) -> None:
+        fn = self._broadcast or broadcast_ui_event
+        try:
+            fn({"type": "LEARNING_PROGRESS", **self.state})
+        except Exception as exc:
+            log.debug("Learning progress broadcast notice: %s", exc)
+
+    def _set(self, percent: int, phase: str, detail: str, sources: int | None = None) -> None:
+        if self._stop.is_set():
+            raise _LearningStopped()
+        with self._lock:
+            self.state["percent"] = max(int(self.state.get("percent") or 0),
+                                         max(0, min(100, int(percent))))
+            self.state["phase"] = phase
+            self.state["detail"] = detail
+            if sources is not None:
+                self.state["sources"] = int(sources)
+            self._persist()
+        self._emit()
+
+    def status(self) -> dict:
+        with self._lock:
+            return dict(self.state)
+
+    def start(self, topic: str) -> dict:
+        topic = str(topic or "").strip()
+        if len(topic) < 2:
+            return {"ok": False, "reason": "empty",
+                    "error": "A topic of at least two characters is required."}
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return {"ok": False, "reason": "busy"}
+            self._stop.clear()
+            self.state = {"topic": topic, "percent": 0, "phase": "queued",
+                          "detail": "preparing the research pass", "running": True,
+                          "done": False, "sources": 0, "notes_path": None, "error": None,
+                          "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                          "finished_at": None}
+            self._persist()
+            self._emit()
+            self._thread = threading.Thread(target=self._run, name="jarvis-topic-learner",
+                                            daemon=True)
+            self._thread.start()
+        return {"ok": True, "topic": topic}
+
+    def stop(self, timeout: float = 6.0) -> dict:
+        if not (self._thread and self._thread.is_alive()):
+            return {"ok": False, "reason": "idle"}
+        self._stop.set()
+        self._thread.join(timeout=timeout)
+        return {"ok": True, **self.status()}
+
+
+    # ── the research itself ─────────────────────────────────────────────
+    def _fetch_text(self, url: str) -> str:
+        if self._fetch is not None:
+            raw = self._fetch(url)
+        else:
+            req = urllib.request.Request(url, headers={"User-Agent": "Jarvis-Learning/1.0"})
+            with urllib.request.urlopen(req, timeout=6.0) as resp:
+                raw = resp.read()
+        return raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+
+    def _now(self) -> str:
+        return datetime.now().astimezone().isoformat(timespec="seconds")
+
+    def _run(self) -> None:
+        topic = self.state["topic"]
+        research = {"sources": [], "abstract": "", "related": [], "errors": []}
+        try:
+            self._set(5, "researching the web", f"Searching for {topic}")
+            wiki_titles: list = []
+            try:
+                wiki_titles = [
+                    str(it.get("title") or "")
+                    for it in json.loads(self._fetch_text(
+                        "https://en.wikipedia.org/w/api.php?action=query&list=search"
+                        "&format=json&srlimit=4&srsearch=" + urllib.parse.quote_plus(topic)
+                    )).get("query", {}).get("search", []) if it.get("title")
+                ]
+            except Exception as exc:
+                research["errors"].append(f"Wikipedia search unavailable ({exc})")
+            self._set(25, "gathering sources",
+                      f"{len(wiki_titles)} encyclopedia matches" if wiki_titles
+                      else "No encyclopedia match", sources=len(wiki_titles))
+
+            extract = ""
+            if wiki_titles:
+                try:
+                    pages = json.loads(self._fetch_text(
+                        "https://en.wikipedia.org/w/api.php?action=query&prop=extracts"
+                        "&exintro=1&explaintext=1&redirects=1&format=json&titles="
+                        + urllib.parse.quote_plus(wiki_titles[0])
+                    )).get("query", {}).get("pages", {})
+                    for page in pages.values():
+                        extract = str(page.get("extract") or "").strip()
+                        break
+                except Exception as exc:
+                    research["errors"].append(f"Article extract unavailable ({exc})")
+                research["sources"].append({
+                    "title": wiki_titles[0],
+                    "url": "https://en.wikipedia.org/wiki/" + wiki_titles[0].replace(" ", "_"),
+                    "extract": extract[:6000]})
+            self._set(48, "gathering sources",
+                      "Reading the full article" if extract else "Cross-checking DuckDuckGo",
+                      sources=len(research["sources"]))
+
+            try:
+                ddg = json.loads(self._fetch_text(
+                    "https://api.duckduckgo.com/?q=" + urllib.parse.quote_plus(topic)
+                    + "&format=json&no_html=1&skip_disambig=1"))
+                research["abstract"] = str(ddg.get("AbstractText") or "").strip()
+                if ddg.get("AbstractURL"):
+                    research["sources"].append({
+                        "title": str(ddg.get("Heading") or topic),
+                        "url": str(ddg.get("AbstractURL")),
+                        "extract": research["abstract"][:3000]})
+                for item in (ddg.get("RelatedTopics") or [])[:8]:
+                    if isinstance(item, dict) and item.get("Text"):
+                        research["related"].append(str(item["Text"]))
+            except Exception as exc:
+                research["errors"].append(f"DuckDuckGo unavailable ({exc})")
+            if not research["sources"] and not research["abstract"]:
+                raise RuntimeError("no reachable source answered — the network is offline or blocked")
+            self._set(72, "gathering sources",
+                      f"{len(research['sources'])} sources gathered",
+                      sources=len(research["sources"]))
+
+            self._set(86, "writing notes", "Structuring what I found")
+            path = _learning_notes_path(topic, self.root_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(build_learning_notes(topic, research), encoding="utf-8")
+            self._set(96, "writing notes", "Saved to the knowledge vault")
+            with self._lock:
+                self.state.update({
+                    "percent": 100, "phase": "complete",
+                    "detail": f"{len(research['sources'])} sources read",
+                    "running": False, "done": True,
+                    "notes_path": str(path.relative_to(self.root_dir)),
+                    "finished_at": self._now()})
+            self._persist()
+            self._emit()
+        except _LearningStopped:
+            with self._lock:
+                self.state.update({"running": False, "done": False, "phase": "stopped",
+                                   "detail": "stopped by voice command",
+                                   "finished_at": self._now()})
+            self._persist()
+            self._emit()
+        except Exception as exc:
+            log.warning("Topic learning failed for %r: %s", topic, exc)
+            with self._lock:
+                self.state.update({"running": False, "done": False, "phase": "failed",
+                                   "detail": str(exc)[:200], "error": str(exc)[:200],
+                                   "finished_at": self._now()})
+            self._persist()
+            self._emit()
+
+
+def parse_learning_command(t: str, learned=None, has_widget=None) -> dict | None:
+    """Map a transcript to a topic-learning / progress-widget intent.
+
+    Kinds: start / status / stop / read / show_bar / hide_bar / move / label.
+    Anchored and guarded on purpose: phrases owned by other handlers
+    ('learn more about humans', 'what did you learn about humans', permanent
+    widget removal) fall through untouched. `learned(topic)` and
+    `has_widget()` default to filesystem probes; tests inject their own."""
+    t = re.sub(r"^(?:hey|ok|okay|hello|hi)?\s*jarvis[,\s.]*", "", (t or "")).strip()
+    t = re.sub(r"^please[,\s.]*", "", t).strip().rstrip("?.!")
+    if not t:
+        return None
+    learned_cb = learned if learned is not None else _learning_topic_exists
+    widget_cb = has_widget if has_widget is not None else _learning_widget_persisted
+
+    # Phrases naming a widget/component/feature belong to the permanent
+    # removal fast-path ('remove the progress bar widget') — never claim them.
+    if re.search(r"\b(?:widget|component|feature|panel)\b", t, re.IGNORECASE):
+        return None
+
+    # stop / cancel the running research
+    if re.fullmatch(r"(?:stop|cancel|abort|halt)(?:\s+(?:the|my))?\s+"
+                    r"(?:current\s+|topic\s+)?learn(?:ing|ed)?(?:\s+(?:session|research|topic))?",
+                    t, re.IGNORECASE) or re.fullmatch(
+            r"(?:stop|cancel|abort)(?:\s+the)?\s+research(?:ing)?"
+            r"(?:\s+(?:session|now|please))?", t, re.IGNORECASE):
+        return {"kind": "stop"}
+
+    # progress questions
+    if (re.fullmatch(r"(?:learning|research)\s+(?:status|progress|update)", t, re.IGNORECASE)
+            or re.fullmatch(r"what\s+(?:are|r|is)\s+(?:you|u)\s+(?:learning|researching)"
+                            r"(?:\s+right\s+now)?", t, re.IGNORECASE)
+            or re.fullmatch(r"how(?:'s|\s+is)\s+(?:the\s+|your\s+)?learning\s+going",
+                            t, re.IGNORECASE)
+            or re.fullmatch(r"are\s+you\s+learning\s+anything(?:\s+right\s+now)?",
+                            t, re.IGNORECASE)):
+        return {"kind": "status"}
+
+    # read previously learned notes back — ONLY for topics we actually hold;
+    # 'what did you learn about humans' must keep its dedicated handler.
+    m_read = re.fullmatch(
+        r"what\s+(?:have|'ve|did|do)\s+you\s+(?:already\s+)?learn(?:ed|ing)?"
+        r"\s+(?:about|on|for)\s+(.+)", t, re.IGNORECASE) or re.fullmatch(
+        r"what\s+do\s+you\s+know\s+(?:about|on)\s+(.+)", t, re.IGNORECASE)
+    if m_read:
+        topic = m_read.group(1).strip().rstrip("?.!")
+        if topic and learned_cb(topic):
+            return {"kind": "read", "topic": topic}
+        return None
+
+    # "learn hacking (and put the progress bar on the orb screen)"
+    m_learn = re.fullmatch(
+        r"(?:i\s+want\s+you\s+to\s+|go\s+ahead\s+and\s+|could\s+you\s+|can\s+you\s+)?"
+        r"(?:start\s+)?learn(?:ing)?\s+(?:about\s+|to\s+|more\s+about\s+|more\s+on\s+)?"
+        r"([a-z0-9][\w\s'\-]{1,70}?)"
+        r"(\s*(?:,|;|\.|and|with|then)\s+(?:please\s+)?"
+        r"(?:show|put|display|add|stick)?\s*(?:me\s+|the\s+|a\s+|my\s+)*"
+        r"(?:live\s+)?progress\s*bar\b.*)?"
+        r"$", t, re.IGNORECASE)
+    if m_learn and (m_learn.group(1) or "").strip():
+        topic = re.sub(r"^(?:more\s+(?:about|on)\s+)", "", m_learn.group(1).strip(),
+                       flags=re.IGNORECASE).strip()
+        if (len(topic) >= 2
+                and not re.search(r"(?:^|\s)(?:is|are|was|were)(?:\s|$)", topic, re.IGNORECASE)
+                and topic.lower() not in ("humans", "human")):
+            return {"kind": "start", "topic": topic, "show_bar": bool(m_learn.group(2))}
+
+    # bar-first order: "put the progress bar on the orb screen and learn hacking"
+    m_bar_first = re.fullmatch(
+        r"(?:show|put|display|add|stick)(?:\s+me)?\s+(?:the\s+|a\s+|my\s+)?(?:live\s+)?progress\s*bar"
+        r"(?:\s+(?:on|onto|up\s+on|to)\s+(?:the\s+)?(?:orb\s*screen|screen|hud|display))?"
+        r"\s*(?:,|\.|and|then|while|whilst|as)?\s*(?:please\s+)?(?:you\s+)?(?:start\s+)?learn(?:ing)?"
+        r"\s+(?:about\s+|to\s+)?(.+)", t, re.IGNORECASE)
+    if m_bar_first and (m_bar_first.group(1) or "").strip():
+        topic = m_bar_first.group(1).strip()
+        if (len(topic) >= 2
+                and not re.search(r"(?:^|\s)(?:is|are|was|were)(?:\s|$)", topic, re.IGNORECASE)
+                and topic.lower() not in ("humans", "human")):
+            return {"kind": "start", "topic": topic, "show_bar": True}
+
+    # ── bar layout: pixel nudge first, then anchor move ──
+    m_nudge = re.fullmatch(
+        r"(?:move|shift|nudge|drag|slide)\s+(?:the\s+|that\s+|this\s+)?"
+        r"((?:progress|learning)\s*bar|the\s+bar|it|this\s+bar)\s*"
+        r"(?:(?:slightly|a\s+bit|a\s+little)\s+)?"
+        r"(up|down|left|right)"
+        r"(?:\s*(?:,|and)?\s*(?:slightly|a\s+bit|a\s+little|more|over))?",
+        t, re.IGNORECASE)
+    if m_nudge:
+        target = re.sub(r"\s+", " ", m_nudge.group(1).lower())
+        if target in ("it", "this bar") and not widget_cb():
+            return None
+        amount = 20 if re.search(r"slightly|a\s+bit|a\s+little", t, re.IGNORECASE) else 40
+        return {"kind": "move", "mode": "nudge",
+                "direction": m_nudge.group(2).lower(), "amount": amount}
+
+    m_anchor = re.fullmatch(
+        r"(?:move|shift|reposition|put|place|drop|slide)\s+(?:the\s+|that\s+|this\s+)?"
+        r"((?:progress|learning)\s*bar|the\s+bar|it|this\s+bar)\s+"
+        r"(?:to|in|into|at|over)?\s*(?:the\s+)?"
+        r"(?:(?P<tb>top|bottom|upper|lower)[\s-]*(?P<lr>left|right)"
+        r"|(?P<lr2>left|right)[\s-]*(?P<tb2>top|bottom|upper|lower)"
+        r"|(?P<only>top|bottom|left|right|center|middle)"
+        r"|(?:a|the|any)\s+corner)"
+        r"(?:\s*(?:corner|side|edge))?\s*$",
+        t, re.IGNORECASE)
+    if m_anchor:
+        target = re.sub(r"\s+", " ", m_anchor.group(1).lower())
+        if target in ("it", "this bar") and not widget_cb():
+            return None
+        if m_anchor.group("tb"):
+            anchor = ("top" if m_anchor.group("tb") in ("top", "upper") else "bottom") \
+                + "-" + m_anchor.group("lr")
+        elif m_anchor.group("lr2"):
+            anchor = ("top" if m_anchor.group("tb2") in ("top", "upper") else "bottom") \
+                + "-" + m_anchor.group("lr2")
+        elif m_anchor.group("only"):
+            anchor = {"left": "bottom-left", "right": "bottom-right",
+                      "center": "center", "middle": "center"}.get(
+                          m_anchor.group("only"), m_anchor.group("only"))
+        else:
+            anchor = "top-right"  # bare "…to a corner"
+        return {"kind": "move", "mode": "anchor", "anchor": anchor}
+
+    # ── topic label: 'show the topic you are learning in the progress too' ──
+    if (re.fullmatch(r"show\s+(?:me\s+)?(?:the\s+)?(?:current\s+)?topic"
+                     r"\s+(?:in|on|inside|within|over)\s+(?:the\s+)?progress(?:\s*bar)?"
+                     r"(?:\s+too)?", t, re.IGNORECASE)
+            or re.fullmatch(r"show\s+(?:me\s+)?the\s+topic\s+you\s+(?:are|'re)\s+learning"
+                            r"\s+(?:in|on)\s+(?:the\s+)?progress(?:\s*bar)?(?:\s+too)?",
+                            t, re.IGNORECASE)
+            or re.fullmatch(r"show\s+what\s+you\s+(?:are|'re)\s+learning"
+                            r"\s+(?:in|on)\s+(?:the\s+)?progress(?:\s*bar)?(?:\s+too)?",
+                            t, re.IGNORECASE)):
+        return {"kind": "label", "show": True}
+    if (re.fullmatch(r"hide\s+(?:the\s+)?topic\s+(?:from|in|on)\s+(?:the\s+)?progress(?:\s*bar)?",
+                     t, re.IGNORECASE)
+            or re.fullmatch(r"hide\s+what\s+you\s+(?:are|'re)\s+learning"
+                            r"\s+(?:from|in|on)\s+(?:the\s+)?progress(?:\s*bar)?",
+                            t, re.IGNORECASE)):
+        return {"kind": "label", "show": False}
+
+    # ── bar visibility ──
+    if re.fullmatch(r"(?:show|display|put(?:\s+up)?|bring\s+up|open|add|give\s+me)(?:\s+the)?"
+                    r"\s+(?:live\s+)?progress\s*bar"
+                    r"(?:\s+(?:on|onto|up\s+on|in)?\s*(?:the\s+)?(?:orb\s*screen|screen|hud|display))?"
+                    r"(?:\s+again)?(?:\s+so\s+that\s+i\s+can\s+see\s+(?:the\s+)?progress.*)?",
+                    t, re.IGNORECASE):
+        return {"kind": "show_bar"}
+    if re.fullmatch(r"(?:hide|remove|close|take\s+down|dismiss|get\s+rid\s+of)(?:\s+the)?"
+                    r"\s+progress\s*bar"
+                    r"(?:\s+(?:from|on|off)\s+(?:the\s+)?(?:orb\s*screen|screen|hud|display))?"
+                    r"\s*$", t, re.IGNORECASE):
+        return {"kind": "hide_bar"}
+    return None
+
+
+def _sync_learning_progress_widget() -> dict:
+    """Re-render the progress widget from cfg + state — live AND persisted."""
+    if _code_architect is None:
+        return {"ok": False, "error": "the HUD code architect is offline"}
+    cfg = load_learning_ui_cfg()
+    state = _topic_learner.status() if _topic_learner else None
+    html_code, css_code, js_code = build_learning_progress_widget(cfg, state)
+    if _learning_widget_persisted():
+        return _code_architect.update_hud_feature(_LEARN_FEATURE_ID, html_code, css_code,
+                                                  js_code, target_selector="body")
+    return _code_architect.synthesize_and_inject_hud_feature(
+        _LEARN_FEATURE_ID, html_code, css_code, js_code, target_selector="body")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # MODEL CONTEXT PROTOCOL (MCP) ENGINE (JSON-RPC 2.0)
+
 # ═══════════════════════════════════════════════════════════════════════════
 class MCPSession:
     """Encapsulates a persistent JSON-RPC 2.0 stdio session with an MCP server."""
@@ -2154,6 +4352,8 @@ class BiometricSentinelDaemon:
         self._enroll_variances = []
         self._enroll_target_frames = 30
         self._last_enroll_pct = -1
+        # Passphrase-gated guided enrollment session (code -> face -> voice test)
+        self._enroll_session = None
 
         _biometrics_env = os.environ.get("JARVIS_ENABLE_BIOMETRICS", "").strip().lower()
         if JARVIS_PUBLIC_DEPLOYMENT and _biometrics_env not in ("1", "true", "yes", "on"):
@@ -2257,6 +4457,50 @@ class BiometricSentinelDaemon:
                 f"Identity Status: {auth_str}. Enrolled Admin Profile: {self.admin_name} ({enrolled}). "
                 f"Last optical sensor status: {self.last_status}."
             )
+
+    # ── Passphrase-gated guided enrollment (face + Google-style voice test) ──
+    # Anyone physically present may START the flow with the secret code, but a
+    # profile is only WRITTEN after the live camera sees a real face and the
+    # live mic hears the prompted phrases read aloud.
+
+    def enrollment_session_active(self) -> bool:
+        with self._lock:
+            sess = self._enroll_session
+            return bool(sess) and time.time() < sess.get("expires_at", 0.0)
+
+    def start_enrollment_session(self, display_name: str = "") -> dict:
+        """Arm a 10-minute enrollment window (name stage first). No profile is written yet."""
+        with self._lock:
+            self._enroll_session = {
+                "expires_at": time.time() + 600.0,
+                "face_done": False,
+                "voice_done": False,
+                "voice_step": 0,
+                "pending_voiceprints": [],
+                "last_prompt": "",
+                "retries": 0,
+                "pending_name": (display_name or "").strip()[:40],
+                "pending_face_embedding": None,
+                "verified": False,
+                "failed_attempts": 0,
+                # Ask "who is enrolling?" before touching the camera, so every
+                # user gets their own profile instead of piling onto 'Admin'.
+                "awaiting_name": not bool((display_name or "").strip()),
+            }
+            return dict(self._enroll_session)
+
+    def cancel_enrollment_session(self, reason: str = "") -> None:
+        with self._lock:
+            self._enroll_session = None
+        if reason:
+            log.info("🔐 Enrollment session ended: %s", reason)
+
+    def get_enrollment_session(self) -> dict | None:
+        with self._lock:
+            sess = self._enroll_session
+            if not sess or time.time() >= sess.get("expires_at", 0.0):
+                return None
+            return dict(sess)
 
     def pause_camera(self) -> bool:
         """Yield the camera hardware to the Web HUD for hand gesture tracking."""
@@ -2369,6 +4613,27 @@ class BiometricSentinelDaemon:
             })
             return
 
+        # Liveness gate: a photo/screen held to the camera during an armed
+        # session must NOT become a trusted face — refuse it loudly instead.
+        try:
+            enrol_live = self.enrollment_session_active()
+        except Exception:
+            enrol_live = False
+        if enrol_live:
+            try:
+                res = self.face_sentinel.evaluate_frame(frame)
+                if res.status == "SPOOF_DETECTED":
+                    log.warning("🔐 Enrollment face refused (spoof: %s).", res.spoof_type)
+                    try:
+                        broadcast_ui_event({"type": "ENROLLMENT_FACE_SPOOF",
+                                            "spoof_type": res.spoof_type,
+                                            "details": res.details})
+                    except Exception as exc:
+                        log.debug("Enrollment broadcast notice: %s", exc)
+                    return
+            except Exception as exc:
+                log.debug("Enrollment liveness notice: %s", exc)
+
         emb = self.face_sentinel.extract_face_embedding(pts_3d)
         if emb is not None:
             self._enroll_embeddings.append(emb)
@@ -2404,6 +4669,36 @@ class BiometricSentinelDaemon:
             norm = np.linalg.norm(mean_emb) + 1e-6
             canonical_emb = (mean_emb / norm).tolist()
             mean_depth = float(np.mean(self._enroll_variances)) if self._enroll_variances else 0.15
+
+            # Guided session hand-off: do NOT write the legacy single-admin
+            # profile here. Stash the face for the session owner and let the
+            # voice test finish first — one user, one atomic write.
+            guided = self._enroll_session is not None and time.time() < self._enroll_session.get("expires_at", 0.0)
+            if guided:
+                try:
+                    self._enroll_session["face_done"] = True
+                    self._enroll_session["pending_face_embedding"] = list(canonical_emb)
+                    if not self._enroll_session.get("pending_name"):
+                        self._enroll_session["pending_name"] = self._enroll_admin_name
+                    pending_name = self._enroll_session.get("pending_name", "")
+                except Exception as exc:
+                    log.debug("Guided face hand-off notice: %s", exc)
+                    pending_name = ""
+                log.info("🔐 Guided enrollment: face captured, handing off to voice test.")
+                try:
+                    broadcast_ui_event({"type": "FACE_ENROLLMENT_COMPLETE",
+                                        "admin_name": pending_name or self._enroll_admin_name,
+                                        "percentage": 100, "guided": True,
+                                        "message": "Face captured. Voice test next."})
+                except Exception as exc:
+                    log.debug("Enrollment broadcast notice: %s", exc)
+                try:
+                    _ve = globals().get("_voice_engine")
+                    if _ve is not None:
+                        _ve._begin_voice_test(pending_name or self._enroll_admin_name)
+                except Exception as exc:
+                    log.debug("Voice-test hand-off notice: %s", exc)
+                return
 
             profile_dir = Path(__file__).resolve().parent / "memory" / "00 - Biometrics"
             profile_dir.mkdir(parents=True, exist_ok=True)
@@ -2674,6 +4969,7 @@ _BH_ALLOWED = ("add_img", "add_card", "clear", "reset", "hand", "give",
                "connect_and_simulate", "ui_control")
 _global_voice_engine = None
 _code_architect = None
+_topic_learner = None
 _biometric_sentinel = None
 _vision_scanner = None
 _human_researcher = None
@@ -2682,7 +4978,22 @@ _active_construct: dict = {}
 
 
 def _call_llm_for_construct(messages: list) -> str:
-    """Calls Groq Cloud AI or local Ollama to synthesize a structured 3D blueprint manifest."""
+    """Calls the OpenRouter free-model pool, Groq Cloud AI, or local Ollama to synthesize a structured 3D blueprint manifest."""
+    # Tier 1 — OpenRouter free-model pool (code-purpose ordering, auto-failover).
+    if get_openrouter_pool is not None:
+        try:
+            pool = get_openrouter_pool()
+            if pool.enabled:
+                res = pool.query(messages, purpose="code", temperature=0.4,
+                                 max_tokens=1200)
+                content = (res.get("content") or "").strip()
+                if content:
+                    log.info("⚡ 3D blueprint synthesized via OpenRouter (%s)",
+                             res.get("model"))
+                    return content
+        except Exception as e:
+            log.debug("OpenRouter construct query notice: %s", e)
+
     groq_key = os.environ.get("GROQ_API_KEY", "").strip()
     if groq_key:
         models = ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "allam-2-7b"]
@@ -3751,6 +6062,563 @@ def fetch_location_distance(origin: str, destination: str, default_origin: str =
         return f"Navigation telemetry unavailable: unable to calculate distance between {orig.title()} and {dest.title()} at this time, sir."
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# LISTENER INTELLIGENCE — knowing WHO spoke, in WHICH LANGUAGE, and WHAT they
+# most likely meant (typo / mishearing tolerant, Chrome-search-bar style).
+#
+# Three independent gates, each honest about what it can actually know:
+#   1. Language + confidence  — foreign speech is DROPPED, never obeyed.
+#   2. Speaker identity       — only enrolled users' voices command, once any
+#                               voiceprint exists (never locks you out before
+#                               the first enrollment has run).
+#   3. Command normalisation  — 'utoobe' / 'yotube' / 'open you tube' resolve to
+#                               canon so routing matches what you meant.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── Guided enrollment: the gate-kept phrases and voice test ────────────────
+# The owner arms enrollment by speaking/typing the full code sentence; the
+# machine-readable fingerprint is deliberately tolerant (a speech model mangles
+# words like "even" -> "event"), while the *authorisation* decision uses the
+# RAW transcript with strict matching + constant-time comparison + lockout.
+
+ENROLL_FLOW_TRIGGER_WORDS = ("enrollment", "enrolment")
+ENROLL_CODE_FINGERPRINT_WORDS = frozenset({"code", "even", "dead", "hero"})
+ENROLL_CODE_REQUIRED_WORDS = ("code", "even", "dead", "hero")
+ENROLL_CODE_LOCKOUT_ATTEMPTS = 5
+ENROLL_CODE_LOCKOUT_SECONDS = 300.0
+ENROLL_TEST_PROMPTS: tuple[str, ...] = (
+    "Hey Jarvis",
+    "Hey Jarvis, open YouTube",
+    "Hey Jarvis, what is the weather today",
+    "Hey Jarvis, set an alarm for seven in the morning",
+    "Hey Jarvis, play some music",
+)
+ENROLL_PROMPT_MIN_WORD_OVERLAP = 0.5   # fraction of prompt words the read-back must contain
+ENROLL_PROMPT_MIN_SECONDS = 1.2        # read-back audio must be at least this long
+ENROLL_MIN_VOICEPRINT_NORM = 0.1       # below this the capture was silence, not a voice
+ENROLL_MAX_PROMPT_RETRIES = 2          # re-tries per prompt before the session aborts
+
+# In-process lockout for the enrollment code (per-process; no new files).
+_enroll_code_failures: list = []  # monotonic timestamps of failed attempts
+_enroll_code_lockout_until: float = 0.0
+
+
+def _enrollment_code_locked_out() -> bool:
+    global _enroll_code_lockout_until
+    now = time.monotonic()
+    if _enroll_code_lockout_until and now >= _enroll_code_lockout_until:
+        _enroll_code_lockout_until = 0.0
+        _enroll_code_failures.clear()
+        return False
+    return bool(_enroll_code_lockout_until and now < _enroll_code_lockout_until)
+
+
+def _enrollment_code_register_failure() -> None:
+    global _enroll_code_lockout_until
+    now = time.monotonic()
+    while _enroll_code_failures and now - _enroll_code_failures[0] > ENROLL_CODE_LOCKOUT_SECONDS:
+        _enroll_code_failures.pop(0)
+    _enroll_code_failures.append(now)
+    if len(_enroll_code_failures) >= ENROLL_CODE_LOCKOUT_ATTEMPTS:
+        _enroll_code_lockout_until = now + ENROLL_CODE_LOCKOUT_SECONDS
+        log.warning("🔐 Enrollment code locked out for %.0fs after %d failures.",
+                    ENROLL_CODE_LOCKOUT_SECONDS, len(_enroll_code_failures))
+
+
+def _enrollment_trigger_detected(raw_text: str) -> bool:
+    """True when the RAW utterance starts an enrollment ('enrollment' + 'code').
+
+    Deliberately tolerant at the TRIGGER level (Whisper may swallow a word);
+    the strict authorisation decision belongs to check_enrollment_code, which
+    explains any refusal instead of silently misrouting.
+    """
+    text = re.sub(r"[^\w\s]", " ", str(raw_text or "").lower())
+    words = set(text.split())
+    has_enroll = any(w in words for w in ENROLL_FLOW_TRIGGER_WORDS) or \
+        any(w.startswith("enrol") for w in words)
+    if not has_enroll:
+        return False
+    if "code" in words:
+        return True
+    # STT may mangle 'code' itself: a near-complete code fingerprint still
+    # routes here so the user gets a proper refusal-and-retry, not silence.
+    return len(words & ENROLL_CODE_FINGERPRINT_WORDS) >= 3
+
+
+def _enrollment_code_fingerprint(text: str) -> frozenset:
+    """Tolerant fingerprint of the code sentence: survives STT mangling."""
+    words = set(re.sub(r"[^\w\s]", " ", str(text or "").lower()).split())
+    return words & ENROLL_CODE_FINGERPRINT_WORDS
+
+
+def _enrollment_code_words_present(raw_text: str) -> bool:
+    """Strict check on the RAW transcript: all four code words must be present."""
+    words = set(re.sub(r"[^\w\s]", " ", str(raw_text or "").lower()).split())
+    return all(w in words for w in ENROLL_CODE_REQUIRED_WORDS)
+
+
+def check_enrollment_code(raw_transcript: str, origin: str = "mic") -> dict:
+    """Authorise an enrollment attempt against the secret code sentence.
+
+    Uses the RAW (unnormalised) transcript, constant-time comparison, and a
+    lockout after repeated failures. Returns {ok, reason} where reason is one
+    of '', 'no_code_words', 'incomplete_code', 'locked_out', 'remote_blocked'.
+    """
+    text = re.sub(r"[^\w\s]", " ", str(raw_transcript or "").lower()).strip()
+    words = text.split()
+    if "code" not in words:
+        return {"ok": False, "reason": "no_code_words"}
+    if origin not in ("mic", "cli"):
+        # Physical presence only: microphone audio, or the local terminal
+        # wizard — never typed into the HUD, HTTP, or websocket.
+        return {"ok": False, "reason": "remote_blocked"}
+    if _enrollment_code_locked_out():
+        return {"ok": False, "reason": "locked_out"}
+    required = list(ENROLL_CODE_REQUIRED_WORDS)
+    hits = sum(1 for r in required if any(
+        hmac.compare_digest(w.encode(), r.encode()) for w in words))
+    ok = _enrollment_code_words_present(raw_transcript) and hits == len(required)
+    if not ok:
+        _enrollment_code_register_failure()
+        return {"ok": False, "reason": "incomplete_code"}
+    return {"ok": True, "reason": ""}
+
+
+def enrollment_prompt_match(prompt: str, read_back: str) -> dict:
+    """Score a voice-test read-back against its prompt (order-free word overlap)."""
+    want = [w for w in re.sub(r"[^\w\s]", " ", (prompt or "").lower()).split() if w]
+    got = set(re.sub(r"[^\w\s]", " ", (read_back or "").lower()).split())
+    if not want:
+        return {"ok": False, "overlap": 0.0, "missing": []}
+    missing = [w for w in want if w not in got]
+    overlap = 1.0 - len(missing) / len(want)
+    return {"ok": overlap >= ENROLL_PROMPT_MIN_WORD_OVERLAP,
+            "overlap": round(overlap, 3), "missing": missing}
+
+# Unicode script ranges recognised without any model support.
+_SCRIPT_LANGUAGE_RANGES: tuple[tuple[str, int, int], ...] = (
+    ("te", 0x0C00, 0x0C7F),   # Telugu
+    ("hi", 0x0900, 0x097F),   # Devanagari (Hindi/Marathi)
+    ("ta", 0x0B80, 0x0BFF),   # Tamil
+    ("kn", 0x0C80, 0x0CFF),   # Kannada
+    ("ml", 0x0D00, 0x0D7F),   # Malayalam
+    ("bn", 0x0980, 0x09FF),   # Bengali
+    ("gu", 0x0A80, 0x0AFF),   # Gujarati
+    ("pa", 0x0A00, 0x0A7F),   # Gurmukhi (Punjabi)
+    ("ar", 0x0600, 0x06FF),   # Arabic
+    ("ru", 0x0400, 0x04FF),   # Cyrillic
+    ("zh", 0x4E00, 0x9FFF),   # CJK
+    ("ja", 0x3040, 0x30FF),   # Hiragana/Katakana
+    ("ko", 0xAC00, 0xD7AF),   # Hangul
+)
+
+
+def _listener_flag(name: str, default: str = "1") -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def listener_allowed_languages() -> set:
+    """Languages whose speech may ever be routed as a command (default: en)."""
+    raw = os.environ.get("JARVIS_STT_LANGUAGES", "en")
+    langs = {p.strip().lower()[:2] for p in re.split(r"[,\s]+", raw) if p.strip()}
+    return langs or {"en"}
+
+
+def _listener_min_lang_prob() -> float:
+    try:
+        return max(0.0, min(1.0, float(os.environ.get("JARVIS_STT_LANG_MIN_PROB", "0.60"))))
+    except ValueError:
+        return 0.60
+
+
+def _listener_min_logprob() -> float:
+    """Floor on Whisper's segment avg_logprob — forced-English gibberish fails it."""
+    try:
+        return float(os.environ.get("JARVIS_STT_MIN_LOGPROB", "-1.0"))
+    except ValueError:
+        return -1.0
+
+
+def stt_model_is_multilingual(model_name: str | None) -> bool:
+    """`*.en` Whisper builds are English-only and cannot report another language."""
+    return not str(model_name or "").strip().lower().endswith(".en")
+
+
+def script_language(text: str) -> str | None:
+    """Detect a language from native script characters, model-independently."""
+    for ch in str(text or ""):
+        cp = ord(ch)
+        for lang, lo, hi in _SCRIPT_LANGUAGE_RANGES:
+            if lo <= cp <= hi:
+                return lang
+    return None
+
+
+def detect_utterance_language(info, transcript: str, model_name: str | None = None) -> dict:
+    """Best-effort language identification for one utterance, with its source.
+
+    `source` is 'whisper' when a multilingual model reported it, 'script' when
+    recognised from native characters, else 'unknown' — we never pretend to know
+    a language we could not actually detect.
+    """
+    text = str(transcript or "")
+    reported = str(getattr(info, "language", "") or "").strip().lower()[:2]
+    try:
+        probability = float(getattr(info, "language_probability", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        probability = 0.0
+
+    if reported and stt_model_is_multilingual(model_name) and probability > 0.0:
+        return {"language": reported, "probability": round(probability, 3),
+                "source": "whisper"}
+
+    # Native script (e.g. 'టెలుగు') is unambiguous whatever the model reported.
+    by_script = script_language(text)
+    if by_script:
+        return {"language": by_script, "probability": 0.99, "source": "script"}
+
+    # Romanised text is NOT evidence of a language: say so instead of guessing.
+    return {"language": "", "probability": 0.0, "source": "unknown"}
+
+
+def admit_utterance(transcript: str, info=None, model_name: str | None = None,
+                    segments=None, source: str = "mic") -> dict:
+    """Decide whether a heard utterance may be routed as a command at all.
+
+    Returns {ok, reason, language, language_probability, language_source,
+    logprob}; `reason` is 'foreign_language', 'uncertain_language' or
+    'low_confidence_speech' when ok is False. The caller owns the UX (we do not
+    lecture bystanders).
+    """
+    allowed = listener_allowed_languages()
+    verdict = detect_utterance_language(info, transcript, model_name)
+    lang, prob = verdict["language"], verdict["probability"]
+    result = {"ok": True, "reason": "", "language": lang,
+              "language_probability": prob, "language_source": verdict["source"],
+              "logprob": None}
+
+    # Honest ordering: an uncertain detection is reported as uncertain, and only
+    # a confident detection of a disallowed language is called foreign speech.
+    if verdict["source"] == "whisper" and prob < _listener_min_lang_prob():
+        result.update(ok=False, reason="uncertain_language")
+        return result
+    if lang and lang not in allowed:
+        result.update(ok=False, reason="foreign_language")
+        return result
+
+    floor = _listener_min_logprob()
+    if segments is not None and floor > -99.0:
+        probs = []
+        for seg in segments:
+            value = getattr(seg, "avg_logprob", None)
+            if value is None:
+                continue
+            try:
+                probs.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        if probs:
+            worst = min(probs)
+            result["logprob"] = round(worst, 3)
+            if worst < floor:
+                result.update(ok=False, reason="low_confidence_speech")
+                return result
+    return result
+
+
+def admit_speaker(speaker_info: dict | None, enrolled: bool, transcript: str,
+                  source: str = "mic") -> dict:
+    """Gate commands to enrolled users' voices once any voiceprint exists.
+
+    Deliberately permissive when nothing is enrolled (otherwise JARVIS would be
+    unusable before the first enrollment has run), and wake phrases always pass
+    so a user can bring the system up and verify. Multi-user aware: besides the
+    legacy `is_admin` flag, a `user` name set by the router's identification
+    pass also authorises (the speaker gate itself stays a pure function).
+    """
+    if source != "mic" or not enrolled or not _listener_flag("JARVIS_SPEAKER_GATE", "1"):
+        return {"ok": True, "reason": ""}
+    info = speaker_info or {}
+    if info.get("is_admin") or info.get("user"):
+        return {"ok": True, "reason": ""}
+    text = (transcript or "").strip().lower()
+    if re.fullmatch(r"(?:hey\s+)?jarvis[,.!]?(?:\s+please)?", text) or "wake up" in text:
+        return {"ok": True, "reason": "wake_phrase"}
+    if _enrollment_trigger_detected(transcript):
+        # The code sentence itself must reach the router for authorisation.
+        return {"ok": True, "reason": "enrollment_attempt"}
+    if info.get("status") == "REPLAY_SPOOF_DETECTED":
+        return {"ok": False, "reason": "replay_spoof"}
+    return {"ok": False, "reason": "unverified_speaker"}
+
+
+# ── COMMAND NORMALISATION (typo / mishearing tolerant routing) ───────────────
+# Chrome's search bar guesses 'utoobe' -> youtube from a huge click corpus; we
+# cannot. Instead: a human-audited alias table for classic mishearings, plus an
+# algorithmic repair pass that is only allowed to fire when it is certain, is
+# never ambiguous, and never touches a destructive instruction.
+
+_SOUNDEX_CODES = {"b": "1", "f": "1", "p": "1", "v": "1", "c": "2", "g": "2",
+                  "j": "2", "k": "2", "q": "2", "s": "2", "x": "2", "z": "2",
+                  "d": "3", "t": "3", "l": "4", "m": "5", "n": "5", "r": "6"}
+
+
+def _soundex(token: str) -> str:
+    letters = re.sub(r"[^a-z]", "", str(token or "").lower())
+    if not letters:
+        return ""
+    out = letters[0].upper()
+    prev = _SOUNDEX_CODES.get(letters[0], "")
+    for ch in letters[1:]:
+        code = _SOUNDEX_CODES.get(ch, "")
+        if code and code != prev:
+            out += code
+        if ch not in "hw":
+            prev = code
+        if len(out) == 4:
+            break
+    return (out + "000")[:4]
+
+
+def _damerau_distance(a: str, b: str, cap: int = 4) -> int:
+    """Bounded Damerau-Levenshtein; an adjacent transposition costs one edit."""
+    if a == b:
+        return 0
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev2 = None
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            if i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                cur[j] = min(cur[j], prev2[j - 2] + cost)
+        prev2, prev = prev, cur
+        if min(prev) > cap:
+            return cap + 1
+    return prev[-1]
+
+
+def _bigram_dice(a: str, b: str) -> float:
+    if len(a) < 2 or len(b) < 2:
+        return 0.0
+    ba = [a[i:i + 2] for i in range(len(a) - 1)]
+    bb = [b[i:i + 2] for i in range(len(b) - 1)]
+    counts: dict = {}
+    for gram in ba:
+        counts[gram] = counts.get(gram, 0) + 1
+    hits = 0
+    for gram in bb:
+        if counts.get(gram, 0) > 0:
+            counts[gram] -= 1
+            hits += 1
+    return 2.0 * hits / (len(ba) + len(bb))
+
+
+# Classic mishearings/typos worth pinning down deterministically. Extend at
+# runtime with jarvis.json -> "speech_aliases": {"utoobe": "youtube", ...}.
+DEFAULT_SPEECH_ALIASES: dict[str, str] = {
+    "utoobe": "youtube", "yotube": "youtube", "youtub": "youtube",
+    "you tube": "youtube", "utube": "youtube", "you tobe": "youtube",
+    "youtube": "youtube",
+    "whatsap": "whatsapp", "what's app": "whatsapp", "vatsapp": "whatsapp",
+    "whats app": "whatsapp", "whatsup": "whatsapp",
+    "git hub": "github", "githup": "github", "gitub": "github",
+    "g mail": "gmail", "gee mail": "gmail",
+    "chat gpt": "chatgpt", "chat-gpt": "chatgpt", "chad gpt": "chatgpt",
+    "goo gle": "google", "gogle": "google", "goolge": "google",
+    "google map": "google maps", "spot ify": "spotify", "spotty fi": "spotify",
+    "net flex": "netflix", "netflicks": "netflix", "linked in": "linkedin",
+    "red it": "reddit", "amazone": "amazon", "wickipedia": "wikipedia",
+    "wiki pedia": "wikipedia", "ani wave": "aniwave", "any wave": "aniwave",
+    "insta gram": "instagram", "face book": "facebook", "dis cord": "discord",
+    "bear hands": "barehands", "bare hands": "barehands", "bear hand": "barehands",
+    "bare hand": "barehands", "bear hands more": "barehands",
+    "justice mode": "gestures", "gods eye view": "gods eye", "god's eye": "gods eye",
+    "god eye": "gods eye",
+}
+
+
+def speech_aliases() -> dict:
+    """Curated aliases, with jarvis.json -> "speech_aliases" overriding/extending."""
+    merged = dict(DEFAULT_SPEECH_ALIASES)
+    try:
+        overrides = JARVIS_CFG.get("speech_aliases", {})
+        if isinstance(overrides, dict):
+            merged.update({str(k).lower(): str(v).lower() for k, v in overrides.items()})
+    except Exception:
+        pass
+    return merged
+
+
+_CORRECTION_COMMAND_VERBS = {
+    "open", "launch", "visit", "start", "play", "show", "switch", "navigate",
+    "go", "take", "bring", "run", "use", "put", "move", "set", "add", "create",
+    "book", "learn", "check", "turn", "make", "find", "search", "tell", "give",
+    "resume", "pause", "stop", "skip", "next", "previous", "wake", "call", "text",
+}
+
+_ENTITY_VOCAB_CORE = {
+    "youtube", "google", "gmail", "github", "gitlab", "reddit", "twitter",
+    "linkedin", "facebook", "instagram", "netflix", "spotify", "discord",
+    "whatsapp", "wikipedia", "chatgpt", "claude", "amazon", "aniwave",
+    "telegram", "chrome", "maps", "cursor",
+}
+
+_COMMAND_VOCAB_BASE = _ENTITY_VOCAB_CORE | {
+    "barehands", "gestures", "orb", "hud", "vault", "terminal", "camera",
+    "calendar", "meeting", "appointment", "event", "agenda",
+    "email", "mail", "inbox", "digest", "briefing", "schedule", "reminder",
+    "learn", "learning", "research", "progress", "topic", "notes",
+    "weather", "temperature", "forecast", "rain", "umbrella",
+    "theme", "arc", "crimson", "ultron", "emerald", "purple", "amber",
+    "volume", "mute", "unmute", "pause", "resume", "play", "skip", "track",
+    "music", "song", "songs", "playlist", "video", "videos",
+    "screenshot", "scroll", "click", "browser", "youtube",
+}
+
+_DESTRUCTIVE_RE = re.compile(
+    r"\b(?:delete|remove|erase|wipe|format|shutdown|shut\s+down|kill|terminate|"
+    r"uninstall|drop|revoke|ban|block|factory\s+reset|power\s+off)\b", re.IGNORECASE)
+
+
+def _listener_vocab() -> set:
+    """Words the normaliser may consider a 'correct spelling' (built lazily —
+    DEFAULT_VOICE_SITE_ALIASES is declared further down this module)."""
+    vocab = set(_COMMAND_VOCAB_BASE) | set(_LOCAL_SITE_BLOCKLIST)
+    vocab |= set(_CORRECTION_COMMAND_VERBS)
+    vocab |= {str(k).lower() for k in DEFAULT_VOICE_SITE_ALIASES}
+    vocab |= {canon for canon in speech_aliases().values() if " " not in canon}
+    vocab.discard("")
+    return vocab
+
+
+def _correction_score(token: str, candidate: str) -> float:
+    """Confidence that `candidate` is what `token` meant (0.0 = no evidence)."""
+    dl = _damerau_distance(token, candidate, cap=4)
+    base = 1.0 - dl / max(len(token), len(candidate))
+    dice = _bigram_dice(token, candidate)
+    sx_t, sx_c = _soundex(token), _soundex(candidate)
+    phonetic = sx_t == sx_c or (len(sx_t) == len(sx_c) == 4 and sx_t[1:] == sx_c[1:])
+    if phonetic and dl <= 1:
+        # Same sound, one edit: dropped/added/swapped letter (yotube, gogle...).
+        return max(base, 0.88)
+    if phonetic and dice >= 0.60:
+        return max(base, dice * 0.95)
+    return base if dl <= 2 else 0.0
+
+
+def _best_candidate(token: str, vocab: set) -> tuple[str | None, float]:
+    """Best unambiguous vocabulary match, or (None, 0.0) when we must not guess."""
+    scored: list[tuple[float, str]] = []
+    for cand in vocab:
+        if abs(len(cand) - len(token)) > 3:
+            continue
+        score = _correction_score(token, cand)
+        if score > 0.0:
+            scored.append((score, cand))
+    if not scored:
+        return None, 0.0
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    best_score, best = scored[0]
+    runner_up = scored[1][0] if len(scored) > 1 else 0.0
+    if best_score < 0.80:
+        return None, 0.0
+    # Two plausible readings -> leave the words alone and let the LLM ask.
+    if best_score < 0.95 and (best_score - runner_up) < 0.06:
+        return None, 0.0
+    return best, best_score
+
+
+def _correction_allowed(token: str, candidate: str, score: float,
+                        utterance: str, single_token: bool) -> bool:
+    """Only rewrite when the context makes the reading unambiguous."""
+    if score >= 0.95:
+        return True
+    stripped = utterance.strip().lower()
+    head = stripped.split(" ", 1)[0]
+    if head in _CORRECTION_COMMAND_VERBS:
+        return True
+    # A typo'd COMMAND VERB in first position: "oepn youtube" -> "open youtube".
+    if candidate in _CORRECTION_COMMAND_VERBS and stripped.startswith(token):
+        return True
+    # A bare entity name ("utoobe") is exactly Chrome's case: one token, one
+    # obvious reading, and JARVIS says out loud what it opened.
+    if single_token and candidate in _ENTITY_VOCAB_CORE:
+        return True
+    return False
+
+
+def _normalize_command_text(text: str, source: str = "text") -> tuple[str, list]:
+    """Repair what JARVIS most likely misheard or you mistyped — in the open.
+
+    Pass 1 applies the curated alias table; pass 2 repairs remaining tokens only
+    when the reading is certain AND unambiguous. Destructive instructions are
+    never rewritten, every correction is logged and broadcast, and the caller
+    keeps the original text — JARVIS must never silently change your words.
+    """
+    original = str(text or "")
+    if not _listener_flag("JARVIS_FUZZY_COMMANDS", "1") or not original.strip():
+        return original, []
+    if _DESTRUCTIVE_RE.search(original):
+        return original, []
+
+    corrections: list = []
+    working = original
+    aliases = speech_aliases()
+
+    # 1. Curated aliases — longest variants first so "you tube" wins over "tube".
+    for variant in sorted(aliases, key=len, reverse=True):
+        canon = aliases[variant]
+        if not variant or variant == canon:
+            continue
+        pattern = (r"(?<![A-Za-z])" + re.escape(variant).replace(r"\ ", r"\s+")
+                   + r"(?![A-Za-z])")
+
+        def _swap(match, canon=canon):
+            corrections.append({"from": match.group(0), "to": canon, "kind": "alias"})
+            return canon
+
+        working = re.sub(pattern, _swap, working, flags=re.IGNORECASE)
+
+    # 2. Algorithmic typo repair for everything the table did not cover.
+    vocab = _listener_vocab()
+    tokens = re.findall(r"[A-Za-z][A-Za-z'\-]{2,}", working)
+    single_token = len(tokens) == 1
+    if tokens:
+        def _fix(match):
+            token = match.group(0)
+            low = token.lower()
+            if low in vocab or len(low) < 4:
+                return token
+            candidate, score = _best_candidate(low, vocab)
+            if not candidate or not _correction_allowed(low, candidate, score,
+                                                        working, single_token):
+                return token
+            corrections.append({"from": token, "to": candidate, "kind": "typo",
+                                "score": round(score, 2)})
+            if token.isupper():
+                return candidate.upper()
+            if token[0].isupper():
+                return candidate.capitalize()
+            return candidate
+
+        working = re.sub(r"[A-Za-z][A-Za-z'\-]{2,}", _fix, working)
+
+    if corrections:
+        log.info("🧠 Listener: %r -> interpreting as %r (%s)", original, working,
+                 ", ".join(f"{c['from']}→{c['to']}" for c in corrections))
+        try:
+            broadcast_ui_event({"type": "TRANSCRIPT_CORRECTION", "original": original,
+                                "corrected": working, "corrections": corrections,
+                                "source": source})
+        except Exception as exc:
+            log.debug("Transcript correction broadcast notice: %s", exc)
+    return working, corrections
+
+
 # ── VOICE INPUT DEDUPLICATION CACHE ──────────────────────────────────────────
 _recent_voice_commands: dict[str, float] = {}
 
@@ -4616,8 +7484,59 @@ class NeuralBrain:
         self.history: list[dict] = []
         self._lock = threading.RLock()
         self._interrupted = threading.Event()
+        # OpenRouter free-model pool: purpose-ordered, health-aware, and it
+        # self-switches when a model is rate-limited/out of tokens/dead.
+        self.openrouter = None
+        if get_openrouter_pool is not None:
+            try:
+                self.openrouter = get_openrouter_pool(
+                    models=cfg.get("openrouter_models"),
+                    on_switch=self._on_openrouter_switch,
+                )
+                if self.openrouter.enabled:
+                    log.info("OpenRouter free-model pool online (%d models).",
+                             len(self.openrouter.models))
+                else:
+                    log.info("OpenRouter pool idle (set OPENROUTER_API_KEY in .env to enable).")
+                    self.openrouter = None
+            except Exception as e:
+                log.info("OpenRouter pool unavailable: %s", e)
+                self.openrouter = None
         log.info("Neural Brain online (Model: %s at %s)", self.model, self.host)
         threading.Thread(target=self._prewarm_ollama, daemon=True).start()
+
+    def _on_openrouter_switch(self, event: dict) -> None:
+        """A pool model dropped out (limit/dead/error): tell the log + HUD."""
+        log.warning("🔄 OpenRouter switching away from %s (%s) -> %s",
+                    event.get("away"), event.get("reason"),
+                    event.get("next") or "fallback tier")
+        try:
+            broadcast_ui_event({
+                "type": "MODEL_SWITCH",
+                "away": event.get("away"),
+                "reason": event.get("reason"),
+                "next": event.get("next", ""),
+            })
+        except Exception:
+            pass
+
+    def _openrouter_attempt(self, messages: list, tools, temperature: float,
+                            on_status=None) -> str:
+        """Cloud tier 1: ask the free-model pool; '' when it cannot answer."""
+        if self.openrouter is None:
+            return ""
+        try:
+            res = self.openrouter.query(
+                messages,
+                tools=tools,
+                temperature=temperature,
+                tool_executor=self.execute_tool,
+                on_status=on_status,
+            )
+        except Exception as e:
+            log.warning("OpenRouter pool notice: %s", e)
+            return ""
+        return (res.get("content") or "").strip()
 
     def interrupt(self) -> None:
         """Signal NeuralBrain to abort current streaming generation immediately."""
@@ -5027,17 +7946,67 @@ class NeuralBrain:
                 return json.dumps(result)
             return "Autonomous code architect is offline."
 
+        elif name in ("google_next_event", "google_agenda", "google_mail_digest",
+                      "google_create_event"):
+            g_client = get_google_client()
+            if not g_client:
+                return ("Google Workspace bridge is offline. Enable it with "
+                        "JARVIS_GOOGLE_BRIDGE_ENABLED=1 and complete the one-time OAuth setup.")
+            if name == "google_next_event":
+                res = g_client.next_event()
+                if not res.get("ok"):
+                    return f"Calendar query failed: {res.get('error', 'unknown error')}"
+                ev = res.get("event")
+                if not ev:
+                    return "No timed events on your calendar for the next seven days."
+                return f"Next event: {ev.get('line') or ev.get('summary', 'Untitled event')}"
+            if name == "google_agenda":
+                day = _google_parse_natural_day(str(args.get("day", "today")))
+                res = g_client.list_events(day=day)
+                if not res.get("ok"):
+                    return f"Calendar query failed: {res.get('error', 'unknown error')}"
+                lines = [e.get("line") for e in res.get("events", []) if e.get("line")]
+                if not lines:
+                    return f"Calendar is clear on {day.strftime('%A, %B %d')}."
+                return f"{len(lines)} event(s) on {day.strftime('%A, %B %d')}: " + "; ".join(lines[:8])
+            if name == "google_create_event":
+                title = str(args.get("title", "")).strip()
+                start = _google_parse_dt_arg(str(args.get("start", "")))
+                if not title:
+                    return "Event title is required — pass a short summary like 'Dentist appointment'."
+                if not start:
+                    return ("Start must be an ISO 8601 local datetime such as "
+                            "2026-09-30T15:00, never a spoken phrase.")
+                end = _google_parse_dt_arg(str(args.get("end", "")))
+                res = g_client.create_event(title, start, end,
+                                            str(args.get("description", "")))
+                if not res.get("ok"):
+                    return f"Event creation failed: {res.get('error', 'unknown error')}"
+                ev = res.get("event") or {}
+                return "Created: " + str(ev.get("line") or title)
+            # google_mail_digest
+            keywords = tuple(k.strip() for k in str(args.get("keywords", "")).split(",") if k.strip())
+            labels = tuple(k.strip() for k in str(args.get("labels", "")).split(",") if k.strip())
+            res = g_client.search_mail(keywords, labels, max_results=8)
+            if not res.get("ok"):
+                return f"Gmail query failed: {res.get('error', 'unknown error')}"
+            msgs = res.get("messages", [])
+            if not msgs:
+                return "No unread mail matches that query."
+            lines = [(m.get("line") or _google_format_mail_line(m)) for m in msgs[:6]]
+            return f"{len(msgs)} unread match(es): " + "; ".join(lines)
+
         elif name == "remove_hud_feature":
             if self.code_architect:
                 return json.dumps(self.code_architect.remove_hud_feature(args.get("feature_id", "")))
             return "Autonomous code architect is offline."
 
         elif name == "enroll_admin_face":
-            admin_name = args.get("admin_name", "Admin")
-            if _biometric_sentinel:
-                _biometric_sentinel.start_face_enrollment(admin_name)
-                return f"Initiated optical 3D facial enrollment for {admin_name}. Visual progress bar active on Orb HUD."
-            return "Biometric sentinel is offline."
+            # Code-locked: the LLM tool can only open the modal/guide — it can
+            # never write a profile. Actual enrollment needs the spoken code.
+            return ("Face enrollment is code-locked, sir. Say the full enrollment "
+                    "code sentence into the microphone to begin — I cannot start "
+                    "it from here.")
 
         elif name == "self_code_improve":
             file_path = args.get("file_path", "jarvis.py")
@@ -5398,6 +8367,59 @@ class NeuralBrain:
                 {
                     "type": "function",
                     "function": {
+                        "name": "google_next_event",
+                        "description": "Read the next timed Google Calendar event from now. Use for 'next meeting', 'what's next', upcoming-event questions.",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "google_agenda",
+                        "description": "Read one day of Google Calendar events (today/tomorrow/weekday). Use for agenda/schedule questions.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "day": {"type": "string", "description": "today, tomorrow, tonight, or a weekday name"}
+                            },
+                            "required": ["day"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "google_mail_digest",
+                        "description": "Read unread Gmail matching subject keywords or labels ('bank statements', 'Amazon'). Never invent subjects; empty when nothing matches.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "keywords": {"type": "string", "description": "Comma-separated subject keywords (max 4)"},
+                                "labels": {"type": "string", "description": "Comma-separated Gmail label ids"}
+                            }
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "google_create_event",
+                        "description": "Create a Google Calendar event when the user asks to add/schedule/book something. Reports honestly when write consent is missing; never claims an event was saved without an ok result.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string", "description": "Short event name, e.g. 'Dentist appointment'"},
+                                "start": {"type": "string", "description": "ISO 8601 local start, e.g. 2026-09-30T15:00"},
+                                "end": {"type": "string", "description": "Optional ISO 8601 end; defaults to one hour after start"},
+                                "description": {"type": "string", "description": "Optional extra details"}
+                            },
+                            "required": ["title", "start"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
                         "name": "remove_hud_feature",
                         "description": "Permanently remove a previously injected dynamic HUD widget. Unbinds it live AND deletes its persisted manifest so it does not return after a page refresh. Use when the user asks to remove/hide/delete a widget, progress bar, panel, or HUD feature.",
                         "parameters": {
@@ -5430,7 +8452,7 @@ class NeuralBrain:
                     "type": "function",
                     "function": {
                         "name": "enroll_admin_face",
-                        "description": "Trigger in-Orb 3D biometric face enrollment for the admin user with real-time visual progress bar",
+                        "description": "Explain that face enrollment is code-locked and must be started by speaking the full enrollment code sentence into the microphone. This tool never starts enrollment or writes biometric profiles.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -5692,7 +8714,8 @@ class NeuralBrain:
                 "3. Self-Coding & Codebase Refactoring: When the user asks you to write code for yourself, modify your code, or patch a feature ('write code for yourself...', 'modify your code to...'), call the 'self_code_patch' or 'self_code_improve' tool to update the target file. "
                 "4. Live HUD capability requests: when asked to show a widget, progress, diagnostic, graph, or status on the orb/HUD, first call 'inspect_codebase' on web/index.html or web/app.js. If missing, immediately call 'synthesize_and_inject_hud_feature' with a compact, safe HUD fragment. Do not merely promise progress; deploy the widget in the current HUD session."
                 "5. Deep Browser Control: a live browser agent is available (mcp_puppeteer_query plus native mcp_puppeteer_puppeteer_* tools). To operate ANY website step-by-step: navigate -> read 'page state' (or use evaluate find/click scripts) -> puppeteer_click / puppeteer_fill -> puppeteer_screenshot. After EVERY action, read the returned page state before deciding the next step; a NOT_FOUND click response includes the real clickable list — pick from it instead of guessing selectors."
-                "6. God's Eye View: a live 3D OSINT globe (flights, ships, satellites, earthquakes, CCTV) runs as a JARVIS sidecar. When the user asks to open the globe, the world map, satellite or flight tracking, or 'God's Eye View', call open_board with target 'godseye'."
+                "6. God's Eye View: a live 3D OSINT globe (flights, ships, satellites, earthquakes, CCTV) runs as a JARVIS sidecar. When the user asks to open the globe, the world map, satellite or flight tracking, or 'God's Eye View', call open_board with target 'godseye'.",
+                "7. Google Workspace: the user's Calendar and Gmail are live tools. 'next meeting'/'what's next' -> google_next_event; 'agenda'/'schedule'/'today'/'tomorrow' -> google_agenda with day; unread or themed mail ('bank statements', 'Amazon') -> google_mail_digest with keywords; any request to ADD/CREATE/SCHEDULE/BOOK an event -> google_create_event with title and an ISO 8601 start (YYYY-MM-DDTHH:MM local time, end optional). Never invent subjects, times, or events; report an empty result or a denied write honestly."
             )
 
             messages = [{"role": "system", "content": sys_content}]
@@ -5708,7 +8731,20 @@ class NeuralBrain:
 
             groq_key = os.environ.get("GROQ_API_KEY", "").strip()
             full_response = ""
-            if groq_key:
+            engine_mode = str(self.cfg.get("engine", "auto")).lower()
+
+            # Cloud tier 1 — OpenRouter free-model pool. Rotates between free
+            # models and self-switches on rate limits / token-quota exhaustion
+            # / dead models before this tier gives up at all.
+            if engine_mode in ("auto", "openrouter"):
+                full_response = self._openrouter_attempt(
+                    messages, tools, gen_temp, on_status)
+                if full_response:
+                    log.info("⚡ Neural engine: OpenRouter free-model pool (temp=%.2f).", gen_temp)
+
+            # Cloud tier 2 — Groq (legacy 'ollama' engine keeps its old
+            # behaviour: Groq whenever a key exists, then local Ollama).
+            if not full_response and groq_key and engine_mode in ("auto", "groq", "ollama"):
                 try:
                     log.info("⚡ Using Groq Cloud AI (openai/gpt-oss-20b) as primary neural engine (temp=%.2f)...", gen_temp)
                     full_response = self._query_groq(messages, groq_key, tools=tools, on_status=on_status)
@@ -6298,6 +9334,17 @@ class VoiceEngine:
             fw = importlib.import_module("faster_whisper")
             WhisperModel = getattr(fw, "WhisperModel")
             log.info("Loading Whisper STT model: %s (this may take a moment)...", self._stt_model_name)
+            if not stt_model_is_multilingual(self._stt_model_name):
+                gated = sorted(listener_allowed_languages() - {"en"})
+                if gated:
+                    log.warning("STT model '%s' is English-only: it CANNOT detect %s. "
+                                "Set JARVIS_WHISPER_MODEL=small (multilingual) for real "
+                                "language detection.", self._stt_model_name, ", ".join(gated))
+                else:
+                    log.info("STT model '%s' is English-only: foreign speech is caught by the "
+                             "confidence gate, not by language detection (set "
+                             "JARVIS_WHISPER_MODEL=small to enable real detection).",
+                             self._stt_model_name)
             self.bus.set_state("thinking")
             self._stt_model = WhisperModel(self._stt_model_name, device="cpu", compute_type="int8")
             log.info("Whisper STT model loaded.")
@@ -6577,6 +9624,9 @@ class VoiceEngine:
                 log_prob_threshold=-0.9,
                 vad_filter=True,
             )
+            # Materialise the segments once: the listener gate needs their
+            # avg_logprob scores, and a generator can only be consumed once.
+            seg_list = list(segments)
 
             # Drop silence / ambient noise when no_speech_prob is high
             no_speech_prob = getattr(info, "no_speech_prob", 0.0)
@@ -6585,7 +9635,30 @@ class VoiceEngine:
                 self.bus.set_state("idle")
                 return
 
-            transcript = " ".join(seg.text for seg in segments).strip()
+            transcript = " ".join(seg.text for seg in seg_list).strip()
+
+            # ── Guided enrollment fast lane (before every gate) ──
+            # Read-backs and the code sentence are enrollment traffic, not
+            # commands: they must never be language-dropped, hallucination
+            # filtered, or speaker-refused. The router re-checks everything.
+            try:
+                sentinel_ref = globals().get("_biometric_sentinel")
+                enroll_live = bool(
+                    sentinel_ref is not None
+                    and getattr(sentinel_ref, "enrollment_session_active", lambda: False)())
+            except Exception:
+                enroll_live = False
+            if enroll_live or _enrollment_trigger_detected(transcript):
+                self._enroll_last_audio = audio
+                self._enroll_last_audio_seconds = float(len(audio)) / 16000.0
+                self._route_voice_command(transcript, origin="mic")
+                try:
+                    self._enroll_last_audio = None
+                    self._enroll_last_audio_seconds = 0.0
+                except Exception:
+                    pass
+                self.bus.set_state("idle")
+                return
 
             # ── 0. Wake Phrase Check (before hallucination filter, standalone wake phrases only) ──
             stripped_cmd = re.sub(r"^(?:hey|ok|okay|hello|hi)?\s*jarvis[,.\s]*", "", transcript.strip(), flags=re.IGNORECASE)
@@ -6606,6 +9679,24 @@ class VoiceEngine:
                         self.speak("Online and at your service, sir.")
                     self.bus.set_state("idle")
                     return
+
+            # ── Listener Intelligence: is this utterance addressed to me, and in
+            # a language I am allowed to act on? Foreign conversation around the
+            # user (e.g. Telugu) is dropped HERE, never routed as a command. ──
+            admission = admit_utterance(transcript, info, self._stt_model_name,
+                                        segments=seg_list)
+            if not admission["ok"]:
+                log.info("🎧 Ignored utterance (%s): language=%s p=%.2f logprob=%s | %r",
+                         admission["reason"], admission.get("language") or "unknown",
+                         admission.get("language_probability") or 0.0,
+                         admission.get("logprob"), transcript)
+                try:
+                    broadcast_ui_event({"type": "LISTENER_REJECTED", **admission,
+                                        "transcript": transcript[:120]})
+                except Exception as exc:
+                    log.debug("Listener rejection broadcast notice: %s", exc)
+                self.bus.set_state("idle")
+                return
 
             clean_norm = re.sub(r"[^\w\s]", "", transcript.lower()).strip()
             words = clean_norm.split()
@@ -6638,10 +9729,39 @@ class VoiceEngine:
                     return
                 if hasattr(_biometric_sentinel, "voice_sentinel") and _biometric_sentinel.voice_sentinel:
                     spk_info = _biometric_sentinel.voice_sentinel.get_speaker_identification(audio, sample_rate=16000)
+                    # Multi-user pass: resolve a friendly name when the legacy
+                    # admin check misses but a stored friend matches this audio.
+                    try:
+                        if not spk_info.get("is_admin"):
+                            identified = _biometric_sentinel.voice_sentinel.identify_user(audio, sample_rate=16000)
+                            if identified.get("matched") and identified.get("name"):
+                                spk_info = dict(spk_info)
+                                spk_info["user"] = identified["name"]
+                                spk_info["speaker"] = identified["name"]
+                                broadcast_ui_event({"type": "SPEAKER_MATCH", **spk_info,
+                                                    "enrolled_user": identified["name"]})
+                    except Exception as exc:
+                        log.debug("Multi-user identify notice: %s", exc)
                     self._last_speaker_id = spk_info
                     broadcast_ui_event({"type": "SPEAKER_MATCH", **spk_info})
                     if spk_info.get("is_admin"):
                         _biometric_sentinel.voice_sentinel.adapt_voiceprint(audio, sample_rate=16000)
+                    # Speaker gate: once any voiceprint exists, only enrolled
+                    # users' voices command. Ambient guests are ignored (HUD-only note).
+                    enrolled = bool(_biometric_sentinel.voice_sentinel.list_enrolled_users())
+                    speaker_gate = admit_speaker(spk_info, enrolled, transcript)
+                    if not speaker_gate["ok"]:
+                        log.warning("🔒 Ignored command (%s) from %s: %r",
+                                    speaker_gate["reason"],
+                                    spk_info.get("speaker", "unknown speaker"), transcript)
+                        try:
+                            broadcast_ui_event({"type": "LISTENER_REJECTED", **speaker_gate,
+                                                "speaker": spk_info.get("speaker"),
+                                                "transcript": transcript[:120]})
+                        except Exception as exc:
+                            log.debug("Speaker gate broadcast notice: %s", exc)
+                        self.bus.set_state("idle")
+                        return
 
             # Route the command
             self._route_voice_command(transcript)
@@ -6705,8 +9825,698 @@ class VoiceEngine:
             log.warning("Media key send failed: %s", e)
             return False
 
+    # ── Google Workspace spoke: dispatches parse_google_workspace_command intents ──
+    # Quiet-hour items drain FIRST (except for an explicit snooze), so missed
+    # events/mail surface as one spoken block before the direct answer —
+    # nothing is ever silently lost.
+    def _handle_google_workspace(self, intent: dict, transcript: str) -> str:
+        global _google_snooze_until
+        kind = str((intent or {}).get("kind") or "")
+        prefix = "" if kind == "snooze" else _google_drain_pending_block()
+        client = get_google_client()
+        mon = get_google_monitor()
+
+        def _err(res: dict, what: str) -> str:
+            return prefix + f"I could not reach your {what}, sir: {res.get('error', 'unknown error')}."
+
+        # Local kinds — no Google round-trip required.
+        if kind == "quiet_hours":
+            start = max(0, min(23, int(intent.get("start", 22))))
+            end = max(0, min(23, int(intent.get("end", 8))))
+            if self.memory:
+                self.memory.update_profile("Quiet hours", f"{start} to {end}")
+            return (prefix + f"Quiet hours set from {start}:00 to {end}:00, sir. "
+                             "Calendar and mail alerts will queue and reach you once they end.")
+
+        if kind == "snooze":
+            minutes = max(1, min(int(intent.get("minutes", 10) or 10), 12 * 60))
+            _google_snooze_until = time.monotonic() + minutes * 60.0
+            return (f"Proactive alerts snoozed for {minutes} minutes, sir. "
+                    "Direct questions still work in the meantime.")
+
+        if kind == "pending":
+            count = mon.pending_count() if mon else 0
+            if prefix:
+                if count:
+                    return prefix + f"That is everything held so far, sir. {count} more remain queued."
+                return prefix + "That is everything you missed, sir."
+            if count == 0:
+                return "Nothing pending, sir. You are fully caught up."
+            if mon and mon.is_quiet():
+                return (f"{count} update{'s' if count != 1 else ''} held during quiet hours, sir. "
+                        "They will come through once quiet hours end.")
+            return (f"{count} update{'s' if count != 1 else ''} still queued, sir. "
+                    "They will surface with your next Google query.")
+
+        if kind == "remind_event":
+            return prefix + self._schedule_google_reminder(intent, client, mon)
+
+        if client is None:
+            return (prefix + "Google Workspace is offline on this instance, sir. "
+                             "Set JARVIS_GOOGLE_BRIDGE_ENABLED=1 and complete the one-time OAuth setup.")
+
+        urgent = mon.urgent_keywords if mon else ()
+        mail_kw = mon.mail_keywords if mon else ()
+        mail_lbl = mon.mail_labels if mon else ()
+
+        if kind == "briefing":
+            return prefix + client.morning_briefing(None, urgent, mail_kw, mail_lbl)
+
+        if kind == "next_event":
+            res = client.next_event()
+            if not res.get("ok"):
+                return _err(res, "calendar")
+            ev = res.get("event")
+            if not ev:
+                return prefix + "Nothing else is scheduled for the next seven days, sir."
+            return prefix + f"Your next event, sir: {ev.get('line') or ev.get('summary', 'an event')}."
+
+        if kind == "agenda":
+            label = str(intent.get("label", "today")).strip() or "today"
+            day = _google_parse_natural_day(label)
+            res = client.list_events(day=day)
+            if not res.get("ok"):
+                return _err(res, "calendar")
+            lines = [e.get("line") for e in res.get("events", []) if e.get("line")]
+            if not lines:
+                return prefix + f"Your calendar is clear for {label}, sir."
+            return (prefix + f"You have {len(lines)} event{'s' if len(lines) != 1 else ''} "
+                             f"{label}: " + "; ".join(lines[:6]) + ".")
+
+        if kind == "create_event":
+            title = str(intent.get("title") or "").strip()
+            if not title:
+                return prefix + "What should I call the event, sir?"
+            if not _google_write_enabled():
+                return (prefix + "Calendar write access is off, sir. Set "
+                                 f"{_GOOGLE_BRIDGE_WRITE_ENV}=1 and restart to let me add events.")
+            hm = intent.get("start_hm")
+            if not hm:
+                return prefix + "What time should I set for that, sir?"
+            day = _google_parse_natural_day(str(intent.get("day") or "today"))
+            start = (datetime.combine(day, datetime.min.time())
+                     + timedelta(hours=int(hm[0]), minutes=int(hm[1]))).astimezone()
+            now = datetime.now().astimezone()
+            if start <= now + timedelta(minutes=1):
+                start += timedelta(days=1)  # an hour already past can only mean tomorrow
+            end = None
+            ehm = intent.get("end_hm")
+            if ehm:
+                end = (datetime.combine(start.date(), datetime.min.time())
+                       + timedelta(hours=int(ehm[0]), minutes=int(ehm[1]))).astimezone()
+                if end <= start:
+                    end += timedelta(days=1)
+            elif intent.get("duration_min"):
+                end = start + timedelta(minutes=int(intent["duration_min"]))
+            res = client.create_event(title, start, end)
+            if not res.get("ok"):
+                return _err(res, "calendar")
+            ev = res.get("event") or {}
+            return prefix + "Added to your calendar, sir: " + str(
+                ev.get("line") or f"{title} at {start.strftime('%-I:%M %p')}")
+
+        if kind == "digest":
+            res = client.daily_digest(None, urgent, mail_kw, mail_lbl)
+            if not res.get("ok"):
+                return _err(res, "calendar and mail")
+            return prefix + str(res.get("text") or "Nothing to report, sir.")
+
+        if kind in ("digest_filtered", "mail_search"):
+            keywords = tuple(str(k).strip() for k in (intent.get("keywords") or []) if str(k).strip())
+            unread = kind == "digest_filtered"
+            res = client.search_mail(keywords, (), unread_only=unread, max_results=8)
+            if not res.get("ok"):
+                return _err(res, "mail")
+            msgs = res.get("messages", [])
+            if not msgs:
+                scope = "unread " if unread else ""
+                return prefix + f"No {scope}mail matches {', '.join(keywords)}, sir."
+            lines = [(m.get("line") or _google_format_mail_line(m)) for m in msgs[:6]]
+            return (prefix + f"I found {len(msgs)} matching email{'s' if len(msgs) != 1 else ''}, sir: "
+                             + "; ".join(lines) + ".")
+
+        return prefix + "I could not interpret that Google Workspace request, sir."
+
+    def _schedule_google_reminder(self, intent: dict, client, mon) -> str:
+        """One-shot daemon timer for a 'remind me N minutes before' intent.
+
+        Best effort: if the next calendar event matches the label, fire at
+        (event start - N minutes); otherwise fire N minutes from now. Quiet
+        hours divert the reminder into the monitor's pending queue so it is
+        drained later instead of spoken.
+        """
+        lead = max(1, min(int(intent.get("minutes", 15) or 15), 24 * 60))
+        label = _google_clean_spoken_label(str(intent.get("label", ""))) or "your schedule"
+        now = datetime.now().astimezone()
+        fire_at = now + timedelta(minutes=lead)
+        message = f"Reminder, sir: {label}."
+        if client:
+            try:
+                res = client.next_event()
+                ev = res.get("event") if (res or {}).get("ok") else None
+            except Exception:
+                ev = None
+            if ev:
+                try:
+                    raw_start = str((ev.get("start") or {}).get("dateTime", ""))
+                    ev_start = datetime.fromisoformat(raw_start.replace("Z", "+00:00"))
+                    if ev_start.tzinfo is None:
+                        ev_start = ev_start.astimezone()
+                    words = {w for w in re.findall(r"[a-z0-9]+", label.lower()) if len(w) > 2}
+                    ev_words = set(re.findall(r"[a-z0-9]+", (ev.get("summary") or "").lower()))
+                    if words & ev_words:
+                        candidate = ev_start - timedelta(minutes=lead)
+                        if candidate > now:
+                            fire_at = candidate
+                        message = (f"Reminder, sir: {ev.get('summary') or label} begins in "
+                                   f"{lead} minute{'s' if lead != 1 else ''}.")
+                except Exception:
+                    pass
+        delay_s = max(1.0, (fire_at - now).total_seconds())
+
+        def _fire() -> None:
+            try:
+                if mon is not None and mon.is_quiet():
+                    mon._notify("event", {"event": {"line": message, "summary": label}})
+                    return
+                broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": message})
+                self.speak(message)
+            except Exception as e:
+                log.warning("Google reminder fire notice: %s", e)
+
+        timer = threading.Timer(delay_s, _fire)
+        timer.daemon = True
+        timer.start()
+        when = fire_at.strftime("%I:%M %p").lstrip("0")
+        return f"Reminder set for {when}, sir: {label}."
+
+    def _handle_learning(self, intent: dict, transcript: str) -> str:
+        """Topic learning + voice edits of the self-written progress widget.
+
+        Every layout/label change goes through _sync_learning_progress_widget,
+        which rewrites BOTH the live HUD and the persisted component code —
+        so what the user hears ('moved to the top right') survives a refresh."""
+        kind = str((intent or {}).get("kind") or "")
+        learner = _topic_learner
+        root = _workspace_root()
+
+        if kind == "start":
+            topic = str(intent.get("topic") or "").strip()
+            if len(topic) < 2:
+                return "What topic should I learn, sir?"
+            if learner is None:
+                return "My learning subsystem is offline, sir."
+            started = learner.start(topic)
+            if not started.get("ok"):
+                if started.get("reason") == "busy":
+                    st = learner.status()
+                    return (f"I am already learning {st.get('topic')}, sir — {st.get('percent')} "
+                            "percent in. Say stop learning first for a different topic.")
+                return f"I could not start that research, sir: {started.get('error', 'unknown error')}"
+            if intent.get("show_bar"):
+                cfg = load_learning_ui_cfg(root)
+                cfg["visible"] = True
+                save_learning_ui_cfg(cfg, root)
+                synced = _sync_learning_progress_widget()
+                if not synced.get("ok"):
+                    return (f"Learning {topic} in the background, sir — but I could not write "
+                            f"the progress bar to the HUD: {synced.get('error', 'unknown error')}")
+                return f"Learning {topic}, sir — the progress bar is on your HUD, live."
+            return f"Learning {topic} in the background, sir. Say learning status for progress."
+
+        if kind == "status":
+            if learner is None:
+                return "My learning subsystem is offline, sir."
+            st = learner.status()
+            if not st.get("topic"):
+                return ("I am not researching anything right now, sir. "
+                        "Say, for example, learn hacking to start.")
+            pct = int(st.get("percent") or 0)
+            if st.get("running"):
+                sources = st.get("sources") or 0
+                tail = (f"with {sources} source{'s' if sources != 1 else ''} so far" if sources
+                        else "still collecting sources")
+                return f"Learning {st.get('topic')}: {pct} percent — {st.get('phase')}, {tail}."
+            if st.get("done"):
+                return (f"I finished learning {st.get('topic')}, sir — 100 percent. "
+                        "The notes are saved in my knowledge vault.")
+            if st.get("phase") == "stopped":
+                return f"The {st.get('topic')} session was stopped at {pct} percent, sir."
+            if st.get("error"):
+                return f"The {st.get('topic')} research stalled at {pct} percent, sir: {st.get('error')}"
+            return f"The {st.get('topic')} research stands at {pct} percent ({st.get('phase')}), sir."
+
+        if kind == "stop":
+            if learner is None:
+                return "My learning subsystem is offline, sir."
+            if not learner.status().get("running"):
+                return "I am not researching anything right now, sir."
+            st = learner.stop()
+            return f"Stopped learning {st.get('topic')} at {st.get('percent')} percent, sir."
+
+        if kind == "read":
+            topic = str(intent.get("topic") or "").strip()
+            path = _learning_notes_path(topic, root)
+            if not path.is_file():
+                return f"I have not learned {topic} yet, sir."
+            try:
+                body = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                return f"I could not open my notes on {topic}, sir: {exc}"
+            m = re.search(r"##\s*Summary\s*\n+(.*?)(?:\n##|\Z)", body, re.DOTALL)
+            snippet = m.group(1) if m else body
+            snippet = re.sub(r"[_*#>`\[\]]", "", snippet)
+            snippet = re.sub(r"\s+", " ", snippet).strip(" -")
+            if len(snippet) > 320:
+                snippet = snippet[:320].rsplit(" ", 1)[0] + " …"
+            if not snippet:
+                return f"My notes on {topic} exist but are empty, sir."
+            return f"From my notes on {topic}, sir: {snippet}"
+
+        # ── widget visibility / layout / label (all persist as code changes) ──
+        cfg = load_learning_ui_cfg(root)
+        persisted = _learning_widget_persisted()
+
+        if kind == "show_bar":
+            cfg["visible"] = True
+            save_learning_ui_cfg(cfg, root)
+            synced = _sync_learning_progress_widget()
+            if not synced.get("ok"):
+                return f"I could not write the progress bar to the HUD, sir: {synced.get('error', 'unknown error')}"
+            return "The progress bar is up on your HUD, sir."
+
+        if kind == "hide_bar":
+            if not persisted:
+                return "There is no progress bar on your HUD, sir."
+            cfg["visible"] = False
+            save_learning_ui_cfg(cfg, root)
+            synced = _sync_learning_progress_widget()
+            if not synced.get("ok"):
+                return f"I could not update the progress bar, sir: {synced.get('error', 'unknown error')}"
+            return "Progress bar hidden, sir — say show the progress bar to bring it back."
+
+        if kind == "move":
+            if not persisted:
+                return "There is no progress bar to move yet, sir."
+            if intent.get("mode") == "nudge":
+                direction = str(intent.get("direction") or "down")
+                amount = int(intent.get("amount") or 32)
+                if direction == "down":
+                    cfg["dy"] = int(cfg.get("dy") or 0) + amount
+                elif direction == "up":
+                    cfg["dy"] = int(cfg.get("dy") or 0) - amount
+                elif direction == "right":
+                    cfg["dx"] = int(cfg.get("dx") or 0) + amount
+                else:
+                    cfg["dx"] = int(cfg.get("dx") or 0) - amount
+                resp = f"Progress bar nudged {direction}, sir."
+            else:
+                anchor = str(intent.get("anchor") or "bottom-left")
+                cfg["anchor"] = anchor
+                cfg["dx"], cfg["dy"] = 0, 0
+                resp = f"Progress bar moved to the {anchor.replace('-', ' ')}, sir."
+            save_learning_ui_cfg(cfg, root)
+            synced = _sync_learning_progress_widget()
+            if not synced.get("ok"):
+                return f"I could not reposition the progress bar, sir: {synced.get('error', 'unknown error')}"
+            return resp
+
+        if kind == "label":
+            if not persisted:
+                return "Put the progress bar up first, sir."
+            cfg["show_topic"] = bool(intent.get("show"))
+            save_learning_ui_cfg(cfg, root)
+            synced = _sync_learning_progress_widget()
+            if not synced.get("ok"):
+                return f"I could not update the progress bar label, sir: {synced.get('error', 'unknown error')}"
+            if cfg["show_topic"]:
+                return "Topic label added to the progress bar, sir."
+            return "Topic label hidden on the progress bar, sir."
+
+        return "I did not recognize that learning command, sir."
+
+    # ── Guided passphrase-gated enrollment: the state machine ──────────────
+    # Flow: code sentence (mic, raw transcript) -> face capture (live camera)
+    # -> Google-style voice test (speak each prompted command; the words AND
+    # the voice are both verified) -> per-user profile write. Friends enroll
+    # the same way, under their own display name, while physically present.
+
+    def _consume_enrollment_utterance(self, raw_transcript: str) -> bool:
+        """Consume a mic utterance that belongs to an enrollment session.
+
+        Returns True when the utterance was an enrollment read-back (the caller
+        must NOT route it as a command). The code sentence itself returns False
+        so it flows on to `_handle_guided_enrollment` for authorisation.
+        """
+        sentinel = globals().get("_biometric_sentinel")
+        if sentinel is None:
+            return False
+        try:
+            sess = sentinel.get_enrollment_session()
+        except Exception:
+            return False
+        if sess is None:
+            return False
+        # Stage 1: the next spoken words are the user's display name.
+        if sess.get("awaiting_name"):
+            self._handle_enrollment_name(raw_transcript, sess)
+            return True
+        if not sess.get("face_done") or not sess.get("last_prompt"):
+            return False
+        # Stage 3: voice-test read-backs are consumed, never routed.
+        self._handle_enrollment_readback(raw_transcript, sess)
+        return True
+
+    def _handle_enrollment_name(self, raw_transcript: str, sess: dict) -> None:
+        """Capture the enrolling user's display name, then start face capture."""
+        sentinel = globals().get("_biometric_sentinel")
+        if sentinel is None:
+            return
+        # Keep letters (any script), spaces, hyphens and apostrophes only.
+        cleaned = "".join(ch for ch in str(raw_transcript or "")
+                          if ch.isalpha() or ch in " '-")
+        # Drop a chatty prefix — the NAME is what we store.
+        cleaned = re.sub(r"^(?:hey|ok|okay|hello|hi)?\s*jarvis[,\s]*",
+                         "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^(?:this is|it is|it'?s|i am|my name is)[,\s]+",
+                         "", cleaned, flags=re.IGNORECASE)
+        name = " ".join(cleaned.split())[:40]
+        if not name or _enrollment_trigger_detected(raw_transcript):
+            retries = int(sess.get("retries") or 0) + 1
+            try:
+                with sentinel._lock:
+                    if sentinel._enroll_session is not None:
+                        sentinel._enroll_session["retries"] = retries
+            except Exception:
+                pass
+            if retries > ENROLL_MAX_PROMPT_RETRIES:
+                try:
+                    sentinel.cancel_enrollment_session("name retries exhausted")
+                    broadcast_ui_event({"type": "ENROLLMENT_ABORTED",
+                                        "reason": "no_name_given"})
+                except Exception as exc:
+                    log.debug("Enrollment broadcast notice: %s", exc)
+                self.speak("I still do not have a name, sir. Enrollment cancelled — say the code to start over.")
+                return
+            self.speak("I need a name for this profile, sir. Just say the name.")
+            return
+        try:
+            with sentinel._lock:
+                if sentinel._enroll_session is not None:
+                    sentinel._enroll_session["pending_name"] = name
+                    sentinel._enroll_session["awaiting_name"] = False
+                    sentinel._enroll_session["retries"] = 0
+        except Exception as exc:
+            log.debug("Enrollment name stage notice: %s", exc)
+            return
+        # Hand off to the camera: this actually flips _enrolling on and opens
+        # the HUD modal with live progress.
+        try:
+            sentinel.start_face_enrollment(name)
+        except Exception as exc:
+            log.warning("Enrollment face stage failed to start: %s", exc)
+            self.speak("I could not start the camera, sir. Enrollment cancelled — say the code to try again.")
+            try:
+                sentinel.cancel_enrollment_session("face stage start failed")
+            except Exception:
+                pass
+            return
+        log.info("🔐 Guided enrollment: name '%s' captured; face stage started.", name)
+        try:
+            broadcast_ui_event({"type": "ENROLLMENT_ARMED", "stage": "face",
+                                "user": name,
+                                "message": f"Enrolling {name}: look at the camera."})
+        except Exception as exc:
+            log.debug("Enrollment broadcast notice: %s", exc)
+        self.speak(f"Thank you, {name}. Look straight at the camera and hold still while I capture your face.")
+
+    def _handle_guided_enrollment(self, raw_transcript: str, origin: str) -> None:
+        """Authorise the code sentence and arm the name stage (or refuse)."""
+        sentinel = globals().get("_biometric_sentinel")
+        if sentinel is None:
+            self.speak("Biometric sentinel is offline, sir.")
+            return
+        verdict = check_enrollment_code(raw_transcript, origin=origin)
+        if verdict["ok"]:
+            try:
+                sentinel.start_enrollment_session()
+            except Exception as exc:
+                log.warning("Enrollment session start failed: %s", exc)
+                self.speak("Enrollment failed to start, sir. Please try again.")
+                return
+            log.info("🔐 Guided enrollment armed (name stage).")
+            try:
+                broadcast_ui_event({"type": "ENROLLMENT_ARMED",
+                                    "stage": "name",
+                                    "message": "Code accepted. Who is enrolling?"})
+            except Exception as exc:
+                log.debug("Enrollment broadcast notice: %s", exc)
+            self.speak("Code accepted. Who is enrolling, sir? Say the name for this profile.")
+            return
+        reason = verdict.get("reason", "incomplete_code")
+        log.warning("🔐 Enrollment code rejected (%s): %r", reason, raw_transcript[:80])
+        try:
+            broadcast_ui_event({"type": "ENROLLMENT_REJECTED", "reason": reason})
+        except Exception as exc:
+            log.debug("Enrollment broadcast notice: %s", exc)
+        if reason == "remote_blocked":
+            self.speak("Enrollment needs you here in person, sir. Say the code into the microphone.")
+        elif reason == "locked_out":
+            self.speak("Too many wrong codes, sir. Enrollment is locked for five minutes.")
+        else:
+            self.speak("That code is not right, sir. Say the full enrollment code sentence to begin.")
+
+    def _begin_voice_test(self, display_name: str) -> None:
+        """Move an armed session from the face stage to the voice test."""
+        sentinel = globals().get("_biometric_sentinel")
+        if sentinel is None:
+            return
+        try:
+            sess = sentinel.get_enrollment_session()
+        except Exception:
+            return
+        if not sess:
+            return
+        prompt = ENROLL_TEST_PROMPTS[0]
+        try:
+            with sentinel._lock:
+                if sentinel._enroll_session is not None:
+                    sentinel._enroll_session["voice_step"] = 0
+                    sentinel._enroll_session["last_prompt"] = prompt
+                    sentinel._enroll_session["retries"] = 0
+        except Exception as exc:
+            log.debug("Enrollment voice-test start notice: %s", exc)
+            return
+        who = f" for {display_name}" if display_name else ""
+        log.info("🔐 Guided enrollment: face done%s; voice test started.", who)
+        try:
+            broadcast_ui_event({"type": "ENROLLMENT_VOICE_PROMPT", "step": 1,
+                                "total": len(ENROLL_TEST_PROMPTS), "prompt": prompt})
+        except Exception as exc:
+            log.debug("Enrollment broadcast notice: %s", exc)
+        self.speak(f"Face captured{who}. Now the voice test, sir. Please say aloud: {prompt}.")
+
+    def _handle_enrollment_readback(self, raw_transcript: str, sess: dict) -> None:
+        """Verify one voice-test read-back: words AND voice, then advance."""
+        sentinel = globals().get("_biometric_sentinel")
+        if sentinel is None:
+            return
+        step = int(sess.get("voice_step") or 0)
+        if step >= len(ENROLL_TEST_PROMPTS):
+            return
+        prompt = ENROLL_TEST_PROMPTS[step]
+        match = enrollment_prompt_match(prompt, raw_transcript)
+        voice_ok, voice_detail = self._enrollment_voice_sample_ok(raw_transcript)
+        if not match["ok"] or not voice_ok:
+            retries = int(sess.get("retries") or 0) + 1
+            try:
+                with sentinel._lock:
+                    if sentinel._enroll_session is not None:
+                        sentinel._enroll_session["retries"] = retries
+            except Exception:
+                pass
+            if retries > ENROLL_MAX_PROMPT_RETRIES:
+                try:
+                    sentinel.cancel_enrollment_session("voice test retries exhausted")
+                    broadcast_ui_event({"type": "ENROLLMENT_ABORTED",
+                                        "reason": "voice_test_failed"})
+                except Exception as exc:
+                    log.debug("Enrollment broadcast notice: %s", exc)
+                self.speak("I could not verify that read-back, sir. Enrollment cancelled — say the code to start over.")
+                return
+            if not match["ok"]:
+                missing = ", ".join(match.get("missing", [])[:4])
+                self.speak(f"I heard a different phrase, sir. Please say exactly: {prompt}. Missing: {missing}.")
+            else:
+                self.speak(f"I need a clearer sample of your voice, sir. Please say again: {prompt}.")
+            try:
+                broadcast_ui_event({"type": "ENROLLMENT_VOICE_RETRY", "step": step + 1,
+                                    "total": len(ENROLL_TEST_PROMPTS), "prompt": prompt,
+                                    "reason": voice_detail or "word_mismatch"})
+            except Exception as exc:
+                log.debug("Enrollment broadcast notice: %s", exc)
+            return
+        try:
+            with sentinel._lock:
+                live = sentinel._enroll_session
+                if live is not None:
+                    live["retries"] = 0
+        except Exception:
+            pass
+        self._enrollment_store_voiceprint(prompt)
+        next_step = step + 1
+        if next_step >= len(ENROLL_TEST_PROMPTS):
+            self._finish_guided_enrollment()
+            return
+        next_prompt = ENROLL_TEST_PROMPTS[next_step]
+        try:
+            with sentinel._lock:
+                live = sentinel._enroll_session
+                if live is not None:
+                    live["voice_step"] = next_step
+                    live["last_prompt"] = next_prompt
+        except Exception as exc:
+            log.debug("Enrollment advance notice: %s", exc)
+            return
+        try:
+            broadcast_ui_event({"type": "ENROLLMENT_VOICE_PROMPT", "step": next_step + 1,
+                                "total": len(ENROLL_TEST_PROMPTS), "prompt": next_prompt})
+        except Exception as exc:
+            log.debug("Enrollment broadcast notice: %s", exc)
+        self.speak(f"Good. Next, say: {next_prompt}.")
+
+    def _enrollment_voice_sample_ok(self, raw_transcript: str) -> tuple:
+        """The read-back audio must be long, loud and live — not silence/replay."""
+        sentinel = globals().get("_biometric_sentinel")
+        audio = getattr(self, "_enroll_last_audio", None)
+        seconds = float(getattr(self, "_enroll_last_audio_seconds", 0.0) or 0.0)
+        if audio is None or seconds < ENROLL_PROMPT_MIN_SECONDS:
+            return False, "too_short"
+        try:
+            vs = getattr(sentinel, "voice_sentinel", None) if sentinel else None
+            if vs is None:
+                return False, "sentinel_offline"
+            import numpy as _np
+            arr = _np.asarray(audio, dtype=_np.float32)
+            vprint = vs.extract_voiceprint(arr, 16000)
+            if float(_np.linalg.norm(vprint)) < ENROLL_MIN_VOICEPRINT_NORM:
+                return False, "silence"
+            _score, reason = vs.evaluate_audio_replay(arr, 16000)
+            if _score < 0.40:
+                log.warning("🔐 Enrollment read-back refused (replay): %s", reason)
+                return False, "replay"
+            return True, ""
+        except Exception as exc:
+            log.debug("Enrollment voice sample notice: %s", exc)
+            return False, "capture_error"
+
+    def _enrollment_store_voiceprint(self, prompt: str) -> None:
+        """Append the last read-back's voiceprint to the pending session list."""
+        sentinel = globals().get("_biometric_sentinel")
+        audio = getattr(self, "_enroll_last_audio", None)
+        if sentinel is None or audio is None:
+            return
+        try:
+            import numpy as _np
+            vs = getattr(sentinel, "voice_sentinel", None)
+            if vs is None:
+                return
+            vprint = vs.extract_voiceprint(_np.asarray(audio, dtype=_np.float32), 16000)
+            with sentinel._lock:
+                live = sentinel._enroll_session
+                if live is not None:
+                    live.setdefault("pending_voiceprints", []).append(
+                        [round(float(x), 4) for x in vprint])
+                    live["last_prompt"] = ""
+            log.info("🔐 Enrollment voice sample accepted for prompt %r.", prompt[:40])
+        except Exception as exc:
+            log.debug("Enrollment voiceprint store notice: %s", exc)
+
+    def _finish_guided_enrollment(self) -> None:
+        """Average pending voiceprints and write the per-user profile."""
+        sentinel = globals().get("_biometric_sentinel")
+        if sentinel is None:
+            return
+        try:
+            sess = sentinel.get_enrollment_session()
+        except Exception:
+            return
+        if not sess:
+            return
+        name = (sess.get("pending_name") or "").strip() or "Admin"
+        prints = sess.get("pending_voiceprints") or []
+        if not prints:
+            try:
+                sentinel.cancel_enrollment_session("no voice samples")
+            except Exception:
+                pass
+            self.speak("No voice samples were captured, sir. Enrollment cancelled.")
+            return
+        try:
+            import numpy as _np
+            mean_vp = _np.mean(_np.asarray(prints, dtype=_np.float32), axis=0)
+            norm = float(_np.linalg.norm(mean_vp)) + 1e-6
+            mean_vp = mean_vp / norm
+            vs = getattr(sentinel, "voice_sentinel", None)
+            face_emb = sess.get("pending_face_embedding")
+            saved_voice = vs.save_user_voiceprint(name, mean_vp,
+                                                  prompts_completed=len(prints)) if vs else False
+            saved_face = False
+            fs = getattr(sentinel, "face_sentinel", None)
+            if fs is not None and face_emb:
+                saved_face = fs.save_user_face(name, _np.asarray(face_emb, dtype=_np.float32))
+            users = vs.list_enrolled_users() if vs else []
+            try:
+                sentinel.cancel_enrollment_session("complete")
+                broadcast_ui_event({"type": "ENROLLMENT_COMPLETE", "user": name,
+                                    "voice_saved": bool(saved_voice),
+                                    "face_saved": bool(saved_face),
+                                    "users": users})
+            except Exception as exc:
+                log.debug("Enrollment broadcast notice: %s", exc)
+            if saved_voice or saved_face:
+                log.info("🔐 Guided enrollment COMPLETE for '%s' (voice=%s face=%s).",
+                         name, saved_voice, saved_face)
+                self.speak(f"Enrollment complete for {name}, sir. Voice and face are now recognised.")
+            else:
+                log.warning("🔐 Guided enrollment profile write failed for '%s'.", name)
+                self.speak(f"I could not save the profile for {name}, sir. Please try again.")
+        except Exception as exc:
+            log.warning("Guided enrollment finish failed: %s", exc)
+            self.speak("Enrollment failed at the final step, sir. Please try again.")
+
     def _route_voice_command(self, transcript: str, origin: str = "mic"):
         """Route a voice command to the appropriate handler."""
+        # Enrollment detection runs on the RAW transcript, BEFORE typo repair:
+        # _normalize_command_text would rewrite 'even' -> 'event' and a wrong
+        # code must never be laundered into a right one. Mid-session voice-test
+        # read-backs are also consumed here (mic only), never routed as commands.
+        raw_transcript = transcript or ""
+        try:
+            if origin == "mic" and self._consume_enrollment_utterance(raw_transcript):
+                return
+        except Exception as exc:
+            log.debug("Enrollment utterance check notice: %s", exc)
+        # The code sentence itself is authorised on the RAW transcript, also
+        # BEFORE typo repair — otherwise 'even' would become 'event' and a
+        # correct code would fail the strict check. Non-mic origins land here
+        # too and get the honest 'physical presence required' refusal.
+        try:
+            if _enrollment_trigger_detected(raw_transcript):
+                self._handle_guided_enrollment(raw_transcript, origin)
+                return
+        except Exception as exc:
+            log.debug("Enrollment trigger check notice: %s", exc)
+        # Listener Intelligence: repair likely mishearings/typos ONCE, here, so
+        # every input path (mic, browser Web Speech, typed HUD text, HTTP,
+        # mobile) gets the same tolerance. The original stays in the log and the
+        # HUD is told what was assumed — never a silent rewrite.
+        try:
+            normalized, _corrections = _normalize_command_text(transcript, source=origin)
+            if normalized:
+                transcript = normalized
+        except Exception as exc:
+            log.debug("Command normalisation notice: %s", exc)
         # Deduplication check: drop identical commands received within 1.2s (e.g. Chrome Web Speech vs Python Whisper)
         if _is_duplicate_voice_command(transcript):
             log.debug("Voice: dropped duplicate command within 1.2s: %r", transcript)
@@ -6783,6 +10593,21 @@ class VoiceEngine:
                     self.speak("Subordinate fleet pool is currently offline, sir.")
                 self.bus.set_state("idle")
                 return
+
+        # ── 2d. Autonomous Topic Learning — background research + self-written ──
+        # progress widget. "learn hacking (and put the progress bar on the orb
+        # screen)" starts a research thread; layout/label/status verbs REWRITE
+        # the widget's persisted code, so moves survive a page refresh.
+        learn_intent = parse_learning_command(t)
+        if learn_intent:
+            emit_user_subtitle()
+            resp = self._handle_learning(learn_intent, transcript)
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            if _sound_engine:
+                _sound_engine.play("ping")
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
 
         # ── Remove a Persisted Dynamic HUD Widget ──
         # Fixes the dead end where injected widgets were re-mounted on every refresh
@@ -8065,6 +11890,62 @@ class VoiceEngine:
             )
             return
 
+        # ── 2a. God's Eye View — navigation, POI & camera control ──
+        # Runs BEFORE the bare "open the globe" handler so a spoken destination
+        # is not swallowed by the open-only branch. Commands that do not name
+        # the globe are gated on the bridge/sidecar being live, so they never
+        # hijack unrelated handlers.
+        gev_intent = parse_godseye_command(t)
+        if gev_intent:
+            emit_user_subtitle()
+            if not (_gods_eye_service and _gods_eye_service.enabled):
+                resp = "The God's Eye View is disabled on this instance, sir."
+                broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+                self.speak(resp)
+                self.bus.set_state("idle")
+                return
+            _gods_eye_service.kick()
+            _gods_eye_service.open_when_ready(label="God's Eye View")
+            if "poi" in gev_intent:
+                category = gev_intent["poi"]
+                place = godseye_find_nearby_place(category)
+                if not place:
+                    resp = (f"I need the globe on screen and looking somewhere first, sir — "
+                            f"then I can find the nearest {category}.")
+                else:
+                    dist = place["distance_m"]
+                    dist_txt = f"{dist} metres" if dist < 1000 else f"{dist / 1000:.1f} km"
+                    # A real business name geocodes precisely; a generic noun (no
+                    # OSM name tag) falls back to the exact coordinates.
+                    target = place["label"] if place["label"] != place["category"] else \
+                        f"{place['lat']},{place['lng']}"
+                    godseye_push_action("fly_to_location", query=target)
+                    resp = (f"Nearest {place['category']} — {place['label']}, "
+                            f"{dist_txt} away. Taking the globe there, sir.")
+            else:
+                queued = godseye_push_action(
+                    gev_intent["action"], **gev_intent.get("args", {})
+                )
+                resp = (gev_intent.get("say") if queued
+                        else "I could not pass that instruction to the globe, sir.")
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
+        # ── 2c. Google Workspace — Calendar events, Gmail digests, reminders ──
+        # Voice owns the UX. Every spoken query drains the monitor's pending
+        # digest FIRST (quiet-hour or missed items surface as one block), then
+        # answers the direct question — so nothing is silently lost.
+        google_intent = parse_google_workspace_command(t, transcript)
+        if google_intent:
+            emit_user_subtitle()
+            resp = self._handle_google_workspace(google_intent, transcript)
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
+
         # ── 2b. God's Eye View — vendored live OSINT globe (lazy-spawned) ──
         if any(q in t for q in GODSEYE_VOICE_PHRASES):
             emit_user_subtitle()
@@ -8255,9 +12136,11 @@ class VoiceEngine:
             "calibrate biometrics", "calibrate face", "start enrollment", "start face enrollment",
             "strat the enrolment", "strat enrollment", "face enrollment", "enroll admin"
         ]):
+            # Guided enrollment now owns this path; the bare phrases below never
+            # start anything — only the full spoken code does (checked on the RAW
+            # transcript at the top of this router).
             if _biometric_sentinel:
-                _biometric_sentinel.start_face_enrollment()
-                self.speak("Initiating biometric face calibration, sir. Please look straight at the optical sensor.")
+                self.speak("Enrollment is code locked, sir. Say the full enrollment code sentence to begin.")
             else:
                 self.speak("Biometric sentinel is offline, sir.")
             return
@@ -8758,9 +12641,11 @@ def synthesize_jarvis_audio_mp3(text: str) -> tuple[bytes | None, str]:
 
     # 2. Fallback Engine: ElevenLabs
     try:
-        api_key = (os.environ.get("ELEVENLABS_API_KEY") or "sk_65d10500af500320ec5209365ca9312648066edb4bae4935").strip()
-        vid = (os.environ.get("ELEVENLABS_VOICE_ID") or "Hl96BMcxGf0y6Bg5qTgt").strip()
-        if api_key:
+        # Credentials come from the environment ONLY. A literal fallback here
+        # would ship a live key in git history and on GitHub.
+        api_key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
+        vid = (os.environ.get("ELEVENLABS_VOICE_ID") or "").strip()
+        if api_key and vid:
             from elevenlabs.client import ElevenLabs
             client = ElevenLabs(api_key=api_key)
             chunks = client.text_to_speech.convert(
@@ -8968,6 +12853,17 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Jarvis-Token, Authorization")
 
+    def _json_response(self, obj, code=200):
+        """Compact JSON reply with CORS, for handlers that own no templating."""
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self._apply_cors()
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_OPTIONS(self):
         self.send_response(200)
         self._apply_cors()
@@ -9125,6 +13021,28 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps(status_obj).encode("utf-8"))
             return
 
+        if clean_path == "/api/godseye/command":
+            # The globe page polls this for queued actions and clears them.
+            # Served without a token to loopback (the sidecar's own page); a
+            # public deployment must present one, because loopback is not
+            # auto-authorized there.
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            token = self.headers.get("X-Jarvis-Token") or (query.get("token") or [""])[0]
+            if not _is_authorized_token(token, self.client_address):
+                self.send_response(401); self.end_headers(); return
+            godseye_note_poll()
+            payload = json.dumps({
+                "commands": godseye_drain_actions(),
+                "view": godseye_view_state(),
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self._apply_cors()
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
         base_dir = Path(__file__).resolve().parent
         barehands_dir = base_dir / "barehands"
 
@@ -9165,6 +13083,40 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
         host = self.headers.get("Host")
         if origin and not _is_origin_allowed(origin, host):
             self.send_response(403); self.end_headers(); return
+
+        post_clean_path = urllib.parse.urlparse(self.path).path
+        if post_clean_path in ("/api/godseye/telemetry", "/api/godseye/command"):
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            token = self.headers.get("X-Jarvis-Token") or (query.get("token") or [""])[0]
+            if not _is_authorized_token(token, self.client_address):
+                self.send_response(401); self.end_headers(); return
+            content_len = int(self.headers.get("Content-Length", 0) or 0)
+            if content_len < 0 or content_len > 262144:
+                self.send_response(413); self.end_headers(); return
+            raw = self.rfile.read(content_len) if content_len > 0 else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            if post_clean_path == "/api/godseye/telemetry":
+                godseye_note_poll()
+                ok = godseye_record_view(
+                    data.get("lat"), data.get("lng"),
+                    height_m=data.get("heightM"), label=data.get("label"),
+                )
+                self._json_response({"status": "ok" if ok else "ignored",
+                                     "view": godseye_view_state()},
+                                    code=200 if ok else 400)
+                return
+            # Explicit enqueue (HTTP/API callers). Voice routes queue directly.
+            action = str(data.get("action") or "").strip()
+            args = data.get("args") if isinstance(data.get("args"), dict) else {}
+            queued = godseye_push_action(action, **args)
+            self._json_response({"status": "queued" if queued else "refused",
+                                 "action": action}, code=200 if queued else 400)
+            return
 
         if self.path in ("/api/command", "/command", "/api/event"):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -9618,12 +13570,22 @@ def _start_websocket_server(port: int = 8765) -> None:
                                 "area": update.get("area", "LOCATING...")
                             }))
                     elif data.get("type") == "START_FACE_ENROLLMENT":
-                        admin_name = data.get("admin_name", "Admin")
-                        if _biometric_sentinel:
-                            _biometric_sentinel.start_face_enrollment(admin_name)
+                        # Code-locked: the HUD button/modal only OPENS the guide.
+                        # Enrollment itself starts exclusively from the spoken code.
+                        try:
+                            await websocket.send(json.dumps({
+                                "type": "ENROLLMENT_CODE_REQUIRED",
+                                "message": "Enrollment is code-locked. Say the full enrollment code sentence into the microphone to begin.",
+                            }))
+                        except Exception as exc:
+                            log.debug("Enrollment WS notice: %s", exc)
                     elif data.get("type") == "CANCEL_FACE_ENROLLMENT":
                         if _biometric_sentinel:
                             _biometric_sentinel.cancel_face_enrollment()
+                            try:
+                                _biometric_sentinel.cancel_enrollment_session("cancelled from HUD")
+                            except Exception as exc:
+                                log.debug("Enrollment cancel notice: %s", exc)
                     elif data.get("type") == "GET_ACTIVE_CONSTRUCT":
                         active_c = _active_construct if _active_construct else {"id": "arc_reactor", "name": "Arc Reactor Core"}
                         await websocket.send(
@@ -10686,8 +14648,11 @@ def main() -> int:
 
     # Expose the autonomous code architect globally so voice fast-paths (such as
     # permanent HUD widget removal) can persist file changes.
-    global _code_architect
+    global _code_architect, _topic_learner
     _code_architect = AutonomousCodeArchitect(base_dir, _code_mgr)
+    # Background topic learner ("learn hacking") — shares the workspace root so
+    # notes land in memory/ and progress/layout state in state/.
+    _topic_learner = TopicLearner(base_dir)
     
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     telegram_chat_id = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
@@ -10759,6 +14724,46 @@ def main() -> int:
     _voice_engine = VoiceEngine(_signal_bus, _memory_manager, _neural_brain, _learning_engine, persona_engine=_persona_engine)
     _voice_engine.start(input_device=input_idx)
 
+    # 7b. Google Workspace bridge — Calendar/Gmail monitor with proactive speech
+    global _google_client, _google_monitor
+    if _google_bridge_enabled():
+        _google_client = GoogleWorkspaceClient()
+
+        def _google_proactive_speak(text: str) -> None:
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": text})
+            if not _welcome_sequence_done:
+                log.info("Google Workspace (standby, not spoken): %s", text)
+                return
+            try:
+                _voice_engine.speak(text)
+            except Exception as e:
+                log.debug("Google Workspace speak notice: %s", e)
+
+        def _google_on_due_event(payload: dict) -> None:
+            ev = (payload or {}).get("event", {}) or {}
+            _google_proactive_speak(
+                f"Heads up, sir: {ev.get('line') or ev.get('summary', 'an event')} starts within fifteen minutes.")
+
+        def _google_on_new_mail(payload: dict) -> None:
+            msg = (payload or {}).get("message", {}) or {}
+            _google_proactive_speak(
+                f"New unread mail, sir: {msg.get('line') or _google_format_mail_line(msg)}.")
+
+        def _google_on_briefing(payload: dict) -> None:
+            text = str((payload or {}).get("text") or "").strip()
+            if text:
+                _google_proactive_speak(text)
+
+        _google_monitor = GoogleWorkspaceMonitor(
+            _google_client,
+            on_due_event=_google_on_due_event,
+            on_new_mail=_google_on_new_mail,
+            on_briefing=_google_on_briefing,
+        )
+        _google_monitor.start()
+    else:
+        log.info("Google Workspace bridge disabled (JARVIS_GOOGLE_BRIDGE_ENABLED=0).")
+
     # 8. Start Biometric Sentinel & Anti-Spoofing Daemon
     global _biometric_sentinel
     _biometric_sentinel = BiometricSentinelDaemon(
@@ -10808,6 +14813,9 @@ def main() -> int:
     log.info("  Biometrics:    Active (Admin: %s)", _biometric_sentinel.admin_name)
     log.info("  Vision:        Active (Groq VLM / Ollama / Local Optics)")
     log.info("  Watchdog:      Active (Proactive Diagnostics)")
+    log.info("  Google Workspace: %s",
+             "Active (Calendar + Gmail monitor)" if _google_monitor else
+             ("disabled (JARVIS_GOOGLE_BRIDGE_ENABLED=0)" if not _google_bridge_enabled() else "offline"))
     log.info("  Persona:       Active (%s | Wit: %d%%)", _persona_engine.active_mode.upper(), _persona_engine.wit_level)
     log.info("  Cognition:     Active (E.D.I.T.H. Human Researcher)")
     _memory_manager.log_event("All subsystems online")

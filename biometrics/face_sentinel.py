@@ -136,6 +136,106 @@ class FaceSentinel:
             except Exception as e:
                 log.warning("FaceSentinel: Env profile parse notice: %s", e)
 
+    # ── Multi-user face store (mirrors VoiceSentinel) ───────────────────
+    # Legacy single-admin embedding keeps working untouched. Guided enrollment
+    # adds a per-user map in the SAME profile file under "face_users":
+    #   {"face_users": {"<name>": {"embedding": [...], "enrolled_at": ...}}}
+
+    def list_enrolled_face_users(self) -> list:
+        """Names with a stored face embedding: legacy admin first, then others."""
+        names = []
+        try:
+            p = Path(self.profile_path)
+            if p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    legacy_emb = (data.get("face") or {}).get("embedding")
+                    if legacy_emb:
+                        names.append(data.get("admin_name", self.admin_name or "Admin"))
+                    users = data.get("face_users")
+                    if isinstance(users, dict):
+                        for name in users:
+                            if name not in names:
+                                names.append(name)
+        except Exception as e:
+            log.debug("FaceSentinel face user list notice: %s", e)
+        if self.admin_embedding is not None and self.admin_name not in names:
+            names.insert(0, self.admin_name)
+        return names
+
+    def save_user_face(self, name: str, embedding) -> bool:
+        """Persist one user's face embedding into the profile file (creates it)."""
+        clean = str(name or "").strip()[:40] or "Admin"
+        try:
+            p = Path(self.profile_path)
+            if p.is_file():
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    if not isinstance(data, dict):
+                        data = {}
+                except Exception:
+                    data = {}
+            else:
+                data = {"admin_name": clean,
+                        "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+            users = data.get("face_users")
+            if not isinstance(users, dict):
+                users = {}
+            users[clean] = {
+                "embedding": [round(float(x), 4) for x in embedding],
+                "enrolled_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            data["face_users"] = users
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            log.info("FaceSentinel: face embedding saved for user '%s'.", clean)
+            return True
+        except Exception as e:
+            log.warning("FaceSentinel: face save failed for '%s': %s", clean, e)
+            return False
+
+    def identify_face_user(self, landmarks_3d) -> dict:
+        """Best matching enrolled face user for landmarks, or a guest verdict.
+
+        Returns {name|None, confidence, matched: bool}. Threshold mirrors the
+        admin decision (cosine >= 0.82), so friends are never half-accepted.
+        """
+        try:
+            curr = self.extract_face_embedding(landmarks_3d)
+        except Exception as e:
+            log.debug("FaceSentinel identify notice: %s", e)
+            return {"name": None, "confidence": 0.0, "matched": False}
+        candidates = []
+        if self.admin_embedding is not None:
+            candidates.append((self.admin_name, self.admin_embedding))
+        try:
+            p = Path(self.profile_path)
+            if p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    users = data.get("face_users")
+                    if isinstance(users, dict):
+                        for uname, entry in users.items():
+                            if uname == self.admin_name or not isinstance(entry, dict):
+                                continue
+                            emb = entry.get("embedding")
+                            if emb:
+                                candidates.append(
+                                    (uname, np.array(emb, dtype=np.float32)))
+        except Exception as e:
+            log.debug("FaceSentinel identify notice: %s", e)
+        best_name, best_conf = None, 0.0
+        for uname, emb in candidates:
+            try:
+                conf = float(self.compute_similarity(curr, emb))
+            except Exception:
+                continue
+            if conf > best_conf:
+                best_name, best_conf = uname, conf
+        return {"name": best_name if best_conf >= 0.82 else None,
+                "confidence": round(best_conf, 3),
+                "matched": bool(best_name) and best_conf >= 0.82}
+
     def extract_face_embedding(self, landmarks_3d: list[tuple[float, float, float]]) -> np.ndarray:
         """
         Extracts invariant 64D facial geometric embedding vector based on 3D topological ratios

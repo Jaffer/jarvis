@@ -7,6 +7,7 @@ scratch/
 state/
 barehands/state/
 .gdrive-server-credentials.json
+.google-workspace-token.json
 credentials*.json
 !credentials.json.example
 client_secret*.json

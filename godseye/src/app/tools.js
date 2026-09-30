@@ -4,6 +4,7 @@ import { initDrawTool } from '../annotations/drawTool.js';
 import { initImageryBoxTool } from '../ui/imageryBoxTool.js';
 import { createRecentImageryPanel } from '../ui/recentImagery.js';
 import { initGevVoiceCommands } from '../voice/gevRealtime.js';
+import { installJarvisBridge } from '../jarvis/bridge.js';
 import { installScopeMask, destroyScopeMask } from '../scopeMask.js';
 import {
   installRenderGovernor,
@@ -176,5 +177,12 @@ export function createApplicationTools({
       delete window.__gevVoiceCommands;
   });
   debug.voiceCommands = voiceCommands;
+  // JARVIS vendored delta — the globe's only inbound control surface. JARVIS
+  // owns the brain and the microphone; this loop just executes what it queues.
+  const jarvisBridge = installJarvisBridge({ viewer });
+  defer(() => {
+    jarvisBridge.stop();
+    if (window.__jarvisGevBridge === jarvisBridge) delete window.__jarvisGevBridge;
+  });
   return { sceneDirector, annotations, voiceCommands };
 }

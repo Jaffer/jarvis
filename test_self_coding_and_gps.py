@@ -52,14 +52,33 @@ class SelfCodingAndGpsTests(unittest.TestCase):
         self.assertIn("return True", target.read_text(encoding="utf-8"))
 
     def test_gps_telemetry_is_memory_only(self):
+        """Coordinates stay in the per-session in-memory store (`_session_gps`):
+        Profile.md is never touched, the resolved area lands back in that session
+        only, and nothing is fanned out to every HUD client."""
         before = self.profile.read_text(encoding="utf-8")
         with patch.object(jarvis, "_reverse_geocode_live_gps", return_value="Meerpet"):
-            result = jarvis.update_live_gps_telemetry(17.3207, 78.5369, 6)
+            result = jarvis.update_live_gps_telemetry(17.3207, 78.5369, 6,
+                                                      session_id="mobile-1")
             self.assertTrue(result["ok"])
-            time.sleep(0.03)
+            self.assertEqual(result["session_id"], "mobile-1")
+            # The reverse lookup resolves on a daemon thread; wait for it.
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                if jarvis._session_gps.get("mobile-1", {}).get("area") == "Meerpet":
+                    break
+                time.sleep(0.01)
         self.assertEqual(before, self.profile.read_text(encoding="utf-8"))
-        self.assertEqual(jarvis._live_user_gps["lat"], 17.3207)
-        self.assertTrue(any(event["type"] == "GPS_LOCATION" for event in self.events))
+        session = jarvis._session_gps["mobile-1"]
+        self.assertEqual(session["lat"], 17.3207)
+        self.assertEqual(session["lon"], 78.5369)
+        self.assertEqual(session["accuracy"], 6.0)
+        self.assertEqual(session["area"], "Meerpet")
+        # Session-scoped by design: other sessions untouched, and GPS is never
+        # broadcast to every HUD client (only echoed to the reporting session).
+        self.assertNotIn("default", jarvis._session_gps)
+        self.assertFalse(any(evt.get("type") == "GPS_LOCATION" for evt in self.events))
+        # Invalid coordinates are refused instead of stored.
+        self.assertFalse(jarvis.update_live_gps_telemetry(999.0, 0.0, 5)["ok"])
 
 
 if __name__ == "__main__":

@@ -31,6 +31,38 @@ def print_banner():
     print("═" * 70 + "\n")
 
 
+def prompt_enrollment_code() -> bool:
+    """Code-lock the CLI wizard: same secret sentence as the voice flow."""
+    print("🔐 SECURITY: biometric enrollment is code-locked.")
+    print("   Enter the full enrollment code sentence.")
+    text = input("> ").strip()
+    try:
+        from jarvis import check_enrollment_code
+    except Exception:
+        check_enrollment_code = None  # jarvis.py not importable here
+    if check_enrollment_code is not None:
+        try:
+            verdict = check_enrollment_code(text, origin="cli")
+        except Exception as exc:
+            # Fail closed: a broken check must never let enrollment through.
+            print(f"   ❌ Code check error ({exc}). Aborting.\n")
+            return False
+        ok = bool(verdict.get("ok"))
+        reason = verdict.get("reason", "")
+    else:
+        # Fallback if jarvis.py cannot be imported in this interpreter:
+        # strict word check, same four words, no fingerprint guessing.
+        import re as _re
+        words = set(_re.sub(r"[^\w\s]", " ", text.lower()).split())
+        ok = all(w in words for w in ("code", "even", "dead", "hero"))
+        reason = "" if ok else "incomplete_code"
+    if ok:
+        print("   ✓ Code accepted.\n")
+        return True
+    print(f"   ❌ Code refused ({reason}). Aborting.\n")
+    return False
+
+
 def enroll_face(face_sentinel: FaceSentinel, camera_idx: int = 0) -> dict:
     print("📷 STAGE 1: OPTICAL 3D FACE & DEPTH CALIBRATION")
     print("──────────────────────────────────────────────────────────────────────")
@@ -149,7 +181,12 @@ def enroll_voice(voice_sentinel: VoiceSentinel, sample_rate: int = 16000) -> dic
 
 def main():
     print_banner()
-    
+
+    # Stage 0: the code gate — the CLI starts NOTHING without it.
+    if not prompt_enrollment_code():
+        print("Enrollment requires the code sentence. Run again and enter it.")
+        return
+
     # Check admin name from profile if available
     profile_dir = Path(__file__).resolve().parent / "memory" / "00 - Biometrics"
     profile_dir.mkdir(parents=True, exist_ok=True)

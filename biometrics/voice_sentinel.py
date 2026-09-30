@@ -6,6 +6,7 @@ VoiceSentinel: Acoustic Speaker Verification & Audio Anti-Replay Engine
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -67,6 +68,52 @@ class VoiceSentinel:
                     log.info("VoiceSentinel: Enrolled admin voice profile loaded from environment variable for '%s'.", self.admin_name)
             except Exception as e:
                 log.warning("VoiceSentinel: Env profile parse notice: %s", e)
+
+    # ── Multi-user voiceprint store ─────────────────────────────────────
+    # The legacy single-admin profile (admin_voiceprint / admin_name) keeps
+    # working untouched. Guided enrollment adds a per-user map persisted into
+    # the SAME profile file under the "users" key:
+    #   {"users": {"<name>": {"embedding": [...], "enrolled_at": ..., "prompts_completed": N}}}
+
+    def _users_dict(self, data: dict) -> dict:
+        users = data.get("users")
+        return users if isinstance(users, dict) else {}
+
+    def list_enrolled_users(self) -> list:
+        """Names with a stored voiceprint: legacy admin first, then others."""
+        names = []
+        try:
+            p = Path(self.profile_path)
+            if p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    legacy_emb = (data.get("voice") or {}).get("embedding")
+                    if legacy_emb:
+                        names.append(data.get("admin_name", self.admin_name or "Admin"))
+                    for name in self._users_dict(data):
+                        if name not in names:
+                            names.append(name)
+        except Exception as e:
+            log.debug("VoiceSentinel user list notice: %s", e)
+        if self.admin_voiceprint is not None and self.admin_name not in names:
+            names.insert(0, self.admin_name)
+        return names
+
+    def user_voiceprint(self, name: str):
+        """Stored voiceprint vector for one user, or None."""
+        try:
+            p = Path(self.profile_path)
+            if p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    entry = self._users_dict(data).get(name or "")
+                    if isinstance(entry, dict) and entry.get("embedding"):
+                        return np.array(entry["embedding"], dtype=np.float32)
+        except Exception as e:
+            log.debug("VoiceSentinel user lookup notice: %s", e)
+        if name and name == self.admin_name and self.admin_voiceprint is not None:
+            return self.admin_voiceprint
+        return None
 
     def extract_voiceprint(self, audio_data: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
         """
@@ -197,6 +244,88 @@ class VoiceSentinel:
             return 0.35, "Elevated harmonic distortion. Potential amplified speaker playback."
         else:
             return 0.95, "Natural acoustic frequency dispersion. Verified live human vocal tract."
+
+    def save_user_voiceprint(self, name: str, embedding: np.ndarray,
+                             prompts_completed: int = 0) -> bool:
+        """Persist one user's voiceprint into the profile file (creates it)."""
+        clean = str(name or "").strip()[:40] or "Admin"
+        try:
+            p = Path(self.profile_path)
+            if p.is_file():
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    if not isinstance(data, dict):
+                        data = {}
+                except Exception:
+                    data = {}
+            else:
+                data = {"admin_name": clean,
+                        "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+            users = data.get("users")
+            if not isinstance(users, dict):
+                users = {}
+            users[clean] = {
+                "embedding": [round(float(x), 4) for x in embedding],
+                "enrolled_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "prompts_completed": int(prompts_completed),
+            }
+            data["users"] = users
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            log.info("VoiceSentinel: voiceprint saved for user '%s' (%d prompts).",
+                     clean, prompts_completed)
+            return True
+        except Exception as e:
+            log.warning("VoiceSentinel: voiceprint save failed for '%s': %s", clean, e)
+            return False
+
+    def identify_user(self, audio_data: np.ndarray, sample_rate: int = 16000) -> dict:
+        """Best matching enrolled user for this audio, or a guest verdict.
+
+        Returns {name|None, confidence, matched: bool, replay_score,
+        replay_reason}. `matched` uses the same confidence threshold as the
+        admin decision, so a friend is never half-accepted.
+        """
+        voiceprint = self.extract_voiceprint(audio_data, sample_rate)
+        if float(np.linalg.norm(voiceprint)) < 0.05:
+            return {"name": None, "confidence": 0.0, "matched": False,
+                    "replay_score": 1.0, "replay_reason": "silence"}
+        replay_score, replay_reason = self.evaluate_audio_replay(audio_data, sample_rate)
+        if replay_score < 0.40:
+            return {"name": None, "confidence": 0.0, "matched": False,
+                    "replay_score": replay_score, "replay_reason": replay_reason}
+        candidates = []
+        if self.admin_voiceprint is not None:
+            candidates.append((self.admin_name, self.admin_voiceprint))
+        try:
+            p = Path(self.profile_path)
+            if p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    users = data.get("users")
+                    if isinstance(users, dict):
+                        for uname, entry in users.items():
+                            if uname == self.admin_name or not isinstance(entry, dict):
+                                continue
+                            emb = entry.get("embedding")
+                            if emb:
+                                candidates.append(
+                                    (uname, np.array(emb, dtype=np.float32)))
+        except Exception as e:
+            log.debug("VoiceSentinel identify notice: %s", e)
+        best_name, best_conf = None, 0.0
+        for uname, emb in candidates:
+            try:
+                conf = float(np.dot(voiceprint, emb))
+            except Exception:
+                continue
+            if conf > best_conf:
+                best_name, best_conf = uname, conf
+        threshold = getattr(self, "confidence_threshold", 0.62)
+        return {"name": best_name if best_conf >= threshold else None,
+                "confidence": round(best_conf, 3),
+                "matched": bool(best_name) and best_conf >= threshold,
+                "replay_score": replay_score, "replay_reason": replay_reason}
 
     def evaluate_voice(self, audio_data: np.ndarray, sample_rate: int = 16000) -> VoiceAuthResult:
         """

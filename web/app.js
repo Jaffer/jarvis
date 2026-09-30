@@ -1382,6 +1382,30 @@ function removeHudComponent(featureId) {
   showToast(`🧹 HUD feature removed: ${id}`, 2500);
 }
 
+// ——— LEARNING PROGRESS (background topic research) ———
+function handleLearningProgress(data) {
+  const mount = document.querySelector('[data-jarvis-live-feature="learning-progress-bar"]');
+  if (!mount) return; // bar hidden/removed — state still flows to voice status
+  const pct = Math.max(0, Math.min(100, Number(data.percent) || 0));
+  const fill = mount.querySelector("[data-lp-fill]");
+  const percentEl = mount.querySelector("[data-lp-percent]");
+  const topicEl = mount.querySelector("[data-lp-topic]");
+  const phaseEl = mount.querySelector("[data-lp-phase]");
+  if (fill) fill.style.width = pct + "%";
+  if (percentEl) percentEl.textContent = pct + "%";
+  if (topicEl && data.topic) topicEl.textContent = data.topic;
+  if (phaseEl && data.phase) {
+    phaseEl.textContent = data.detail ? `${data.phase} — ${data.detail}` : data.phase;
+  }
+  const track = mount.querySelector(".lp-track");
+  if (track) track.setAttribute("aria-valuenow", String(pct));
+  if (data.done && mount.dataset.lpCelebrated !== "1") {
+    mount.dataset.lpCelebrated = "1";
+    soundscape?.play("chime_positive");
+    showToast(`📚 Learning complete: ${(data.topic || "topic").toUpperCase()}`, 3500);
+  }
+}
+
 function connectWebSocket() {
   const isHttps = window.location.protocol === "https:";
   const wsProto = isHttps ? "wss:" : "ws:";
@@ -1724,7 +1748,13 @@ function handleServerEvent(data) {
       break;
 
     case "FACE_ENROLLMENT_COMPLETE":
-      finishEnrollmentModalUI(data.admin_name || "Admin");
+      if (data.guided) {
+        // Guided flow: face stage done, voice test is being spoken now.
+        closeEnrollmentModal(false);
+        showToast(`📷 Face captured${data.admin_name ? ` for ${data.admin_name}` : ""} — voice test next`, 3500);
+      } else {
+        finishEnrollmentModalUI(data.admin_name || "Admin");
+      }
       break;
 
     case "FACE_ENROLLMENT_CANCELLED":
@@ -1732,6 +1762,56 @@ function handleServerEvent(data) {
       closeEnrollmentModal(false);
       showToast("Biometric enrollment cancelled", 2000);
       break;
+
+    // Guided passphrase-gated enrollment: every step is shown, never silent.
+    case "ENROLLMENT_CODE_REQUIRED":
+      showToast(`🔐 ${data.message || "Enrollment is code-locked."}`, 4000);
+      break;
+
+    case "ENROLLMENT_ARMED":
+      showToast(`🔐 ${data.message || "Enrollment armed"}`, 4000);
+      soundscape.play("blueprint_whoosh");
+      break;
+
+    case "ENROLLMENT_REJECTED":
+      showToast(`🔐 Enrollment refused (${data.reason || "wrong code"})`, 3500);
+      soundscape.play("security_alert");
+      break;
+
+    case "ENROLLMENT_FACE_SPOOF":
+      showToast(`🔐 Spoof blocked (${data.spoof_type || "presentation attack"}) — use a live face`, 4000);
+      soundscape.play("security_alert");
+      break;
+
+    case "ENROLLMENT_VOICE_PROMPT":
+      showToast(`🎙️ Say aloud (${data.step}/${data.total}): ${data.prompt || ""}`, 6000);
+      break;
+
+    case "ENROLLMENT_VOICE_RETRY":
+      showToast(`🎙️ Try again (${data.step}/${data.total}): ${data.prompt || ""}`, 5000);
+      break;
+
+    case "ENROLLMENT_ABORTED":
+      showToast(`🔐 Enrollment cancelled (${data.reason || "verification failed"})`, 4000);
+      break;
+
+    case "ENROLLMENT_COMPLETE":
+      showToast(`✅ Enrollment complete for ${data.user || "new user"}${data.face_saved ? " (face+voice)" : " (voice)"}`, 5000);
+      soundscape.play("auth_confirmed");
+      break;
+
+    // OpenRouter pool: the acting free model dropped out (limit/dead/error)
+    // and a healthy one took over — always visible, never silent.
+    case "MODEL_SWITCH": {
+      const short = (m) => String(m || "").split("/").pop().replace(":free", "");
+      const why = {
+        rate: "rate limit", quota: "out of tokens", dead: "unavailable",
+        context: "context full", server: "server error", tools: "no tools",
+        bad_request: "rejected request",
+      }[data.reason] || data.reason || "switched";
+      showToast(`🔄 Model switch: ${short(data.away)} ${why} → ${short(data.next) || "cloud fallback"}`, 4000);
+      break;
+    }
 
     case "FACE_ENROLLMENT_ALIGN_WARNING":
       if (enrollGuidanceText && data.message) {
@@ -1760,6 +1840,28 @@ function handleServerEvent(data) {
     case "UI_MUTATION":
       handleUIMutation(data);
       break;
+
+    case "LEARNING_PROGRESS":
+      handleLearningProgress(data);
+      break;
+
+    // Listener Intelligence: show what JARVIS assumed, and why nothing happened.
+    case "TRANSCRIPT_CORRECTION":
+      showToast(`🧠 Interpreted: ${String(data.corrected || "").slice(0, 64)}`, 2800);
+      break;
+
+    case "LISTENER_REJECTED": {
+      const why = {
+        foreign_language: "non-English speech ignored",
+        uncertain_language: "language unclear — ignored",
+        low_confidence_speech: "speech too unclear — ignored",
+        unverified_speaker: "unverified speaker — command ignored",
+        replay_spoof: "audio replay blocked",
+      }[data.reason] || "ignored";
+      const who = data.speaker && data.speaker !== "Unknown Guest" ? ` (${data.speaker})` : "";
+      showToast(`🎧 ${why}${who}`, 2600);
+      break;
+    }
   }
 }
 
@@ -1791,6 +1893,9 @@ function getUIMutationTargetElement(target) {
     "grain": ".overlay-grain",
     "reticle": ".reticle-container",
     "orb": "#canvas-container",
+    "progress bar": '[data-jarvis-live-feature="learning-progress-bar"]',
+    "learning progress": '[data-jarvis-live-feature="learning-progress-bar"]',
+    "learning bar": '[data-jarvis-live-feature="learning-progress-bar"]',
   };
   return targetMap[t] ? document.querySelector(targetMap[t]) : document.querySelector(target);
 }
@@ -2331,8 +2436,13 @@ function finishEnrollmentModalUI(adminName = "Admin") {
 }
 
 function startFaceEnrollment() {
+  // Code-locked: the button only opens the guide modal. The backend replies
+  // ENROLLMENT_CODE_REQUIRED and enrollment starts ONLY from the spoken code.
   showEnrollmentModalUI();
-  sendWsMessage({ type: "START_FACE_ENROLLMENT", admin_name: "Admin" });
+  if (enrollGuidanceText) {
+    enrollGuidanceText.textContent = "Enrollment is code-locked. Say the full enrollment code sentence into the microphone to begin.";
+  }
+  sendWsMessage({ type: "START_FACE_ENROLLMENT" });
   soundscape.play("blueprint_whoosh");
 }
 

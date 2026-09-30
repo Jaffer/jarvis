@@ -11,3 +11,6 @@ mediapipe>=0.10.14,<1.0.0
 scipy>=1.12
 edge-tts>=7.0.0
 miniaudio>=1.70
+google-api-python-client>=2.100,<3
+google-auth>=2.20,<3
+google-auth-oauthlib>=1.2,<2
