@@ -4149,15 +4149,26 @@ class TelegramBridge:
         cid = chat_id or self.allowed_chat_id
         if not self.token or not cid:
             return False
+        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+        headers = {"Content-Type": "application/json"}
         try:
-            url = f"https://api.telegram.org/bot{self.token}/sendMessage"
             data = json.dumps({"chat_id": cid, "text": text, "parse_mode": "Markdown"}).encode()
-            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+            req = urllib.request.Request(url, data=data, headers=headers)
             with urllib.request.urlopen(req, timeout=10) as r:
                 return r.status == 200
         except Exception as e:
             log.warning("Telegram send_message notice: %s", e)
-            return False
+            # Markdown parse failures are common with arbitrary model text
+            # (stray * _ [ ` ...). Retry once as plain text so the answer is
+            # never lost just because of formatting.
+            try:
+                data = json.dumps({"chat_id": cid, "text": text}).encode()
+                req = urllib.request.Request(url, data=data, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status == 200
+            except Exception as e2:
+                log.warning("Telegram plain-text retry notice: %s", e2)
+                return False
 
     def send_photo(self, photo_bytes: bytes, caption: str = "", chat_id: str | None = None) -> bool:
         """Send an image (such as an intruder snapshot) via Telegram Bot API multipart/form-data."""
@@ -7448,6 +7459,34 @@ class SubordinateBotPool:
 # ═══════════════════════════════════════════════════════════════════════════
 # NEURAL BRAIN (Autonomous LLM Reasoning, Tool Calling, and RAG Memory)
 # ═══════════════════════════════════════════════════════════════════════════
+def _clean_brain_response(raw_text: str) -> str:
+    """Sanitise a model's raw reply for speech, the HUD and Telegram.
+
+    Strips tool/XML artifacts and JSON tool-call echoes, and — importantly —
+    reasoning-model leaks: several free models return their chain of thought as
+    the answer ("Here's a thinking process: 1. Analyze User Input..."). We keep
+    only a marked final answer, or drop the trace entirely, rather than ever
+    speaking it aloud.
+    """
+    text = str(raw_text or "")
+    text = re.sub(r"<toolcall>.*?</toolcall>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<tool_call>.*?</tool_call>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    text = re.sub(r"<.*?>", "", text)
+    text = re.sub(r'\{[^{}]*"name"[^{}]*\}', "", text)
+    text = re.sub(r"Here are the JSON function call responses:?", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(User's|The user's)?\s*(search\s*)?query\s*is\s*[\"'].*?[\"'][.,]?", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"User's search query is.*?[.\n]?", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"Search query:.*?[.\n]?", "", text, flags=re.IGNORECASE)
+    if re.search(r"(?i)\b(thinking process|chain[- ]of[- ]thought|let me think|"
+                 r"reasoning\s*:|analysis\s*:)", text[:240]):
+        parts = re.split(r"(?i)\b(?:final answer|final response|final output|answer)\s*[:\-]\s*",
+                         text, maxsplit=1)
+        text = parts[1].strip() if len(parts) > 1 else ""
+    text = re.sub(r"[*#_`]", "", text).strip()
+    return text or "Understood, sir."
+
+
 class NeuralBrain:
     """Autonomous Neural Brain for JARVIS.
     - Connects to local Ollama (llama3.2:3b) or cloud LLMs
@@ -7522,7 +7561,13 @@ class NeuralBrain:
 
     def _openrouter_attempt(self, messages: list, tools, temperature: float,
                             on_status=None) -> str:
-        """Cloud tier 1: ask the free-model pool; '' when it cannot answer."""
+        """Cloud tier 1: ask the free-model pool; '' when it cannot answer.
+
+        Bounded on purpose: a 14 s per-attempt timeout and a 30 s total budget
+        keep a voice/Telegram reply snappy — if the free models are slow or
+        cooling down, this returns '' and the brain falls through to Groq /
+        local Ollama rather than leaving the user waiting.
+        """
         if self.openrouter is None:
             return ""
         try:
@@ -7532,6 +7577,8 @@ class NeuralBrain:
                 temperature=temperature,
                 tool_executor=self.execute_tool,
                 on_status=on_status,
+                timeout=14.0,
+                budget=30.0,
             )
         except Exception as e:
             log.warning("OpenRouter pool notice: %s", e)
@@ -8714,7 +8761,7 @@ class NeuralBrain:
                 "3. Self-Coding & Codebase Refactoring: When the user asks you to write code for yourself, modify your code, or patch a feature ('write code for yourself...', 'modify your code to...'), call the 'self_code_patch' or 'self_code_improve' tool to update the target file. "
                 "4. Live HUD capability requests: when asked to show a widget, progress, diagnostic, graph, or status on the orb/HUD, first call 'inspect_codebase' on web/index.html or web/app.js. If missing, immediately call 'synthesize_and_inject_hud_feature' with a compact, safe HUD fragment. Do not merely promise progress; deploy the widget in the current HUD session."
                 "5. Deep Browser Control: a live browser agent is available (mcp_puppeteer_query plus native mcp_puppeteer_puppeteer_* tools). To operate ANY website step-by-step: navigate -> read 'page state' (or use evaluate find/click scripts) -> puppeteer_click / puppeteer_fill -> puppeteer_screenshot. After EVERY action, read the returned page state before deciding the next step; a NOT_FOUND click response includes the real clickable list — pick from it instead of guessing selectors."
-                "6. God's Eye View: a live 3D OSINT globe (flights, ships, satellites, earthquakes, CCTV) runs as a JARVIS sidecar. When the user asks to open the globe, the world map, satellite or flight tracking, or 'God's Eye View', call open_board with target 'godseye'.",
+                "6. God's Eye View: a live 3D OSINT globe (flights, ships, satellites, earthquakes, CCTV) runs as a JARVIS sidecar. When the user asks to open the globe, the world map, satellite or flight tracking, or 'God's Eye View', call open_board with target 'godseye'."
                 "7. Google Workspace: the user's Calendar and Gmail are live tools. 'next meeting'/'what's next' -> google_next_event; 'agenda'/'schedule'/'today'/'tomorrow' -> google_agenda with day; unread or themed mail ('bank statements', 'Amazon') -> google_mail_digest with keywords; any request to ADD/CREATE/SCHEDULE/BOOK an event -> google_create_event with title and an ISO 8601 start (YYYY-MM-DDTHH:MM local time, end optional). Never invent subjects, times, or events; report an empty result or a denied write honestly."
             )
 
@@ -8836,18 +8883,7 @@ class NeuralBrain:
                     if not full_response:
                         full_response = "I encountered an issue accessing the neural core, sir."
 
-            clean_text = re.sub(r"<toolcall>.*?</toolcall>", "", full_response, flags=re.DOTALL | re.IGNORECASE)
-            clean_text = re.sub(r"<tool_call>.*?</tool_call>", "", clean_text, flags=re.DOTALL | re.IGNORECASE)
-            clean_text = re.sub(r"<think>.*?</think>", "", clean_text, flags=re.DOTALL).strip()
-            clean_text = re.sub(r"<.*?>", "", clean_text)
-            clean_text = re.sub(r'\{[^{}]*"name"[^{}]*\}', "", clean_text)
-            clean_text = re.sub(r"Here are the JSON function call responses:?", "", clean_text, flags=re.IGNORECASE)
-            clean_text = re.sub(r"(User's|The user's)?\s*(search\s*)?query\s*is\s*[\"'].*?[\"'][.,]?", "", clean_text, flags=re.IGNORECASE)
-            clean_text = re.sub(r"User's search query is.*?[.\n]?", "", clean_text, flags=re.IGNORECASE)
-            clean_text = re.sub(r"Search query:.*?[.\n]?", "", clean_text, flags=re.IGNORECASE)
-            clean_text = re.sub(r"[*#_`]", "", clean_text).strip()
-            if not clean_text:
-                clean_text = "Understood, sir."
+            clean_text = _clean_brain_response(full_response)
 
             sentences = re.split(r"(?<=[.!?])\s+", clean_text)
             for s in sentences:
@@ -8888,6 +8924,12 @@ def _humanize_speech_text(text: str) -> str:
     s = re.sub(r"<toolcall>.*?</toolcall>", "", s, flags=re.DOTALL | re.IGNORECASE)
     s = re.sub(r"<tool_call>.*?</tool_call>", "", s, flags=re.DOTALL | re.IGNORECASE)
     s = re.sub(r"<.*?>", "", s)
+
+    # 1b. Reasoning leaks: keep the final answer only, never the thought trace.
+    if re.search(r"(?i)\b(thinking process|chain[- ]of[- ]thought|let me think)\b", s[:240]):
+        parts = re.split(r"(?i)\b(?:final answer|final response|final output|answer)\s*[:\-]\s*",
+                         s, maxsplit=1)
+        s = parts[1] if len(parts) > 1 else ""
 
     # 2. Strip system log headers and autonomous learning boilerplate
     s = re.sub(r"^\s*(?:JARVIS|Jarvis|SYSTEM|BOT|AI)\s*:\s*", "", s)

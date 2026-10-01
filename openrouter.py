@@ -97,6 +97,9 @@ def _classify_error(code: int, body: str) -> str:
             return "quota"
         return "rate"
     if code in (400, 404, 409, 410, 422):
+        if "reasoning" in b and ("unsupported" in b or "not supported" in b
+                                 or "unknown" in b or "invalid" in b):
+            return "reasoning"
         if "tool" in b and ("unsupported" in b or "not supported" in b or "not allow" in b or "unknown" in b):
             return "tools"
         if ("context" in b or "too long" in b or "too many tokens" in b
@@ -152,7 +155,8 @@ class OpenRouterPool:
     def _state(self, model: str) -> dict:
         st = self._health.get(model)
         if st is None:
-            st = {"failures": 0, "cooldown_until": 0.0, "reason": "", "tools_ok": True}
+            st = {"failures": 0, "cooldown_until": 0.0, "reason": "",
+                  "tools_ok": True, "reasoning_ok": True}
             self._health[model] = st
         return st
 
@@ -175,8 +179,10 @@ class OpenRouterPool:
         cooldown = 0.0
         with self._lock:
             st = self._state(model)
-            if kind == "tools":
-                st["tools_ok"] = False   # remember: no tools for this model
+            if kind in ("tools", "reasoning"):
+                # Optional parameter this model refuses: drop it forever (cheap,
+                # no cooldown — the model itself is still perfectly usable).
+                st["tools_ok" if kind == "tools" else "reasoning_ok"] = False
                 return
             if kind == "context":
                 # Message-size problem, not a model problem: try elsewhere,
@@ -224,6 +230,7 @@ class OpenRouterPool:
                         "cooldown_remaining": round(max(0.0, self._state(m)["cooldown_until"] - now), 1),
                         "reason": self._state(m)["reason"],
                         "tools_ok": self._state(m)["tools_ok"],
+                        "reasoning_ok": self._state(m)["reasoning_ok"],
                         "failures": self._state(m)["failures"],
                     }
                     for m in self.models
@@ -261,13 +268,17 @@ class OpenRouterPool:
         return 0, str(exc)
 
     def _one_model(self, model: str, messages: list, tools, temperature: float,
-                   max_tokens: int, tool_executor, on_status) -> tuple:
+                   max_tokens: int, tool_executor, on_status,
+                   timeout: float | None = None) -> tuple:
         """Try one model. Returns (True, content, '') or (False, kind, detail).
 
-        Handles the OpenAI tool-calling loop locally; a 'tools' failure means
-        the model rejected the tool schema (caller retries it tool-less)."""
+        Handles the OpenAI tool-calling loop locally; a 'tools' or 'reasoning'
+        failure means the model rejected that optional parameter (the caller
+        retries it without it, and the pool remembers for next time)."""
         with self._lock:
-            state_tools = self._state(model)["tools_ok"]
+            st = self._state(model)
+            state_tools = st["tools_ok"]
+            state_reasoning = st["reasoning_ok"]
         send_tools = tools if (tools and state_tools) else None
         convo = [dict(m) for m in messages]
         detail = ""
@@ -281,8 +292,13 @@ class OpenRouterPool:
             if send_tools:
                 payload["tools"] = send_tools
                 payload["tool_choice"] = "auto"
+            if state_reasoning:
+                # Ask reasoning models to keep their chain-of-thought out of the
+                # content, so JARVIS never speaks "Here's a thinking process:".
+                payload["reasoning"] = {"exclude": True}
             try:
-                data = self._send(payload, self._headers(), self.timeout)
+                data = self._send(payload, self._headers(),
+                                  timeout or self.timeout)
             except Exception as exc:
                 status, body = self._error_parts(exc)
                 kind = _classify_error(status, body) if status else "server"
@@ -326,19 +342,34 @@ class OpenRouterPool:
 
     def query(self, messages: list, tools=None, purpose: str = "default",
               temperature: float = 0.6, max_tokens: int = _MAX_TOKENS_DEFAULT,
-              tool_executor=None, on_status=None) -> dict:
+              tool_executor=None, on_status=None, timeout: float | None = None,
+              budget: float | None = None) -> dict:
         """Ask the pool; returns {content, model} or raises OpenRouterPoolError.
 
         Walks the healthy models for `purpose`; on rate limits, quota/token
         exhaustion, dead models or errors it cools that model down and switches
         immediately to the next healthy one — the caller never sees the outage.
         Context/token-fit misses ('context') skip the model for THIS request
-        only, so a bigger-context free model can still answer."""
+        only, so a bigger-context free model can still answer.
+
+        `timeout` overrides the per-attempt HTTP timeout and `budget` caps the
+        whole walk (seconds) so a real-time caller (voice, Telegram) can fall
+        through to the next engine tier instead of waiting on slow models.
+        """
         if not self.enabled:
             raise OpenRouterPoolError("OpenRouter pool disabled (no API key or models)")
+        deadline = (self._now() + budget) if budget else None
+
+        def _out_of_budget() -> bool:
+            return deadline is not None and self._now() >= deadline
+
         attempted: list[str] = []
         last_kind = last_detail = ""
         for model in self._candidates(purpose):
+            if _out_of_budget():
+                last_kind = last_kind or "budget"
+                last_detail = f"budget {budget:.0f}s exceeded"
+                break
             if on_status:
                 try:
                     on_status(f"NEURAL // {model.split('/')[-1][:28].upper()}")
@@ -346,7 +377,7 @@ class OpenRouterPool:
                     pass
             ok, content_or_kind, detail = self._one_model(
                 model, messages, tools, temperature, max_tokens,
-                tool_executor, on_status)
+                tool_executor, on_status, timeout=timeout)
             attempted.append(model)
             if ok:
                 self._mark_success(model)
@@ -356,18 +387,23 @@ class OpenRouterPool:
                 return {"content": content_or_kind, "model": model}
             kind = content_or_kind
             last_kind, last_detail = kind, detail
-            if kind == "tools":
-                # Remember, then immediately retry this model tool-less.
-                self._mark_failure(model, "tools")
+            # Optional parameter refused (tools / reasoning): drop it for this
+            # model and re-attempt it right away — the model is still healthy.
+            for _retry in range(2):
+                if kind not in ("tools", "reasoning"):
+                    break
+                self._mark_failure(model, kind)
+                if _out_of_budget():
+                    break
                 ok2, res2, detail2 = self._one_model(
-                    model, messages, None, temperature, max_tokens,
-                    tool_executor, on_status)
+                    model, messages, tools, temperature, max_tokens,
+                    tool_executor, on_status, timeout=timeout)
                 if ok2:
                     self._mark_success(model)
                     with self._lock:
                         self._preferred[purpose] = model
-                    log.info("⚡ OpenRouter %s response via %s (tool-less)",
-                             purpose, model)
+                    log.info("⚡ OpenRouter %s response via %s (minus '%s')",
+                             purpose, model, kind)
                     return {"content": res2, "model": model}
                 kind, detail = res2, detail2
                 last_kind, last_detail = kind, detail
