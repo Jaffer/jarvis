@@ -14177,9 +14177,13 @@ def _start_websocket_server(port: int = 8765) -> None:
                         transcript = data.get("transcript", "").strip()
                         if _voice_engine and transcript:
                             log.info("🎙️ [WS LINK] Incoming Voice Command from HUD: '%s'", transcript)
+                            # The HUD captures this with the browser Speech API, so it
+                            # IS microphone input — it must not be refused as a remote
+                            # origin by the enrollment code gate. Typed input below
+                            # stays "websocket" and remains blocked.
                             threading.Thread(
                                 target=_voice_engine._route_voice_command,
-                                args=(transcript, "websocket"),
+                                args=(transcript, "mic"),
                                 daemon=True,
                             ).start()
                     elif data.get("type") == "TEXT_COMMAND":

@@ -344,6 +344,29 @@ function showToast(message, duration = 3000) {
   setTimeout(() => toastEl.classList.remove("visible"), duration);
 }
 
+// External destinations get a real link the user taps. A WebSocket event is
+// not a user gesture, so window.open() is popup-blocked; the tap supplies one.
+// Built element-by-element (never string-concatenated into innerHTML).
+function showExternalNavToast(url, label) {
+  if (!toastEl) return;
+  const raw = String(url || "");
+  if (!/^https:\/\//i.test(raw)) {
+    showToast("🔗 That link is unavailable", 3000);
+    return;
+  }
+  toastEl.innerHTML = "";
+  const lead = document.createElement("span");
+  lead.textContent = `🔗 ${label || "Link"} ready — `;
+  const link = document.createElement("a");
+  link.setAttribute("href", raw);          // scheme verified above
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = "tap to open in a new tab";
+  toastEl.append(lead, link);
+  toastEl.classList.add("visible");
+  setTimeout(() => toastEl.classList.remove("visible"), 8000);
+}
+
 // OAuth toasts carry a trusted clickable link built entirely in code (the
 // only innerHTML writer in the HUD): the consent URL is allow-listed to
 // accounts.google.com and the state token is dropped before display.
@@ -1680,15 +1703,29 @@ function handleServerEvent(data) {
 
     case "NAVIGATE":
       if (data.url) {
-        showToast(`Navigating to ${data.label || "board"}...`, 2000);
-        if (data.url.includes("stage.html")) {
-          openBarehandsStage(data.construct || null);
+        const url = String(data.url);
+        // JARVIS-internal pages (barehands stage, orb, relative paths) are
+        // meant to take over this tab. An EXTERNAL site must not: navigating
+        // the HUD away destroys the session, which is why "open YouTube"
+        // appeared to eat the current tab.
+        const isInternal =
+          url.includes("stage.html") ||
+          /^(?:\/|\.\/|\.\.\/)/.test(url) ||
+          url.startsWith(window.location.origin);
+        if (isInternal) {
+          showToast(`Navigating to ${data.label || "board"}...`, 2000);
+          if (url.includes("stage.html")) {
+            openBarehandsStage(data.construct || null);
+          } else {
+            try {
+              window.location.href = url;
+            } catch (e) {}
+          }
         } else {
-          // window.open() from a WS event is popup-blocked (no user gesture).
-          // Navigating the same tab always works.
-          try {
-            window.location.href = data.url;
-          } catch (e) {}
+          // A WS event carries no user gesture, so window.open() is blocked.
+          // Offer a real link instead — the tap supplies the gesture and
+          // opens a new tab, leaving the HUD running.
+          showExternalNavToast(url, data.label);
         }
       }
       break;
@@ -2511,7 +2548,12 @@ function stopFastEnrollmentRelay() {
   }
 }
 
-enrollTriggerBtn?.addEventListener("click", startFaceEnrollment);
+// Enrollment is code-locked: only the spoken code can start it. This button
+// used to send START_FACE_ENROLLMENT, which the backend always refuses, so it
+// taught nothing. It now states the real path instead of faking a start.
+enrollTriggerBtn?.addEventListener("click", () => {
+  showToast('🔐 Enrollment is voice-only. Say: "start face and voice enrollment. code: Even dead I am the hero"', 8000);
+});
 enrollCloseBtn?.addEventListener("click", () => closeEnrollmentModal(true));
 enrollBackdrop?.addEventListener("click", () => closeEnrollmentModal(true));
 
