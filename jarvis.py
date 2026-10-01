@@ -1856,22 +1856,41 @@ class GoogleWorkspaceClient:
                      urgent_keywords: tuple = (),
                      mail_keywords: tuple = (),
                      mail_labels: tuple = ()) -> dict:
-        """Today's timed agenda + matching unread mail, in ONE spoken block."""
+        """Today's timed agenda + matching unread mail, in ONE spoken block.
+
+        A failed read is never smoothed over into "your calendar is clear":
+        list_events/search_mail both return ok:False on error, so those flags
+        decide the wording. Only a genuinely successful AND genuinely empty
+        read claims a clear calendar — that distinction is what makes a broken
+        refresh token visible in the logs instead of silent.
+        """
         now = now or datetime.now().astimezone()
         day = _google_parse_natural_day("today", now.replace(tzinfo=None))
         evs = self.list_events(day=day)
+        calendar_ok = bool(evs.get("ok"))
         agenda = [e["line"] for e in evs.get("events", []) if e.get("start", {}).get("dateTime")]
         urgent = [e for e in evs.get("events", [])
                   if _google_should_notify_event(e.get("summary", ""),
                                                  (e.get("start") or {}).get("dateTime", ""),
                                                  urgent_keywords)]
         mail = self.search_mail(tuple(mail_keywords or ()), tuple(mail_labels or ()))
+        mail_ok = bool(mail.get("ok"))
         mail_lines = []
-        if mail.get("ok"):
+        if mail_ok:
             for m in mail["messages"][:5]:
                 mail_lines.append(_google_format_mail_line(m))
+        # Both sources unreachable: there is no partial digest worth speaking, so
+        # the failure propagates and the caller reports it verbatim.
+        if not calendar_ok and not mail_ok:
+            return {"ok": False,
+                    "error": str(evs.get("error") or mail.get("error") or "unknown error"),
+                    "text": "", "event_count": 0, "mail_count": 0,
+                    "calendar_ok": False, "mail_ok": False}
         parts = [f"{_google_digest_greeting(now)}, sir."]
-        if agenda:
+        if not calendar_ok:
+            parts.append(f"I could not reach your calendar just now: "
+                         f"{evs.get('error', 'unknown error')}.")
+        elif agenda:
             parts.append(f"You have {len(agenda)} event{'s' if len(agenda) != 1 else ''} today: "
                          + "; ".join(agenda[:6]) + ".")
         else:
@@ -1881,17 +1900,23 @@ class GoogleWorkspaceClient:
         if mail_lines:
             parts.append(f"And {len(mail['messages'])} matching unread email{'s' if len(mail['messages']) != 1 else ''}: "
                          + "; ".join(mail_lines) + ".")
+        elif not mail_ok:
+            parts.append(f"I could not reach your mail just now: "
+                         f"{mail.get('error', 'unknown error')}.")
         return {"ok": True, "text": " ".join(parts),
-                "event_count": len(agenda), "mail_count": len(mail_lines)}
+                "event_count": len(agenda), "mail_count": len(mail_lines),
+                "calendar_ok": calendar_ok, "mail_ok": mail_ok}
 
     def morning_briefing(self, now: datetime | None = None,
                          urgent_keywords: tuple = (),
                          mail_keywords: tuple = (),
                          mail_labels: tuple = ()) -> str:
         """The spoken morning briefing (same shape as the calendar digest)."""
+        now = now or datetime.now().astimezone()
         res = self.daily_digest(now, urgent_keywords, mail_keywords, mail_labels)
         if not res.get("ok"):
-            return "Good morning, sir. I could not reach your calendar just now."
+            return (f"{_google_digest_greeting(now)}, sir. I could not reach your "
+                    f"calendar or mail just now: {res.get('error', 'unknown error')}.")
         return res["text"]
 
 
