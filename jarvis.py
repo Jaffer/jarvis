@@ -719,17 +719,25 @@ JARVIS_CFG = _load_jarvis_config()
 # to an IANA name like "Asia/Kolkata"; leaving it unset keeps the platform's
 # local time, so desktop behaviour is unchanged.
 _JARVIS_TZ_ENV = "JARVIS_TIMEZONE"
+# Cloud hosts run UTC and cannot be fixed from the dashboard unless someone sets
+# the env var, so a public deployment falls back to this zone. Desktop installs
+# stay on system local time.
+_JARVIS_TZ_CLOUD_DEFAULT = "Asia/Kolkata"
 _jarvis_tz_cache: tuple[str | None, object] | None = None
 
 
 def _jarvis_tz():
     """Configured IANA timezone, or None to keep the platform's local time.
 
-    An unknown zone name warns once and degrades to local time rather than
-    taking the whole bridge down — a typo must never silence the calendar.
+    Order: JARVIS_TIMEZONE, then the cloud default on a public deployment, then
+    system local time. An unknown zone name warns once and degrades to local
+    rather than taking the whole bridge down — a typo must never silence the
+    calendar.
     """
     global _jarvis_tz_cache
     name = (os.environ.get(_JARVIS_TZ_ENV, "") or "").strip()
+    if not name and JARVIS_PUBLIC_DEPLOYMENT:
+        name = _JARVIS_TZ_CLOUD_DEFAULT
     if _jarvis_tz_cache is not None and _jarvis_tz_cache[0] == name:
         return _jarvis_tz_cache[1]
     tz = None
@@ -741,6 +749,10 @@ def _jarvis_tz():
             log.warning("Invalid %s=%r (%s); using system local time instead.",
                         _JARVIS_TZ_ENV, name, e)
             tz = None
+    if name and tz is not None and _jarvis_tz_cache is None:
+        log.info("Display timezone: %s (source: %s).", name,
+                 _JARVIS_TZ_ENV if os.environ.get(_JARVIS_TZ_ENV, "").strip()
+                 else "cloud default")
     _jarvis_tz_cache = (name, tz)
     return tz
 
@@ -1736,6 +1748,53 @@ class GoogleWorkspaceClient:
             if (ev.get("start") or {}).get("dateTime"):
                 return {"ok": True, "event": ev}
         return {"ok": True, "event": None}
+
+    def search_events(self, query: str, start: datetime | None = None,
+                      end: datetime | None = None, max_results: int = 10) -> dict:
+        """Free-text search over event titles, descriptions and locations.
+
+        Unlike next_event this KEEPS all-day blocks, because the events people
+        search for (birthdays, anniversaries, holidays) are usually all-day.
+        The window defaults to the next 12 months; pass start/end to narrow it.
+        """
+        if not self.enabled:
+            return {"ok": False, "error": self.disabled_reason or "disabled", "events": []}
+        q = str(query or "").strip()
+        if not q:
+            return {"ok": False, "error": "the search needs a keyword", "events": []}
+        cal, _, err = self._services()
+        if err:
+            return {"ok": False, "error": err, "events": []}
+        try:
+            now = _jarvis_now()
+            time_min = _jarvis_local(start) if start else now
+            time_max = _jarvis_local(end) if end else now + timedelta(days=365)
+            if time_max <= time_min:
+                time_max = time_min + timedelta(days=31)
+            req = cal.events().list(calendarId="primary", q=q,
+                                    timeMin=time_min.isoformat(),
+                                    timeMax=time_max.isoformat(),
+                                    maxResults=max(1, min(int(max_results or 10), 50)),
+                                    singleEvents=True, orderBy="startTime")
+            items = req.execute(num_retries=1).get("items", []) if hasattr(req, "execute") else req.get("items", [])
+            events = []
+            for it in items or []:
+                try:
+                    events.append({
+                        "id": it.get("id", ""),
+                        "summary": it.get("summary", "Untitled event"),
+                        "start": it.get("start", {}) or {},
+                        "end": it.get("end", {}) or {},
+                        "line": _google_format_event_time(it.get("summary", ""),
+                                                          it.get("start", {}) or {},
+                                                          it.get("end", {}) or {}),
+                    })
+                except Exception:
+                    continue
+            events.sort(key=_google_event_sort_key)
+            return {"ok": True, "events": events}
+        except Exception as e:
+            return {"ok": False, "error": str(e) or type(e).__name__, "events": []}
 
     # ── Calendar write (JARVIS_GOOGLE_ALLOW_WRITE=0 hard-disables) ──
     def create_event(self, title: str, start: datetime,
@@ -7756,14 +7815,50 @@ class SubordinateBotPool:
 # ═══════════════════════════════════════════════════════════════════════════
 # NEURAL BRAIN (Autonomous LLM Reasoning, Tool Calling, and RAG Memory)
 # ═══════════════════════════════════════════════════════════════════════════
+_BRAIN_REASONING_RE = re.compile(
+    r"(?i)\b(thinking process|chain[- ]of[- ]thought|let me think|"
+    r"reasoning\s*:|analysis\s*:)")
+_BRAIN_FINAL_ANSWER_RE = re.compile(
+    r"(?i)\b(?:final answer|final response|final output|answer)\s*[:\-]\s*")
+_BRAIN_FINAL_BARE_RE = re.compile(
+    r"(?im)^[ \t>*_#-]*(?:final answer|final response|final output)"
+    r"[ \t>*_#-]*[:\-]?[ \t]*$")
+# Spoken when a reply cannot be reduced to an answer. The old fallback here
+# was "Understood, sir." — which reads as a successful reply and hid the fact
+# that the model never actually answered.
+_BRAIN_NO_ANSWER = ("I could not produce an answer to that, sir — the response came "
+                    "back without a usable final answer.")
+
+
+def _extract_final_answer(text: str) -> str:
+    """Pull the answer out of a reasoning-laden reply, or '' if there is none.
+
+    Only an explicit marker counts ('Final Answer: X', a bare 'Final Answer'
+    line, '**Answer** - X'). Guessing where the trace ends is deliberately not
+    attempted: a heuristic that keeps "search the calendar for birthdays" would
+    speak the reasoning aloud, which is the very thing this function exists to
+    prevent. With no marker the caller reports an admitted gap instead.
+    """
+    parts = _BRAIN_FINAL_ANSWER_RE.split(text, maxsplit=1)
+    if len(parts) > 1 and parts[1].strip():
+        return parts[1].strip()
+    bare = _BRAIN_FINAL_BARE_RE.search(text)
+    if bare and text[bare.end():].strip():
+        return text[bare.end():].strip()
+    return ""
+
+
 def _clean_brain_response(raw_text: str) -> str:
     """Sanitise a model's raw reply for speech, the HUD and Telegram.
 
     Strips tool/XML artifacts and JSON tool-call echoes, and — importantly —
     reasoning-model leaks: several free models return their chain of thought as
     the answer ("Here's a thinking process: 1. Analyze User Input..."). We keep
-    only a marked final answer, or drop the trace entirely, rather than ever
-    speaking it aloud.
+    the answer that followed the trace.
+
+    A reply that yields no answer at all returns an explicit "I could not
+    answer" line, never a confident-sounding acknowledgement: a fake ack is
+    worse than an admitted gap, because it hides the failure from the user.
     """
     text = str(raw_text or "")
     text = re.sub(r"<toolcall>.*?</toolcall>", "", text, flags=re.DOTALL | re.IGNORECASE)
@@ -7775,13 +7870,10 @@ def _clean_brain_response(raw_text: str) -> str:
     text = re.sub(r"(User's|The user's)?\s*(search\s*)?query\s*is\s*[\"'].*?[\"'][.,]?", "", text, flags=re.IGNORECASE)
     text = re.sub(r"User's search query is.*?[.\n]?", "", text, flags=re.IGNORECASE)
     text = re.sub(r"Search query:.*?[.\n]?", "", text, flags=re.IGNORECASE)
-    if re.search(r"(?i)\b(thinking process|chain[- ]of[- ]thought|let me think|"
-                 r"reasoning\s*:|analysis\s*:)", text[:240]):
-        parts = re.split(r"(?i)\b(?:final answer|final response|final output|answer)\s*[:\-]\s*",
-                         text, maxsplit=1)
-        text = parts[1].strip() if len(parts) > 1 else ""
+    if _BRAIN_REASONING_RE.search(text[:240]):
+        text = _extract_final_answer(text)
     text = re.sub(r"[*#_`]", "", text).strip()
-    return text or "Understood, sir."
+    return text or _BRAIN_NO_ANSWER
 
 
 class NeuralBrain:
@@ -8291,7 +8383,7 @@ class NeuralBrain:
             return "Autonomous code architect is offline."
 
         elif name in ("google_next_event", "google_agenda", "google_mail_digest",
-                      "google_create_event"):
+                      "google_create_event", "google_search_events"):
             g_client = get_google_client()
             if not g_client:
                 return ("Google Workspace bridge is offline. Enable it with "
@@ -8304,6 +8396,23 @@ class NeuralBrain:
                 if not ev:
                     return "No timed events on your calendar for the next seven days."
                 return f"Next event: {ev.get('line') or ev.get('summary', 'Untitled event')}"
+            if name == "google_search_events":
+                query = str(args.get("query", "")).strip()
+                if not query:
+                    return ("Give me a keyword to search for, sir — for example "
+                            "'birthday' or 'interview'.")
+                start = _google_parse_dt_arg(str(args.get("start", "")))
+                end = _google_parse_dt_arg(str(args.get("end", "")))
+                res = g_client.search_events(query, start, end)
+                if not res.get("ok"):
+                    return f"Calendar search failed: {res.get('error', 'unknown error')}"
+                events = res.get("events", [])
+                if not events:
+                    return f"No calendar entry matches '{query}' in that window."
+                lines = [e.get("line") for e in events if e.get("line")]
+                if not lines:
+                    return f"No calendar entry matches '{query}' in that window."
+                return f"{len(lines)} match(es) for '{query}': " + "; ".join(lines[:8])
             if name == "google_agenda":
                 day = _google_parse_natural_day(str(args.get("day", "today")))
                 res = g_client.list_events(day=day)
@@ -8719,6 +8828,22 @@ class NeuralBrain:
                 {
                     "type": "function",
                     "function": {
+                        "name": "google_search_events",
+                        "description": "Search Google Calendar by free text across event titles, descriptions and locations ('birthday', 'interview', 'dentist'). Keeps all-day events, so birthdays and anniversaries are found. Use start/end as ISO dates to bound the window (e.g. this month); defaults to the next 12 months.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string", "description": "Free-text keyword, e.g. 'birthday'"},
+                                "start": {"type": "string", "description": "ISO 8601 lower bound, e.g. 2026-10-01 (optional)"},
+                                "end": {"type": "string", "description": "ISO 8601 upper bound, e.g. 2026-10-31 (optional)"}
+                            },
+                            "required": ["query"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
                         "name": "google_agenda",
                         "description": "Read one day of Google Calendar events (today/tomorrow/weekday). Use for agenda/schedule questions.",
                         "parameters": {
@@ -9059,7 +9184,7 @@ class NeuralBrain:
                 "4. Live HUD capability requests: when asked to show a widget, progress, diagnostic, graph, or status on the orb/HUD, first call 'inspect_codebase' on web/index.html or web/app.js. If missing, immediately call 'synthesize_and_inject_hud_feature' with a compact, safe HUD fragment. Do not merely promise progress; deploy the widget in the current HUD session."
                 "5. Deep Browser Control: a live browser agent is available (mcp_puppeteer_query plus native mcp_puppeteer_puppeteer_* tools). To operate ANY website step-by-step: navigate -> read 'page state' (or use evaluate find/click scripts) -> puppeteer_click / puppeteer_fill -> puppeteer_screenshot. After EVERY action, read the returned page state before deciding the next step; a NOT_FOUND click response includes the real clickable list — pick from it instead of guessing selectors."
                 "6. God's Eye View: a live 3D OSINT globe (flights, ships, satellites, earthquakes, CCTV) runs as a JARVIS sidecar. When the user asks to open the globe, the world map, satellite or flight tracking, or 'God's Eye View', call open_board with target 'godseye'."
-                "7. Google Workspace: the user's Calendar and Gmail are live tools. 'next meeting'/'what's next' -> google_next_event; 'agenda'/'schedule'/'today'/'tomorrow' -> google_agenda with day; unread or themed mail ('bank statements', 'Amazon') -> google_mail_digest with keywords; any request to ADD/CREATE/SCHEDULE/BOOK an event -> google_create_event with title and an ISO 8601 start (YYYY-MM-DDTHH:MM local time, end optional). Never invent subjects, times, or events; report an empty result or a denied write honestly."
+                "7. Google Workspace: the user's Calendar and Gmail are live tools. 'next meeting'/'what's next' -> google_next_event; 'agenda'/'schedule'/'today'/'tomorrow' -> google_agenda with day; unread or themed mail ('bank statements', 'Amazon') -> google_mail_digest with keywords; any request to ADD/CREATE/SCHEDULE/BOOK an event -> google_create_event with title and an ISO 8601 start (YYYY-MM-DDTHH:MM local time, end optional). Any request to FIND an event by topic or word ('birthday in October', 'when is my dentist appointment', 'any interview this week') -> google_search_events with the keyword and ISO start/end to bound the window; it also matches all-day entries. Never invent subjects, times, or events; report an empty result or a denied write honestly."
             )
 
             messages = [{"role": "system", "content": sys_content}]
@@ -13592,7 +13717,7 @@ class NoCacheHTTPRequestHandler(SimpleHTTPRequestHandler):
 
             response_payload = json.dumps({
                 "status": "ok",
-                "response": resp_text or "Understood, sir.",
+                "response": resp_text or _BRAIN_NO_ANSWER,
                 "audio_base64": audio_base64,
                 "audio_format": "mp3" if audio_base64 else None,
                 "events": events
