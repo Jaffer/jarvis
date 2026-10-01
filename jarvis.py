@@ -712,6 +712,56 @@ def _load_jarvis_config() -> dict:
 
 JARVIS_CFG = _load_jarvis_config()
 
+# ─── Display timezone ───────────────────────────────────────────────────────
+# Cloud containers run UTC, so an unset TZ silently shifts every "today",
+# greeting, reminder, and event time by the user's UTC offset (a 09:30 IST
+# meeting was being spoken as "4:00 AM"). JARVIS_TIMEZONE pins the display zone
+# to an IANA name like "Asia/Kolkata"; leaving it unset keeps the platform's
+# local time, so desktop behaviour is unchanged.
+_JARVIS_TZ_ENV = "JARVIS_TIMEZONE"
+_jarvis_tz_cache: tuple[str | None, object] | None = None
+
+
+def _jarvis_tz():
+    """Configured IANA timezone, or None to keep the platform's local time.
+
+    An unknown zone name warns once and degrades to local time rather than
+    taking the whole bridge down — a typo must never silence the calendar.
+    """
+    global _jarvis_tz_cache
+    name = (os.environ.get(_JARVIS_TZ_ENV, "") or "").strip()
+    if _jarvis_tz_cache is not None and _jarvis_tz_cache[0] == name:
+        return _jarvis_tz_cache[1]
+    tz = None
+    if name:
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(name)
+        except Exception as e:
+            log.warning("Invalid %s=%r (%s); using system local time instead.",
+                        _JARVIS_TZ_ENV, name, e)
+            tz = None
+    _jarvis_tz_cache = (name, tz)
+    return tz
+
+
+def _jarvis_now() -> datetime:
+    """Timezone-aware 'now' in the display zone (astimezone(None) == local)."""
+    return datetime.now().astimezone(_jarvis_tz())
+
+
+def _jarvis_local(dt: datetime) -> datetime:
+    """Re-express an aware/naive datetime in the display zone.
+
+    A naive value is read as wall-clock time in the display zone (that is what
+    '15:00' means to the user); an aware value is converted, never relabelled.
+    """
+    tz = _jarvis_tz()
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=tz) if tz else dt.astimezone()
+    return dt.astimezone(tz)
+
+
 def _get_lan_ip_candidates() -> list[str]:
     """Ordered, de-duplicated non-loopback IPv4 candidates for mobile sync.
 
@@ -1049,7 +1099,7 @@ def _google_quiet_now(now: datetime | None = None,
                       start_h: int = _GOOGLE_QUIET_START_H,
                       end_h: int = _GOOGLE_QUIET_END_H) -> bool:
     """True when a wall-clock hour falls inside the overnight quiet window."""
-    h = (now or datetime.now()).hour
+    h = (now or _jarvis_now()).hour
     if start_h == end_h:
         return False
     if start_h < end_h:
@@ -1063,7 +1113,7 @@ def _google_parse_natural_day(text: str, now: datetime | None = None) -> datetim
     Bare weekday names resolve to the NEAREST date with that name — past or
     future — so 'what did I miss on friday' (spoken Saturday) finds yesterday.
     """
-    now = now or datetime.now()
+    now = now or _jarvis_now()
     t = (text or "").strip().lower()
     if "tomorrow" in t or "tmrw" in t:
         return (now + timedelta(days=1)).date()
@@ -1160,12 +1210,12 @@ def _google_parse_dt_arg(s: str) -> datetime | None:
         return None
     try:
         dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        return dt if dt.tzinfo else dt.astimezone()
+        return _jarvis_local(dt)
     except ValueError:
         pass
     for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
         try:
-            return datetime.strptime(s, fmt).astimezone()
+            return _jarvis_local(datetime.strptime(s, fmt))
         except ValueError:
             continue
     return None
@@ -1245,22 +1295,24 @@ def _google_parse_create_command(t: str, raw: str | None = None) -> dict | None:
 def _google_format_event_time(summary: str, start: dict, end: dict) -> str:
     """One spoken line: 'Team standup, 9:30 AM to 10:00 AM today'.
 
-    All-day events keep only the date part; timed events render in the LOCAL
-    timezone as %-I:%M %p so TTS never reads a raw ISO timestamp.
+    All-day events keep only the date part; timed events render in the DISPLAY
+    timezone (JARVIS_TIMEZONE) as %-I:%M %p so TTS never reads a raw ISO
+    timestamp. Google always returns UTC offsets, so an unconverted render
+    would shift a 09:30 IST meeting to "4:00 AM" on a UTC host.
     """
     name = (summary or "Untitled event").strip() or "Untitled event"
     sd, ed = (start or {}).get("dateTime"), (end or {}).get("dateTime")
     try:
         if sd:
-            st = datetime.fromisoformat(str(sd).replace("Z", "+00:00")).astimezone()
+            st = _jarvis_local(datetime.fromisoformat(str(sd).replace("Z", "+00:00")))
             line = f"{name}, {st.strftime('%-I:%M %p')}"
             if ed:
-                et = datetime.fromisoformat(str(ed).replace("Z", "+00:00")).astimezone()
+                et = _jarvis_local(datetime.fromisoformat(str(ed).replace("Z", "+00:00")))
                 if et.date() != st.date():
                     line += f" to {et.strftime('%A %-I:%M %p')}"
                 elif (et - st).total_seconds() > 0:
                     line += f" to {et.strftime('%-I:%M %p')}"
-            today = datetime.now().astimezone().date()
+            today = _jarvis_now().date()
             if st.date() == today:
                 line += " today"
             elif st.date() == today + timedelta(days=1):
@@ -1293,7 +1345,7 @@ def _google_should_notify_event(summary: str, start_iso: str,
         return False  # all-day blocks never interrupt
     try:
         st = datetime.fromisoformat(str(start_iso).replace("Z", "+00:00"))
-        now = datetime.now(st.tzinfo) if st.tzinfo else datetime.now().astimezone()
+        now = _jarvis_now() if not st.tzinfo else datetime.now(st.tzinfo)
         return 0 <= (st - now).total_seconds() <= 15 * 60
     except Exception:
         return False
@@ -1323,8 +1375,12 @@ def _google_build_gmail_query(keywords: tuple = (), label_ids: tuple = (),
 
 
 def _google_digest_greeting(now: datetime | None = None) -> str:
-    """Time-of-day prefix so the spoken digest and briefing agree."""
-    h = (now or datetime.now()).hour
+    """Time-of-day prefix so the spoken digest and briefing agree.
+
+    The hour is read in the display zone (JARVIS_TIMEZONE), so a cloud
+    container running UTC no longer greets a 4:47 PM user with "Good morning".
+    """
+    h = (now or _jarvis_now()).hour
     if h < 5:
         return "Overnight update"
     if h < 12:
@@ -1639,12 +1695,12 @@ class GoogleWorkspaceClient:
             return {"ok": False, "error": err, "events": []}
         try:
             if time_min is None or time_max is None:
-                day = day or datetime.now().astimezone().date()
-                start_day = datetime.combine(day, datetime.min.time()).astimezone()
+                day = day or _jarvis_now().date()
+                start_day = _jarvis_local(datetime.combine(day, datetime.min.time()))
                 time_min = time_min or start_day
                 time_max = time_max or (start_day + timedelta(days=1))
-            iso_min = (time_min if time_min.tzinfo else time_min.astimezone()).isoformat()
-            iso_max = (time_max if time_max.tzinfo else time_max.astimezone()).isoformat()
+            iso_min = _jarvis_local(time_min).isoformat()
+            iso_max = _jarvis_local(time_max).isoformat()
             req = cal.events().list(calendarId="primary", timeMin=iso_min, timeMax=iso_max,
                                     maxResults=max(1, min(int(max_results or 20), 50)),
                                     singleEvents=True, orderBy="startTime")
@@ -1672,7 +1728,7 @@ class GoogleWorkspaceClient:
         """The single next timed event from now (skips all-day blocks)."""
         if not self.enabled:
             return {"ok": False, "error": self.disabled_reason or "disabled", "event": None}
-        now = from_dt or datetime.now().astimezone()
+        now = from_dt or _jarvis_now()
         res = self.list_events(time_min=now, time_max=now + timedelta(days=7), max_results=10)
         if not res.get("ok"):
             return {"ok": False, "error": res.get("error", "query failed"), "event": None}
@@ -1701,11 +1757,11 @@ class GoogleWorkspaceClient:
             return {"ok": False, "error": "the event needs a name", "event": None}
         try:
             if start.tzinfo is None:
-                start = start.astimezone()
+                start = _jarvis_local(start)
             if end is None:
                 end = start + timedelta(hours=1)
             elif end.tzinfo is None:
-                end = end.astimezone()
+                end = _jarvis_local(end)
             if end <= start:
                 end = start + timedelta(minutes=30)
         except Exception as e:
@@ -1842,7 +1898,7 @@ class GoogleWorkspaceClient:
     def upcoming_within(self, minutes: int = 15,
                         urgent_keywords: tuple = ()) -> list[dict]:
         """Timed events starting within N minutes (pure read, used by monitors)."""
-        now = datetime.now().astimezone()
+        now = _jarvis_now()
         res = self.list_events(time_min=now, time_max=now + timedelta(minutes=max(1, minutes)),
                                max_results=10)
         if not res.get("ok"):
@@ -1864,7 +1920,7 @@ class GoogleWorkspaceClient:
         read claims a clear calendar — that distinction is what makes a broken
         refresh token visible in the logs instead of silent.
         """
-        now = now or datetime.now().astimezone()
+        now = now or _jarvis_now()
         day = _google_parse_natural_day("today", now.replace(tzinfo=None))
         evs = self.list_events(day=day)
         calendar_ok = bool(evs.get("ok"))
@@ -1912,7 +1968,7 @@ class GoogleWorkspaceClient:
                          mail_keywords: tuple = (),
                          mail_labels: tuple = ()) -> str:
         """The spoken morning briefing (same shape as the calendar digest)."""
-        now = now or datetime.now().astimezone()
+        now = now or _jarvis_now()
         res = self.daily_digest(now, urgent_keywords, mail_keywords, mail_labels)
         if not res.get("ok"):
             return (f"{_google_digest_greeting(now)}, sir. I could not reach your "
@@ -1995,7 +2051,7 @@ class GoogleWorkspaceMonitor:
         attempt (the date is NOT marked) so the briefing arrives as soon as
         conditions clear — the voice drain keeps anything else from being lost.
         """
-        now = datetime.now().astimezone()
+        now = _jarvis_now()
         if self._briefing_done_date == now.date():
             return False
         if (now.hour, now.minute) < (_GOOGLE_BRIEFING_DEFAULT_HOUR,
@@ -4330,15 +4386,47 @@ class TelegramBridge:
     """Two-way text and voice note bridge via Telegram Bot API long-polling.
     Allows user to text JARVIS when unable to talk."""
 
-    def __init__(self, token: str, allowed_chat_id: str = "", brain=None, memory=None):
+    def __init__(self, token: str, allowed_chat_id: str = "", brain=None, memory=None,
+                 state_dir: Path | None = None):
         self.token = token.strip()
         self.allowed_chat_id = str(allowed_chat_id).strip()
         self.brain = brain
         self.memory = memory
         self.active = False
-        self.last_update_id = 0
+        base = Path(state_dir) if state_dir else Path(__file__).resolve().parent / "state"
+        self._offset_path = base / "telegram_offset.json"
+        self.last_update_id = self._load_offset()
         if self.token:
-            log.info("Telegram Bot Bridge configured (Allowed Chat ID: %s)", self.allowed_chat_id or "Any")
+            log.info("Telegram Bot Bridge configured (Allowed Chat ID: %s)%s",
+                     self.allowed_chat_id or "Any",
+                     f", resuming after update {self.last_update_id}" if self.last_update_id else "")
+
+    # ── update-offset persistence ──
+    # Telegram keeps an update queued until getUpdates is called with an offset
+    # PAST it. The offset used to live only in memory, so every restart
+    # (deploy, crash, free-tier spin-down) rewound to 0 and Telegram re-delivered
+    # up to 24 h of backlog — which is how one question produced two replies.
+    def _load_offset(self) -> int:
+        """Last consumed update id, or 0 when absent/unreadable."""
+        try:
+            raw = json.loads(self._offset_path.read_text())
+            return max(0, int(raw.get("last_update_id", 0)))
+        except Exception:
+            return 0
+
+    def _save_offset(self, update_id: int) -> None:
+        """Persist atomically so a crash mid-write cannot corrupt the cursor."""
+        update_id = max(0, int(update_id or 0))
+        if update_id <= self.last_update_id:
+            return
+        self.last_update_id = update_id
+        tmp = self._offset_path.with_suffix(".tmp")
+        try:
+            self._offset_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps({"last_update_id": update_id}))
+            tmp.replace(self._offset_path)
+        except Exception as e:
+            log.warning("Telegram offset persist notice: %s", e)
 
     def start(self):
         if not self.token:
@@ -4414,7 +4502,7 @@ class TelegramBridge:
                         continue
 
                     for item in res.get("result", []):
-                        self.last_update_id = item.get("update_id", self.last_update_id)
+                        update_id = item.get("update_id", self.last_update_id)
                         msg = item.get("message", {})
                         chat = msg.get("chat", {})
                         cid = str(chat.get("id", ""))
@@ -4422,6 +4510,7 @@ class TelegramBridge:
 
                         if self.allowed_chat_id and cid != self.allowed_chat_id:
                             log.warning("Ignored Telegram message from unauthorized Chat ID: %s", cid)
+                            self._save_offset(update_id)
                             continue
 
                         if not self.allowed_chat_id:
@@ -4465,6 +4554,12 @@ class TelegramBridge:
                                     self.send_message("Sir, I encountered an error processing the optical transmission.", chat_id=cid)
                             else:
                                 self.send_message("Vision analysis module is currently offline, sir.", chat_id=cid)
+
+                        # Advance the cursor only once this update is fully handled.
+                        # Persisting before the reply would lose the message if the
+                        # process died mid-request; persisting after keeps delivery
+                        # at-least-once, so a crash retries rather than going silent.
+                        self._save_offset(update_id)
 
             except Exception as e:
                 time.sleep(4)
@@ -8860,8 +8955,8 @@ class NeuralBrain:
             lessons_text = self.memory.read_lessons() if self.memory else ""
             profile_text = self.memory.read_profile() if self.memory else ""
 
-            now_dt = datetime.now()
-            time_str = now_dt.strftime("%A, %B %d, %Y, %I:%M %p")
+            now_dt = _jarvis_now()
+            time_str = now_dt.strftime("%A, %B %d, %Y, %I:%M %p %Z").strip()
             temporal_ctx = (
                 f"\n\nTEMPORAL ANCHOR & SYSTEM CLOCK:\n"
                 f"Current Date & Time: {time_str}. The current year is {now_dt.year} (late 2026). "
@@ -10212,16 +10307,16 @@ class VoiceEngine:
             if not hm:
                 return prefix + "What time should I set for that, sir?"
             day = _google_parse_natural_day(str(intent.get("day") or "today"))
-            start = (datetime.combine(day, datetime.min.time())
-                     + timedelta(hours=int(hm[0]), minutes=int(hm[1]))).astimezone()
-            now = datetime.now().astimezone()
+            start = _jarvis_local(datetime.combine(day, datetime.min.time())
+                                  + timedelta(hours=int(hm[0]), minutes=int(hm[1])))
+            now = _jarvis_now()
             if start <= now + timedelta(minutes=1):
                 start += timedelta(days=1)  # an hour already past can only mean tomorrow
             end = None
             ehm = intent.get("end_hm")
             if ehm:
-                end = (datetime.combine(start.date(), datetime.min.time())
-                       + timedelta(hours=int(ehm[0]), minutes=int(ehm[1]))).astimezone()
+                end = _jarvis_local(datetime.combine(start.date(), datetime.min.time())
+                                    + timedelta(hours=int(ehm[0]), minutes=int(ehm[1])))
                 if end <= start:
                     end += timedelta(days=1)
             elif intent.get("duration_min"):
@@ -10265,7 +10360,7 @@ class VoiceEngine:
         """
         lead = max(1, min(int(intent.get("minutes", 15) or 15), 24 * 60))
         label = _google_clean_spoken_label(str(intent.get("label", ""))) or "your schedule"
-        now = datetime.now().astimezone()
+        now = _jarvis_now()
         fire_at = now + timedelta(minutes=lead)
         message = f"Reminder, sir: {label}."
         if client:
@@ -10279,7 +10374,7 @@ class VoiceEngine:
                     raw_start = str((ev.get("start") or {}).get("dateTime", ""))
                     ev_start = datetime.fromisoformat(raw_start.replace("Z", "+00:00"))
                     if ev_start.tzinfo is None:
-                        ev_start = ev_start.astimezone()
+                        ev_start = _jarvis_local(ev_start)
                     words = {w for w in re.findall(r"[a-z0-9]+", label.lower()) if len(w) > 2}
                     ev_words = set(re.findall(r"[a-z0-9]+", (ev.get("summary") or "").lower()))
                     if words & ev_words:
@@ -14971,7 +15066,8 @@ def main() -> int:
     
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     telegram_chat_id = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
-    _telegram_bridge = TelegramBridge(telegram_token, telegram_chat_id, memory=_memory_manager)
+    _telegram_bridge = TelegramBridge(telegram_token, telegram_chat_id,
+                                      memory=_memory_manager, state_dir=state_dir)
     _call_engine = MobileCallEngine(_telegram_bridge, _memory_manager)
 
     _learning_engine = AutonomousLearningEngine(

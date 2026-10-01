@@ -14,3 +14,5 @@ miniaudio>=1.70
 google-api-python-client>=2.100,<3
 google-auth>=2.20,<3
 google-auth-oauthlib>=1.2,<2
+# ZoneInfo database for JARVIS_TIMEZONE (cloud images ship without /usr/share/zoneinfo).
+tzdata>=2024.1
