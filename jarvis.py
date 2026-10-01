@@ -12135,17 +12135,46 @@ class VoiceEngine:
                 return
 
         # ── Music Playback via YouTube (free; Spotify API requires Premium) ──
-        # "play <song>" / "play some music" opens a YouTube search immediately.
-        music_match = re.search(
-            r"^(?:please\s+)?play\s+(.+?)(?:\s+on\s+(?:youtube|yt))?[.!]?$",
-            t.strip(), re.IGNORECASE
-        )
-        if music_match:
-            track = (music_match.group(1) or "").strip()
+        # Three ways to ask for music, none of which should require the literal
+        # word "play":
+        #   1. a playback verb  — "play back in black", "put on some music"
+        #   2. a music noun      — "search for songs", "find me some tracks"
+        #   3. a music noun + topic — "songs about love", "music for running"
+        # A target that names a VIDEO stays on the normal video path, so asking
+        # for a video is never hijacked into a music search.
+        music_play_re = re.compile(
+            r"^(?:please\s+)?(?:play|put\s+on|listen\s+to)\s+(.+?)"
+            r"(?:\s+on\s+(?:youtube|yt|spotify))?[.!]?$", re.IGNORECASE)
+        music_noun_re = re.compile(
+            r"^(?:please\s+)?(?:find|search(?:\s+for)?|look\s+for|get|show)\s+(?:me\s+)?"
+            r"(?:some\s+|any\s+|good\s+)?(?:songs?|music|tracks?|playlists?)\b"
+            r"(?:\s+(?:about|on|with|like|for|in|of|that))?\s*(.*?)[.!]?$", re.IGNORECASE)
+        music_topic_re = re.compile(
+            r"^(?:please\s+)?(?:some\s+|any\s+)?(?:songs?|music|tracks?)\s+"
+            r"(?:about|on|with|like|for|in|of|to)\s+(.+?)[.!]?$", re.IGNORECASE)
+
+        track, is_music = "", False
+        m_play = music_play_re.match(t.strip())
+        m_noun = music_noun_re.match(t.strip())
+        m_topic = music_topic_re.match(t.strip())
+        if m_play:
+            track, is_music = (m_play.group(1) or "").strip(), True
+        elif m_noun:
+            track, is_music = (m_noun.group(1) or "").strip(), True
+        elif m_topic:
+            track, is_music = (m_topic.group(1) or "").strip(), True
+        # "play a video about cats" is a video request, not a music one — let it
+        # fall through to the normal video/web path instead of searching music.
+        if is_music and track and re.search(r"\bvideos?\b", track, re.IGNORECASE):
+            is_music = False
+
+        if is_music:
             # Strip filler words so "play the song back in black" -> "back in black"
             track = re.sub(r"^(?:the\s+)?(?:song|track|music|video)\s+", "", track, flags=re.IGNORECASE).strip()
+            track = re.sub(r"^(?:some|any|good|a)\s+", "", track, flags=re.IGNORECASE).strip()
             # Generic requests with no specific track -> a good playlist search
-            if not track or track.lower() in {"music", "some music", "a song", "song", "something", "a track"}:
+            if not track or track.lower() in {"music", "some music", "a song", "song", "songs",
+                                              "something", "a track", "me", "for me"}:
                 track = "best music playlist"
             yt_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(track + ' song')}"
             emit_user_subtitle()
