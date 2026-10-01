@@ -31,6 +31,7 @@ Without these, the welcome speech is skipped (other actions may still run).
 | `ELEVENLABS_OUTPUT_FORMAT` | e.g. `pcm_24000` (must match playback expectations). |
 | `ELEVENLABS_PCM_SAMPLE_RATE` | Override PCM sample rate if it differs from the format name. |
 | `JARVIS_WELCOME_CACHE_DIR` | Custom folder for cached welcome WAV (default: `.cache/jarvis_welcome/` under the project). |
+| `JARVIS_TIMEZONE` | IANA timezone the clock, greetings and calendar times are spoken in (e.g. `Asia/Kolkata`). **Cloud only matters:** containers run UTC, so without this a 09:30 IST meeting is announced as "4:00 AM". Unset on a public deployment falls back to `Asia/Kolkata`; on desktop it stays on system local time. Needs `tzdata` (in `requirements.txt`). |
 | `JARVIS_INPUT_DEVICE` | Optional mic override: **integer** index or **substring** of the device name. If unset, the script uses the Windows default; when that mic is silent, it auto-picks the loudest working input. List devices: `python -c "import sounddevice as sd; print(sd.query_devices())"`. |
 | `CLAUDE_CODE_URL` | URL opened for Claude in Chrome (default: new chat). |
 | `TASARADAR_URL` | URL opened for Tasaradar in Chrome (default: `https://tasaradar.com`). `BINANCE_BTC_URL` is still read as a fallback if set. |
@@ -71,6 +72,23 @@ Edit the constants at the top of `jarvis.py`:
 - **No reaction to claps:** Lower `SPIKE_RATIO` slightly or speak/clap closer to the mic.
 - **Spam logs:** Raise `SPIKE_RATIO` or `COOLDOWN_S`.
 - **No welcome speech:** Set `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` in `.env` and restart the terminal so variables load.
+
+## ☁️ Running on Render (and why Telegram goes quiet)
+
+**A free Render instance cannot keep a Telegram bot alive on its own.** Render suspends a free service after ~15 minutes without an **inbound** HTTP request. JARVIS's Telegram bridge long-polls `api.telegram.org`, which is *outbound* and therefore does not count as activity. So after a quiet stretch the container freezes mid-`getUpdates`, Telegram queues your message, and nothing is left to fetch it — the bot looks broken but is merely asleep.
+
+**To wake it:** open `https://<your-service>/api/health` in a browser, wait for the boot sequence, then send your message. The queued backlog is delivered at that point (Telegram retains updates for 24 h).
+
+**To stop it happening,** point a free external monitor at that URL every 10 minutes — the interval must stay under Render's 15-minute threshold:
+
+- [UptimeRobot](https://uptimerobot.com) → HTTP monitor, 10-minute interval
+- [cron-job.org](https://cron-job.org) → `https://<your-service>/api/health`, every 10 minutes
+
+A suspended process cannot wake itself, so the ping **must** come from outside. The alternative is a paid always-on instance.
+
+**Diagnosing it in the logs:** if the last line is hours old and there is no `Detected service running on port 10000` banner near the end, the instance was asleep. A healthy boot logs `Display timezone: <zone> (source: ...)`, which also confirms which timezone the deployment resolved.
+
+**Disk is ephemeral.** Render wipes the filesystem on every redeploy and spin-down, so anything cached on disk — including `state/telegram_offset.json` (the Telegram update cursor) and `.google-workspace-token.json` — is lost when the container restarts. The offset cursor therefore only protects against replays while an instance stays up, or on a desktop host; attach a persistent disk if you need it to survive. The Google token workaround is described under **Google Workspace** below.
 
 ## 🛰️ God's Eye View (bundled live OSINT globe)
 

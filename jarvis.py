@@ -15241,6 +15241,18 @@ def main() -> int:
     _telegram_bridge.brain = _neural_brain
     _telegram_bridge.start()
 
+    if JARVIS_PUBLIC_DEPLOYMENT:
+        # Render suspends a free service after ~15 min without an INBOUND request.
+        # Telegram long-polling is outbound and does not count, so the poll thread
+        # freezes and queued messages go unfetched until something external pings
+        # the service. Say so at boot, because the symptom (a silent bot) looks
+        # like a broken bridge rather than a sleeping host.
+        log.warning("Cloud instance: this host sleeps after ~15 min without an "
+                    "inbound request, which will pause the Telegram bridge. Point "
+                    "an external monitor at %s/api/health every 10 minutes to "
+                    "keep it awake.", (os.environ.get("RENDER_EXTERNAL_URL")
+                                       or "https://<your-service>").rstrip("/"))
+
     # 6. Start System Telemetry broadcaster
     _start_telemetry_broadcaster(2.5)
 
