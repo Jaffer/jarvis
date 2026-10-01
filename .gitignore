@@ -16,6 +16,13 @@ memory/00 - Biometrics/*.npy
 *.token
 .jarvis_token
 
+# Autonomous capabilities JARVIS writes for itself (runtime artifacts).
+# Deliberately NOT committed: they are machine-local, generated code, and the
+# registry recreates the directory at boot. Commit them only if you want a
+# self-built feature to survive a redeploy on an ephemeral filesystem.
+capabilities/*.py
+capabilities/manifest.json
+
 # God's Eye View sidecar (vendored in godseye/, see godseye/JARVIS-INTEGRATION.md)
 godseye/node_modules/
 godseye/.logs/

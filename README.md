@@ -130,6 +130,26 @@ Say *"learn hacking"* and JARVIS researches the topic in the background while yo
 - **Permanent deletion stays separate:** *"remove the progress bar widget"* (the words *widget / component / feature / panel*) routes to the existing permanent-removal path, which also cleans the persisted manifest from `web/app.js` and `web/index.html`.
 - **Offline tests:** `python3 scratch/test_learning_feature.py` (36 network-free checks — grammar claims and fall-throughs, widget builder + HUD validator, learner against a fake fetch, persisted-manifest replacement, handler replies).
 
+## 🧬 Autonomous Capability Evolution (JARVIS writes its own voice features)
+
+JARVIS can now build a **new capability for itself** when you keep asking for something it cannot do — the same shape as the auto-play music feature, but generated at runtime instead of hand-written.
+
+- **How it triggers:** when an utterance reaches the router and no built-in handler or self-written capability claims it, the request is logged. The *same* request heard **twice** is treated as a pattern (one stray utterance is not enough), and JARVIS asks the configured brain model to write a capability module for it.
+- **Where it goes:** one file per capability in `capabilities/`. **Never** into `jarvis.py` — a bad generation can only break itself, and rollback is deleting a file, with no merge or revert to untangle.
+- **The contract:** each module exports `CAPABILITY = {"name", "description", "intents": [regex…]}` and `handle(text, match) -> str`, returning one short spoken sentence.
+- **Safety net (the reason this is safe to leave on):**
+  - validated in an **isolated subprocess** before it is ever imported live, so a capability that crashes, hangs, or segfaults on import cannot take JARVIS down;
+  - an 8-second wall-clock ceiling on that validation — a blocking module is a *rejection*, not a hang;
+  - banned modules/idioms (`subprocess`, `socket`, `ctypes`, `exec`, `eval`, `__import__`, …) are rejected statically;
+  - syntax, contract, and regex compilation are checked; a failure writes **no file at all**;
+  - a handler that raises at runtime degrades to a spoken apology instead of killing the voice loop;
+  - a hard ceiling of **40** capabilities stops runaway self-growth.
+- **Voice control:**
+  - *"what capabilities"* / *"list capabilities"* — reads back what it has built;
+  - *"remove the capability `<name>`"* / *"undo the feature `<name>`"* — deletes it (works even with autonomy off).
+- **Opt-in:** generation requires `JARVIS_AUTONOMY=1` (default **off**). Installed capabilities always load, even with autonomy off, so turning the switch off stops *new* self-writing without breaking what already exists.
+- **Persistence caveat:** `capabilities/` is gitignored and lives on the local disk. On Render's **ephemeral** filesystem a self-built capability survives a process restart but **not a redeploy** — attach a persistent disk if you want them kept.
+
 ## 🧠 Listener Intelligence (voice misrouting defence)
 
 Bystander speech in another language was being transcribed and routed as your command. The fix is three cheap gates before the router ever sees a transcript:

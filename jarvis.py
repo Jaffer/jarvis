@@ -9743,6 +9743,10 @@ class VoiceEngine:
         self.brain = brain
         self.learning_engine = learning_engine
         self.persona_engine = persona_engine
+        # Autonomous capability evolution — self-written voice features. Loaded
+        # eagerly so a capability survives a restart; generation stays gated on
+        # JARVIS_AUTONOMY=1 (see _autonomy_enabled).
+        self._init_capability_engine()
         self._ptt_key = JARVIS_CFG.get("ptt_key", "f4")
         self._mic_mode = JARVIS_CFG.get("mic_mode", "handsfree")
         self._stt_model = None
@@ -12728,6 +12732,16 @@ class VoiceEngine:
                 self.speak("Self-improvement engine is offline, sir.")
             return
 
+        # ── 7b. Autonomous Capability Evolution ──
+        # JARVIS-written capabilities get first refusal on the utterance, ahead
+        # of the neural brain. If none claims it and the owner has enabled
+        # autonomy, the gap is logged and, once it has recurred enough times to
+        # look deliberate, a new capability is generated and validated in
+        # isolation. Every step is reversible via `undo capability`.
+        handled = self._try_autonomous_capability(transcript, t, origin)
+        if handled:
+            return
+
         # ── 8. Autonomous Neural Brain Reasoning & Tools ──
         if self.brain:
             t_start = time.perf_counter()
@@ -12787,6 +12801,163 @@ class VoiceEngine:
         emit_user_subtitle()
         self.speak(f"I heard: {transcript}")
         self.bus.set_state("idle")
+
+    # ═══════════════════════════════════════════════════════════════════
+    #  AUTONOMOUS CAPABILITY EVOLUTION
+    #  JARVIS can write new voice capabilities for itself when it keeps
+    #  hearing requests it cannot serve. Generation is delegated to the
+    #  configured model endpoint, validated in an isolated subprocess, and
+    #  installed into capabilities/ — never into this file. Opt-in via
+    #  JARVIS_AUTONOMY=1 (off by default).
+    # ═══════════════════════════════════════════════════════════════════
+    def _init_capability_engine(self) -> None:
+        from capability_registry import CapabilityRegistry
+        try:
+            self.capability_registry = CapabilityRegistry(Path(__file__).resolve().parent)
+            self.capability_registry.reload()
+        except Exception as exc:
+            log.warning("Autonomous capability registry unavailable: %s", exc)
+            self.capability_registry = None
+        self._capability_gaps: dict[str, int] = {}
+        self._capability_history: list[dict] = []
+
+    def _autonomy_enabled(self) -> bool:
+        if self.capability_registry is None:
+            return False
+        raw = str(os.getenv("JARVIS_AUTONOMY", "0")).strip().lower()
+        return raw in ("1", "true", "yes", "on")
+
+    def _try_autonomous_capability(self, transcript: str, t: str, origin: str = "mic") -> bool:
+        """Serve the utterance from a self-written capability, or record a gap.
+
+        Returns True when JARVIS handled the command and the router should stop.
+
+        `origin` is threaded through from the router because `emit_user_subtitle`
+        is a closure over _route_voice_command's locals and is not reachable from
+        here; the same suppression rule is reproduced inline.
+        """
+        if self.capability_registry is None:
+            return False
+        t = (t or "").strip().lower()
+        if not t:
+            return False
+
+        # ── management verbs (always available, even with autonomy off) ──
+        if re.search(r"\b(?:undo|remove|delete|forget)\s+(?:the\s+)?(?:capability|feature)\b", t):
+            name = re.search(r"(?:capability|feature)\s+([a-z0-9_]{3,64})", t)
+            self.speak(f"Removing the {name.group(1)} capability, sir." if name
+                       else "Tell me which capability to remove, sir.")
+            if name:
+                res = self.capability_registry.remove(name.group(1))
+                self.speak("It is gone, sir." if res.get("ok")
+                           else f"I could not find that one, sir. {res.get('error','')}")
+            self.bus.set_state("idle")
+            return True
+        if re.search(r"\b(?:what|list|which)\s+capabilit", t) or t.strip() in ("capabilities", "features"):
+            caps = self.capability_registry.describe()
+            if caps:
+                # Prefer the model's one-line description; the slug is only a
+                # fallback because "auto_start_a_party" is not speakable.
+                spoken_list = [c["description"] or c["name"].replace("_", " ")
+                               for c in caps]
+                self.speak(f"I have built {len(caps)} capabilities, sir: "
+                           f"{'; '.join(spoken_list)}.")
+            else:
+                self.speak("I have not built any capabilities of my own yet, sir.")
+            self.bus.set_state("idle")
+            return True
+
+        # ── dispatch to a self-written capability ──
+        cap, match = self.capability_registry.match(t)
+        if cap:
+            # Mirrors emit_user_subtitle() from _route_voice_command, which is a
+            # closure over that function's locals and out of scope here.
+            if origin != "websocket":
+                broadcast_ui_event({"type": "SUBTITLE", "role": "user", "text": transcript})
+            reply = self.capability_registry.invoke(cap, t, match)
+            log.info("🧬 [AUTONOMY] Capability '%s' handled: '%s'", cap["name"], t[:60])
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": reply})
+            self.speak(reply)
+            self.bus.set_state("idle")
+            return True
+
+        if self._autonomy_enabled():
+            self._note_capability_gap(t)
+        return False
+
+    def _note_capability_gap(self, t: str) -> None:
+        """Count an unserved request; build a capability once it repeats."""
+        key = re.sub(r"[^a-z ]", "", t)[:90].strip()
+        if len(key) < 6:
+            return
+        self._capability_gaps[key] = self._capability_gaps.get(key, 0) + 1
+        if self._capability_gaps[key] < 2:      # one stray utterance is not a pattern
+            return
+        if len(self.capability_registry) >= 40:  # hard ceiling on self-growth
+            log.warning("Autonomy ceiling reached (40 capabilities); not generating more.")
+            return
+        try:
+            self._generate_capability(key)
+        except Exception as exc:
+            log.warning("Capability generation failed: %s", exc)
+
+    def _generate_capability(self, utterance: str) -> dict:
+        """Ask the configured model for a capability module, then install it."""
+        if not (self.brain and getattr(self.brain, "client", None)):
+            return {"ok": False, "error": "No model endpoint is configured."}
+        slug = re.sub(r"[^a-z0-9]+", "_", utterance.lower()).strip("_")
+        slug = ("auto_" + slug)[:40].strip("_")
+        spec = (
+            'Write a Python module for a J.A.R.V.I.S. voice capability.\n\n'
+            f'The spoken request it must handle: "{utterance}"\n\n'
+            'Reply with ONLY the module source. No markdown fences, no commentary.\n'
+            'Required shape:\n\n'
+            'import re\n\n'
+            'CAPABILITY = {\n'
+            f'    "name": "{slug}",\n'
+            '    "description": "One short sentence describing the capability.",\n'
+            '    "intents": [r"^\\s*<regex matching the request and natural variations>\\s*$"],\n'
+            '}\n\n'
+            'def handle(text, match):\n'
+            '    # Return ONE short spoken sentence ending in "sir." No markdown.\n'
+            '    return "..."\n'
+        )
+        try:
+            raw = self.brain.query_stream(spec) or ""
+        except Exception as exc:
+            return {"ok": False, "error": f"generation failed: {exc}"}
+        source = self._extract_python(raw)
+        if not source:
+            return {"ok": False, "error": "The model returned no usable code."}
+        # Force the name to our slug so the file and registry stay consistent.
+        source = re.sub(r'("name"\s*:\s*)["\'][^"\']*["\']',
+                        lambda m: f'{m.group(1)}"{slug}"', source, count=1)
+        result = self.capability_registry.install(slug, source)
+        result["request"] = utterance
+        if result.get("ok"):
+            self._capability_history.append({"name": slug, "request": utterance,
+                                            "at": time.strftime("%Y-%m-%d %H:%M:%S")})
+            log.info("🧬 [AUTONOMY] Built capability '%s' for '%s'", slug, utterance[:50])
+            broadcast_ui_event({"type": "MEMORY_UPDATE",
+                                "note": f"Self-built capability: {slug}"})
+        return result
+
+    @staticmethod
+    def _extract_python(raw: str) -> str:
+        """Pull module source out of a reply, fenced or not."""
+        if not raw:
+            return ""
+        fence = re.search(r"```(?:python)?\s*(.+?)```", raw, re.DOTALL)
+        text = fence.group(1) if fence else raw
+        start = text.find("import re")
+        if start == -1:
+            start = text.find("CAPABILITY")
+            if start == -1:
+                return ""
+            text = text[text.rfind("\n", 0, start) + 1:]
+        else:
+            text = text[start:]
+        return text.strip()
 
     def interrupt(self, reason: str = "user_barge_in") -> None:
         """Instantly halt active speech, purge all queued sentences, and abort hardware playback in <25ms."""
