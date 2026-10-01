@@ -990,7 +990,11 @@ class MemoryManager:
 #    (every method returns ok:False "disabled") without touching OAuth files.
 #  - Render/cloud: same install flow, or paste the token JSON into
 #    GOOGLE_WORKSPACE_TOKEN_JSON (.env or dashboard) — mirrors the existing
-#    GDRIVE_CREDENTIALS_CONTENT provisioning pattern.
+#    GDRIVE_CREDENTIALS_CONTENT provisioning pattern. For the ONE-TIME consent
+#    on a host with no browser and no writable file, paste the Desktop client
+#    into GOOGLE_WORKSPACE_CLIENT_JSON and say 'connect google': JARVIS shows
+#    the consent link, you approve on your own device, and read the localhost
+#    redirect address back (the state is verified before the code is spent).
 #  - Tests: pure helpers are module-level so they import without side effects;
 #    a stub API surface lets the whole bridge run offline.
 _GOOGLE_BRIDGE_SCOPES = (
@@ -1000,6 +1004,10 @@ _GOOGLE_BRIDGE_SCOPES = (
 _GOOGLE_BRIDGE_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
 _GOOGLE_BRIDGE_WRITE_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 _GOOGLE_WORKSPACE_TOKEN_ENV = "GOOGLE_WORKSPACE_TOKEN_JSON"
+# Cloud instances have no way to place a FILE next to jarvis.py, so the OAuth
+# Desktop client can also arrive as inline JSON (dashboard Secret/Env var).
+# This is what makes the one-time consent possible ON Render.
+_GOOGLE_WORKSPACE_CLIENT_ENV = "GOOGLE_WORKSPACE_CLIENT_JSON"
 _GOOGLE_BRIDGE_ENABLED_ENV = "JARVIS_GOOGLE_BRIDGE_ENABLED"
 _GOOGLE_BRIDGE_WRITE_ENV = "JARVIS_GOOGLE_ALLOW_WRITE"
 _GOOGLE_BRIDGE_TOKEN_FILE = ".google-workspace-token.json"
@@ -1355,6 +1363,8 @@ class GoogleWorkspaceClient:
         self._calendar = None
         self._gmail = None
         self._auth_error: str | None = None
+        self._env_client_file: str | None = None  # inline-client temp file, if used
+        self._env_client_src: str | None = None  # env value that produced it
         if self.enabled and self._api is None:
             self._provision_token_from_env()
         _subsystem_health.set_status(
@@ -1365,6 +1375,140 @@ class GoogleWorkspaceClient:
     # ── token provisioning (env first, files second, browser last) ──
     def token_path(self) -> Path:
         return self.root / self.TOKEN_FILE
+
+    def _client_file(self) -> Path | None:
+        """Path to a usable OAuth Desktop client, or None when there is none.
+
+        Local installs keep credentials.json beside jarvis.py. A cloud host
+        (Render) cannot drop a file, so GOOGLE_WORKSPACE_CLIENT_ENV carries the
+        same JSON inline; we write it into a private temp file ONCE and reuse it,
+        because google-auth wants a real path. That temp file is chmod 600 and
+        never leaves this process.
+        """
+        env = os.environ.get(_GOOGLE_WORKSPACE_CLIENT_ENV, "").strip()
+        if env:
+            try:
+                raw = json.loads(env)
+                # ONLY a Desktop ("installed") client can receive the 127.0.0.1
+                # loopback redirect this whole flow depends on. A "web" client
+                # would make Google hand the code to a public https origin —
+                # which is precisely the token-theft shape we refuse. Rejecting
+                # it here is why the online setup needs Desktop credentials.
+                if "installed" not in raw:
+                    log.warning("Google Workspace: %s must be a Desktop (installed) "
+                                "OAuth client — download that from the console.",
+                                _GOOGLE_WORKSPACE_CLIENT_ENV)
+                    return None
+                cached = getattr(self, "_env_client_file", None)
+                # Rebuild when the env var CHANGES, so a corrected value on the
+                # dashboard is picked up without a restart.
+                if cached is None or not Path(cached).exists() or \
+                        getattr(self, "_env_client_src", None) != env:
+                    fd, path = tempfile.mkstemp(prefix="jarvis-gclient-", suffix=".json")
+                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                        json.dump(raw, fh)
+                    try:
+                        os.chmod(path, 0o600)
+                    except OSError:
+                        pass
+                    cached = path
+                    self._env_client_file = cached
+                    self._env_client_src = env
+                return Path(cached)
+            except Exception as e:
+                log.warning("Google Workspace: ignoring malformed %s (%s).",
+                            _GOOGLE_WORKSPACE_CLIENT_ENV, e)
+        client_file = self.root / "credentials.json"
+        return client_file if client_file.exists() else None
+
+    def authorize_url(self, scopes: list | None = None) -> tuple[str, str]:
+        """Build a Google consent URL for the one-time browser step (online).
+
+        Returns (auth_url, state). The caller must complete the SAME local
+        loopback redirect through finish_oauth(url) — Google only returns the
+        code to http://127.0.0.1:<ephemeral>, and the code is single-use. `state`
+        is echoed back by Google; finish_oauth() rejects a mismatched one so a
+        stale or foreign redirect can never mint someone else's token.
+        """
+        try:
+            from google_auth_oauthlib.flow import Flow
+        except Exception as e:
+            return "", f"Google API libraries missing ({e}). Run: pip install -r requirements.txt"
+        client_file = self._client_file()
+        if client_file is None:
+            return "", ("no OAuth client — set GOOGLE_WORKSPACE_CLIENT_JSON or put "
+                        "credentials.json next to jarvis.py")
+        use_scopes = list(scopes) if scopes else self._consent_scopes()
+        try:
+            flow = Flow.from_client_secrets_file(
+                str(client_file), scopes=use_scopes,
+                redirect_uri="http://127.0.0.1:0")
+            url, state = flow.authorization_url(
+                access_type="offline", prompt="consent", include_granted_scopes="true")
+            return url, state
+        except Exception as e:
+            return "", f"authorize_url failed: {e}"
+
+    def finish_oauth(self, redirect_url: str, expected_state: str = "",
+                     timeout: float = 20.0) -> tuple[bool, str]:
+        """Complete the browser consent: exchange the code for a cached token.
+
+        `redirect_url` is the LOOPBACK address the browser landed on
+        (starts with http://127.0.0.1 or http://localhost); pasting anything
+        else is refused outright. On success the token is cached to
+        .google-workspace-token.json and the granted scopes are used as-is.
+        """
+        text = str(redirect_url or "").strip()
+        if not (text.startswith("http://127.0.0.1") or text.startswith("http://localhost")):
+            return False, "refused: paste the localhost redirect address only"
+        if "code=" not in text:
+            return False, "no authorization code in that address (?code=... missing)"
+        # Bind `state` BEFORE touching the network or any secret. The code is
+        # single-use, so a redirect from someone else's (or a stale) consent
+        # must never be spent at Google only to be rejected afterwards.
+        got_state = ""
+        try:
+            got_state = str(urllib.parse.parse_qs(
+                urllib.parse.urlsplit(text).query).get("state", [""])[0])
+        except Exception:
+            got_state = ""
+        if expected_state:
+            if got_state != expected_state:
+                return False, "state mismatch — use the redirect from the newest authorize_url link"
+        else:
+            log.warning("Google Workspace: OAuth redirect accepted without a state to "
+                        "verify it against (no sign-in is currently pending).")
+        try:
+            from google_auth_oauthlib.flow import Flow
+        except Exception as e:
+            return False, f"Google API libraries missing ({e}). Run: pip install -r requirements.txt"
+        client_file = self._client_file()
+        if client_file is None:
+            return False, ("no OAuth client — set GOOGLE_WORKSPACE_CLIENT_JSON or "
+                           "put credentials.json next to jarvis.py")
+        try:
+            flow = Flow.from_client_secrets_file(
+                str(client_file), scopes=self._consent_scopes(),
+                redirect_uri="http://127.0.0.1:0")
+            flow.fetch_token(authorization_response=text, timeout=timeout)
+            creds = flow.credentials
+            self.token_path().write_text(creds.to_json(), encoding="utf-8")
+            log.info("Google Workspace: OAuth install complete via authorize_url (token cached).")
+            return True, "ok"
+        except Exception as e:
+            return False, f"token exchange failed: {e}"
+
+    def _consent_scopes(self) -> list:
+        """The exact scope set authorize_url/finish_oauth agree on."""
+        scopes = list(_GOOGLE_BRIDGE_SCOPES)
+        allow_mark = os.environ.get("JARVIS_GOOGLE_ALLOW_MARK_READ", "0").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if allow_mark and _GOOGLE_BRIDGE_MODIFY_SCOPE not in scopes:
+            scopes.append(_GOOGLE_BRIDGE_MODIFY_SCOPE)
+        if _google_write_enabled() and _GOOGLE_BRIDGE_WRITE_SCOPE not in scopes:
+            scopes.append(_GOOGLE_BRIDGE_WRITE_SCOPE)
+        return scopes
 
     def _provision_token_from_env(self) -> bool:
         raw = os.environ.get(_GOOGLE_WORKSPACE_TOKEN_ENV, "").strip()
@@ -1430,9 +1574,19 @@ class GoogleWorkspaceClient:
                 else:
                     creds = None
             if not creds or not creds.valid:
-                client_file = self.root / "credentials.json"
-                if not client_file.exists():
-                    return False, "credentials.json not found — run the one-time OAuth install first"
+                client_file = self._client_file()
+                if client_file is None:
+                    return False, ("no OAuth client — run 'connect google' for the guided "
+                                   "consent, set GOOGLE_WORKSPACE_CLIENT_JSON, or paste a "
+                                   "token into GOOGLE_WORKSPACE_TOKEN_JSON")
+                # This legacy path needs a BROWSER on THIS machine, so it is
+                # only attempted when one can plausibly appear. A headless
+                # cloud host must never hang here waiting for a browser that
+                # cannot open — the guided link flow is the online path.
+                if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+                        or sys.platform in ("win32", "darwin")):
+                    return False, ("headless host — no browser for the local consent flow. "
+                                   "Say 'connect google' and read back the localhost address.")
                 flow = InstalledAppFlow.from_client_secrets_file(str(client_file), scopes)
                 creds = flow.run_local_server(port=0, prompt="consent")
                 tpath.write_text(creds.to_json(), encoding="utf-8")
@@ -1451,6 +1605,14 @@ class GoogleWorkspaceClient:
             log.warning("Google Workspace auth notice: %s", _google_redact(msg))
             _subsystem_health.set_status("google_workspace", "ERROR", error=msg[:160])
             return False, msg
+
+    def is_connected(self) -> bool:
+        """True when a usable token is already cached (cheap, no network)."""
+        try:
+            raw = json.loads(self.token_path().read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        return bool(raw.get("refresh_token"))
 
     def _services(self):
         with self._lock:
@@ -1982,13 +2144,28 @@ def parse_google_workspace_command(t: str, raw: str | None = None) -> dict | Non
 
     Shapes: briefing / next_event / agenda / digest / digest_filtered /
     mail_search / unread_count-equivalent digest / remind_event / create_event /
-    quiet_hours / snooze / pending. Never raises; None when the phrase is not
-    ours. `raw` is the original-cased transcript (only the created event's
-    title consumes it).
+    quiet_hours / snooze / pending / oauth_setup. Never raises; None when the
+    phrase is not ours. `raw` is the original-cased transcript (only the
+    created event's title consumes it).
     """
     t = (t or "").strip().lower()
     if not t or _google_intent_excludes(t):
         return None
+    # A pasted OAuth redirect is DATA, not a request. Its scope contains
+    # "calendar.readonly", which the noun gate below would happily read as a
+    # calendar question. The router claims the loopback redirect before ever
+    # calling parse(), but parse must also refuse it standalone — anything
+    # shaped like a URL carrying a code= parameter is never one of our intents.
+    if re.search(r"\bhttps?://", t) and "code=" in t:
+        return None
+    # OAuth install phrases bypass the noun gate below: "connect google" has
+    # no calendar/mail noun, and asking for the grant must never swallow a
+    # redirect the user is pasting in the same breath.
+    if re.search(r"\b(?:connect|link|setup|set up|authori[sz]e|authenticate|"
+                 r"enable|hook up)\s+(?:my\s+|the\s+|to\s+)?(?:google|gmail|calendar)",
+                 t):
+        if "localhost" not in t and "127.0.0.1" not in t:
+            return {"kind": "oauth_setup"}
     needs_google = any(w in t for w in (
         "calendar", "calender", "meeting", "meetings", "appointment", "appointments",
         "event", "events", "schedule", "scheduled", "agenda", "briefing",
@@ -9871,6 +10048,60 @@ class VoiceEngine:
     # Quiet-hour items drain FIRST (except for an explicit snooze), so missed
     # events/mail surface as one spoken block before the direct answer —
     # nothing is ever silently lost.
+    def _handle_google_oauth_setup(self) -> str:
+        """Guided answer for 'connect google / set up gmail': shows the link.
+
+        The link is also broadcast as a HUD event so the phone/laptop screen —
+        not just the spoken channel — carries something clickable. Never prints
+        anything secret (only the public Google consent URL + our state token).
+        """
+        client = get_google_client()
+        if client is not None and client.is_connected():
+            return ("Your Google account is already connected, sir — Calendar and "
+                    "mail are live. If you want to re-consent, say 'reconnect google'.")
+        url, state = ("", "OAuth bridge is offline")
+        if client is not None:
+            try:
+                url, state = client.authorize_url()
+            except Exception as exc:
+                log.debug("OAuth authorize_url notice: %s", exc)
+        if not url:
+            return ("I could not build the Google sign-in link, sir — the OAuth "
+                    "bridge has no client. Set GOOGLE_WORKSPACE_CLIENT_JSON or put "
+                    "credentials.json next to me, and make sure the Python Google "
+                    "libraries are installed.")
+        self._google_oauth_pending_state = state
+        try:
+            broadcast_ui_event({
+                "type": "GOOGLE_OAUTH_LINK",
+                "url": url,
+                "message": "Tap to connect Google Calendar + Gmail (one-time sign-in).",
+            })
+        except Exception as exc:
+            log.debug("OAuth link broadcast notice: %s", exc)
+        if self.memory:
+            self.memory.log_event("Voice: guided Google OAuth link issued")
+        return ("I have put the Google sign-in link on your screen, sir. Open it "
+                "in your browser, approve Calendar and Gmail, and then read back "
+                "the localhost address it lands on — starting with http, "
+                "127.0.0.1. That address carries your one-time code, and only "
+                "then am I connected.")
+
+    def _handle_google_oauth_redirect(self, transcript: str) -> tuple[bool, str]:
+        """Handle a pasted loopback redirect: finish the exchange in one breath."""
+        client = get_google_client()
+        if client is None:
+            return False, ("The OAuth bridge is offline, sir — I have nowhere to "
+                           "finish the sign-in.")
+        ok, detail = client.finish_oauth(
+            transcript, getattr(self, "_google_oauth_pending_state", ""))
+        if ok:
+            self._google_oauth_pending_state = ""
+            return True, ("Connected, sir — Calendar and Gmail are live. Try "
+                          "'what is my next meeting'.")
+        return False, (f"That address did not complete the sign-in, sir ({detail}). "
+                       "Open the link again and read the full localhost address.")
+
     def _handle_google_workspace(self, intent: dict, transcript: str) -> str:
         global _google_snooze_until
         kind = str((intent or {}).get("kind") or "")
@@ -11979,7 +12210,24 @@ class VoiceEngine:
         # Voice owns the UX. Every spoken query drains the monitor's pending
         # digest FIRST (quiet-hour or missed items surface as one block), then
         # answers the direct question — so nothing is silently lost.
+        # The loopback redirect is claimed HERE, before the intent router could
+        # swallow it as a calendar question: it is the only URL starting with
+        # http://127.0.0.1 or http://localhost that carries ?code=.
+        if t.startswith(("http://127.0.0.1", "http://localhost")) and "code=" in t:
+            emit_user_subtitle()
+            _, resp = self._handle_google_oauth_redirect(transcript)
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
         google_intent = parse_google_workspace_command(t, transcript)
+        if google_intent and google_intent.get("kind") == "oauth_setup":
+            emit_user_subtitle()
+            resp = self._handle_google_oauth_setup()
+            broadcast_ui_event({"type": "SUBTITLE", "role": "jarvis", "text": resp})
+            self.speak(resp)
+            self.bus.set_state("idle")
+            return
         if google_intent:
             emit_user_subtitle()
             resp = self._handle_google_workspace(google_intent, transcript)

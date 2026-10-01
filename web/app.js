@@ -344,6 +344,29 @@ function showToast(message, duration = 3000) {
   setTimeout(() => toastEl.classList.remove("visible"), duration);
 }
 
+// OAuth toasts carry a trusted clickable link built entirely in code (the
+// only innerHTML writer in the HUD): the consent URL is allow-listed to
+// accounts.google.com and the state token is dropped before display.
+function showOAuthToast(url) {
+  if (!toastEl) return;
+  const safe = /^https:\/\/accounts\.google\.com\/o\/oauth2\//.test(String(url || ""));
+  if (!safe) {
+    toastEl.textContent = "🔗 Google sign-in link unavailable";
+  } else {
+    toastEl.innerHTML = "";
+    const lead = document.createElement("span");
+    lead.textContent = "🔗 Google sign-in ready — ";
+    const link = document.createElement("a");
+    link.setAttribute("href", url);   // href verified above; no raw string concat
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = "tap to connect Calendar + Gmail";
+    toastEl.append(lead, link);
+  }
+  toastEl.classList.add("visible");
+  setTimeout(() => toastEl.classList.remove("visible"), safe ? 12000 : 3000);
+}
+
 // ——— VOICE STATE INDICATOR ———
 function setVoiceState(state) {
   if (!voiceRingEl) return;
@@ -1860,6 +1883,12 @@ function handleServerEvent(data) {
       }[data.reason] || "ignored";
       const who = data.speaker && data.speaker !== "Unknown Guest" ? ` (${data.speaker})` : "";
       showToast(`🎧 ${why}${who}`, 2600);
+      break;
+    }
+
+    // One-time Google OAuth: clickable consent link (never secret material).
+    case "GOOGLE_OAUTH_LINK": {
+      showOAuthToast(data.url || "");
       break;
     }
   }
